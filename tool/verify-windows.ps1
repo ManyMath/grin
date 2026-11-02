@@ -12,7 +12,10 @@ param(
   [string]$Fork = $env:GRIN_WALLET_LOCAL,
   [switch]$Flutter
 )
-$ErrorActionPreference = 'Stop'
+# Native tools write progress to stderr (rustup's "info:" lines), which
+# PowerShell 5.1 would turn into terminating errors under 'Stop' when the
+# output is redirected. Exit codes are checked explicitly instead.
+$ErrorActionPreference = 'Continue'
 $root = Split-Path -Parent $PSScriptRoot
 if ($Fork) {
   $forkUrl = 'file:///' + ($Fork -replace '\\', '/')
