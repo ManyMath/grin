@@ -21,101 +21,57 @@ Each package has its own README.
 ## Layout
 
 ```text
-pubspec.yaml                  pub workspace root (no Melos); sets build: cargo and
-                              test_utils: true for builds made from this checkout
+pubspec.yaml                  pub workspace root (no Melos); sets test_utils: true
+                              for builds made from this checkout
 tool/ci.dart                  every gate in one command
 tool/regen_bindings.dart      cargo build (cbindgen header) then ffigen
-tool/local-fork-env.sh        git URL rewrite for the unpushed fork (see below)
+tool/regtest.sh               private chain run (node, grin-wallet peer, SOCKS5 proxy)
+tool/verify-apple.sh          host release builds and the symbol gate on a Mac
+tool/verify-windows.ps1       the same on Windows
 packages/grin/
   rust/                       the grin-ffi crate (Cargo.lock, rust-toolchain.toml)
-  hook/build.dart             native_prebuilt_hook spec plus the cargo mode
-  hook/prebuilt_hashes.json   pinned native release (none yet)
-  flake.nix, nix/, build-config.json
-                              reproducible reference builds through native-build-kit
+  hook/build.dart             builds rust/ with native_toolchain_rust
 packages/grin_flutter/        Flutter glue and example/
 ```
 
 ## Building and testing
 
 ```sh
-dart pub get                                   # once, at the root
-dart run tool/ci.dart --list                   # the stages
-dart run tool/ci.dart --skip nix,flutter-build # quick local run
-dart run tool/ci.dart --local-inputs           # everything, Nix with local inputs
+dart pub get                                        # once, at the root
+dart run tool/ci.dart --list                        # the stages
+dart run tool/ci.dart --skip android,flutter-build  # quick local run
+dart run tool/ci.dart                               # everything
 ```
 
 `dart test` in `packages/grin` and `flutter run` in the example build the
-Rust library with the host toolchain (the workspace pubspec selects the
-hook's `cargo` mode and turns on `test_utils`, which exports the three
-`grin_test_*` functions the Dart tests drive an in-process chain with).
-Release artifacts come from the Nix flake and never carry those symbols;
-`tool/ci.dart` checks that with `llvm-nm`.
+Rust library with the host toolchain through the hook. The workspace pubspec
+turns on `test_utils`, which exports the three `grin_test_*` functions the
+Dart tests drive an in-process chain with. `tool/ci.dart` checks with
+`llvm-nm` that release builds made without it export exactly the 35 standard
+functions and none of the test ones.
 
 The Rust toolchain is pinned by `packages/grin/rust/rust-toolchain.toml`
-(1.94.0) and by `packages/grin/build-config.json` for Nix; the flake fails
-to evaluate if they disagree.
+(1.94.0). The Android stage needs NDK 28.2.13676358 and `cargo-ndk`.
 
-## Local development overrides (until the kit and the fork are pushed)
+## The grin-wallet fork
 
-Two things this repository depends on live on a private Gitea instance and
-are not pushed yet. Until they are, two uncommitted pieces of local wiring
-stand in for them. Both are described in `docs/architecture.md` (D2) and in
-`packages/grin/README.md`.
-
-1. `native_prebuilt_hook` (the build hook package) is pinned in
-   `packages/grin/pubspec.yaml` as a git dependency on
-   `ssh://git@git.cypherstack.com:222/sneurlax/native-build-kit.git` at
-   `85f7eb097604e5b99db3f90bccbcada3336836b8`. An uncommitted, gitignored
-   `pubspec_overrides.yaml` at the repository root points it at the local
-   checkout instead:
-
-   ```yaml
-   dependency_overrides:
-     native_prebuilt_hook:
-       path: /home/user/src/stack_wallet/wt/native-build-kit/dart/native_prebuilt_hook
-   ```
-
-   To drop it once the kit ref is reachable: delete `pubspec_overrides.yaml`
-   and run `dart pub get` at the root. `pubspec.lock` then records the git
-   source.
-
-2. The `grin-wallet` fork is named in `packages/grin/rust/Cargo.toml` by its
-   cypherstack URL and commit `64d361f2e49fa6d544cf0236417da48a99444b2f`,
-   and `Cargo.lock` already records that source. cargo's git database on
-   this machine was filled from the local clone through a git URL rewrite,
-   so ordinary builds need nothing. Only a command that has to fetch the
-   fork again (`cargo update`, a lock regeneration, a fresh machine) needs
-   the rewrite while the fork is unpushed:
-
-   ```sh
-   source /home/user/src/grin/tool/local-fork-env.sh
-   ```
-
-   It sets `CARGO_NET_GIT_FETCH_WITH_CLI`, a `url.<local>.insteadOf` git
-   config for the cypherstack URL, and `GIT_SSH_COMMAND=/bin/false` as a
-   guard. Once the fork is pushed, stop sourcing it; nothing else changes.
-
-3. The Nix flake has the same two inputs (`kit` and `grin-wallet`, both ssh
-   URLs pinned in `flake.lock`). From this machine, pass local inputs:
-
-   ```sh
-   nix build "git+file:///home/user/src/grin?dir=packages/grin#x86_64-unknown-linux-gnu" \
-     --override-input kit "git+file:///home/user/src/stack_wallet/wt/native-build-kit?ref=feat/native-build-kit&rev=85f7eb097604e5b99db3f90bccbcada3336836b8" \
-     --override-input grin-wallet "git+file:///home/user/src/grin-wallet?ref=optional-tor-rustls&rev=64d361f2e49fa6d544cf0236417da48a99444b2f&submodules=1" \
-     --no-write-lock-file
-   ```
-
-   `dart run tool/ci.dart --local-inputs` does this for every target. Use
-   the `git+file://...?dir=packages/grin` form from a checkout: a plain
-   `path:` reference would copy `packages/grin/rust/target` into the store.
+`packages/grin/rust/Cargo.toml` depends on a fork of grin-wallet at
+`ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git`, branch
+`optional-tor-rustls`, pinned to commit
+`64d361f2e49fa6d544cf0236417da48a99444b2f` (also on
+`ssh://git@git.manymath.com:2222/sneurlax/grin-wallet.git`). Cargo fetches
+it with the git command line, so a machine that has not fetched it yet needs
+ssh read access to that host. See "Fetching the fork" in
+`packages/grin/README.md` for what that means inside the build hook.
 
 ## Status
 
 Built and tested on Linux x86_64 (Rust tests on an in-process chain, Dart
-tests, the Flutter example, Nix reference builds for Linux, Android and
-Windows), on macOS (cargo builds for all five Apple targets, the macOS and
-iOS example builds, and the kit's Apple reference build with the kit patch
-described in `docs/architecture.md` D10) and on Windows (the DLL and the
-example). A live testnet node and a private regtest chain (scan, Slatepack
-exchange, HTTP and SOCKS5 sends) were exercised; mainnet, a populated public
-chain and Tor itself were not. See section 13 of `docs/architecture.md`.
+tests, the Flutter example for Linux and Android), on macOS (release builds
+for all five Apple targets, the macOS and iOS example builds) and on Windows
+(the DLL and the example). A live testnet node and a private regtest chain
+(scan, Slatepack exchange, HTTP and SOCKS5 sends) were exercised; mainnet, a
+populated public chain and Tor itself were not. There are no prebuilt or
+reproducible release artifacts yet; that is a later step on dnix
+(`docs/architecture.md` D11). See section 13 of `docs/architecture.md` for
+the record.

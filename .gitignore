@@ -4,5 +4,3 @@ pubspec_overrides.yaml
 target/
 .dart_tool/
 build/
-result
-result-*

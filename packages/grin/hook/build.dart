@@ -1,74 +1,38 @@
 import 'dart:io';
 
 import 'package:code_assets/code_assets.dart';
-import 'package:hooks/hooks.dart' show build;
-import 'package:native_prebuilt_hook/native_prebuilt_hook.dart';
+import 'package:hooks/hooks.dart';
 import 'package:native_toolchain_rust/native_toolchain_rust.dart';
 
-/// Obtains libgrin_ffi in the mode chosen by the `build` user-define: the
-/// pinned prebuilt (default once a release exists), a verified Nix source
-/// build, an unverified Nix dev build, or an unverified cargo build with the
-/// host Rust toolchain. See "Native library" in the README.
-Future<void> main(List<String> args) => build(args, (input, output) async {
-  // `test_utils` only means something to the cargo mode below. Say so when
-  // a consumer sets it with another mode instead of silently ignoring it.
-  final testUtils = parseBoolUserDefine(
-    'test_utils',
-    input.userDefines['test_utils'],
-  );
-  final mode = input.userDefines['build'];
-  if (testUtils && mode != 'cargo') {
-    stderr.writeln(
-      'grin: test_utils is set but the build mode is '
-      '${mode ?? 'unset (prebuilt, dev or cargo as the hook picks)'}; '
-      'only the cargo mode builds the grin_test_* functions.',
-    );
-  }
-  await buildNativeLibrary(input, output, _spec);
-});
-
-const _spec = NativeLibrarySpec(
-  packageName: 'grin',
-  libraryBaseName: 'grin_ffi',
-  // lib/src/ffi/bindings.g.dart binds its @Native functions to this asset.
-  bindingsAssetName: 'src/ffi/bindings.g.dart',
-  // Read by nix/build-apple.sh; the hook sets it, users do not.
-  appleAnyXcodeVariable: 'GRIN_FFI_ANY_XCODE',
-  // Rerun source and dev builds when what the Nix build reads changes.
-  nativeSources: [
-    'rust',
-    'flake.nix',
-    'flake.lock',
-    'nix',
-    'build-config.json',
-  ],
-  cargoBuild: _cargoBuild,
-);
-
-/// `build: cargo`, and the fallback where no prebuilt exists and Nix cannot
-/// build the target (Windows hosts, Intel Macs, Windows on arm64).
+/// Builds libgrin_ffi from `rust/` with the host Rust toolchain (rustup and
+/// cargo, at the version pinned by `rust/rust-toolchain.toml`) and bundles it
+/// as the code asset that `lib/src/ffi/bindings.g.dart` binds to.
 ///
-/// The `test_utils` user-define (bool, default false) adds
-/// `--features test-utils`, which exports the grin_test_* functions the Dart
-/// tests drive an in-process chain with. Only this mode reads it: the
-/// prebuilt, source and dev libraries are release builds by definition.
-Future<void> _cargoBuild(BuildInput input, BuildOutputBuilder output) async {
+/// One user-define, `test_utils` (bool, default false, under
+/// `hooks.user_defines.grin`), adds `--features test-utils`, which exports
+/// the grin_test_* functions the Dart tests drive an in-process chain with.
+/// Never set it in an app.
+///
+/// There is no prebuilt or reproducible path yet. Release artifacts are a
+/// later step (docs/architecture.md D11).
+Future<void> main(List<String> args) => build(args, (input, output) async {
+  if (!input.config.buildCodeAssets) return;
+
   final config = input.config.code;
-  final target = rustTarget(config);
+  final target = _rustTarget(config);
   final variable = target.replaceAll('-', '_');
   final linker = 'CARGO_TARGET_${variable.toUpperCase()}_LINKER';
-  final testUtils = parseBoolUserDefine(
+  final testUtils = _boolUserDefine(
     'test_utils',
     input.userDefines['test_utils'],
   );
   final environment = <String, String>{
     // Cargo reads this variable for git dependencies. rust/.cargo/config.toml
-    // would set the same thing, but cargo looks for config files from its
-    // working directory and the hook runs from elsewhere, so it is not seen.
-    // The hooks runner filters the environment, so no ssh agent
-    // (SSH_AUTH_SOCK) is reachable from here: the git database must already
-    // hold the fork's rev, or the fork must be fetchable with a default ssh
-    // key. The prebuilt, source and dev modes do not need to fetch it.
+    // sets the same thing, but cargo looks for config files from its working
+    // directory and the hook runs from elsewhere, so it is not seen. The
+    // hooks runner filters the environment, so no ssh agent (SSH_AUTH_SOCK)
+    // is reachable from here: the git database must already hold the fork's
+    // rev, or the fork must be fetchable with a default ssh key.
     'CARGO_NET_GIT_FETCH_WITH_CLI': 'true',
     // Inside an Xcode build, PATH starts with Xcode's SwiftBuild and Metal
     // toolchain directories. Under that PATH, with the crate's
@@ -76,9 +40,12 @@ Future<void> _cargoBuild(BuildInput input, BuildOutputBuilder output) async {
     // longer load (arc-swap fails with "can't find crate for rustversion";
     // reproduced on macOS 26 with Xcode 27 by setting that PATH alone, and
     // gone with strip = none). Xcode strips the final product itself, so
-    // keep debuginfo in the cargo mode on Apple.
+    // keep debuginfo on Apple.
     if (config.targetOS == OS.macOS || config.targetOS == OS.iOS)
       'CARGO_PROFILE_RELEASE_STRIP': 'none',
+    // The deployment floors. Without them rustc links for iOS 10 while
+    // Xcode's clang compiles the C code (secp256k1-zkp, lmdb) for the SDK's
+    // own version, and the iOS 10 runtime lacks ___chkstk_darwin.
     if (config.targetOS == OS.macOS)
       'MACOSX_DEPLOYMENT_TARGET': '${config.macOS.targetVersion}.0',
     if (config.targetOS == OS.iOS)
@@ -121,8 +88,51 @@ Future<void> _cargoBuild(BuildInput input, BuildOutputBuilder output) async {
   ).run(input: input, output: output);
 
   // Cargo's dep-info lists compiled sources only; also rerun when a
-  // manifest, the lock file or a newly added file in the workspace changes.
-  output.dependencies.addAll(
-    nativeSourceDependencies(input.packageRoot, const ['rust']),
-  );
+  // manifest, the lock file or a newly added file in the crate changes.
+  output.dependencies.addAll(_sourceDependencies(input.packageRoot));
+});
+
+/// The cargo target triple for the asset being built.
+String _rustTarget(CodeConfig config) =>
+    switch ((config.targetOS, config.targetArchitecture)) {
+      (OS.android, Architecture.arm) => 'armv7-linux-androideabi',
+      (OS.android, Architecture.arm64) => 'aarch64-linux-android',
+      (OS.android, Architecture.x64) => 'x86_64-linux-android',
+      (OS.iOS, Architecture.arm64)
+          when config.iOS.targetSdk == IOSSdk.iPhoneSimulator =>
+        'aarch64-apple-ios-sim',
+      (OS.iOS, Architecture.arm64) => 'aarch64-apple-ios',
+      (OS.iOS, Architecture.x64) => 'x86_64-apple-ios',
+      (OS.macOS, Architecture.arm64) => 'aarch64-apple-darwin',
+      (OS.macOS, Architecture.x64) => 'x86_64-apple-darwin',
+      (OS.linux, Architecture.arm64) => 'aarch64-unknown-linux-gnu',
+      (OS.linux, Architecture.x64) => 'x86_64-unknown-linux-gnu',
+      (OS.windows, Architecture.x64) => 'x86_64-pc-windows-msvc',
+      (OS.windows, Architecture.arm64) => 'aarch64-pc-windows-msvc',
+      _ => throw UnsupportedError(
+        'grin: unsupported target '
+        '${config.targetOS}/${config.targetArchitecture}',
+      ),
+    };
+
+/// A boolean user-define: absent means false; YAML booleans and the strings
+/// `true` and `false` are accepted.
+bool _boolUserDefine(String key, Object? value) => switch (value) {
+  null || false || 'false' => false,
+  true || 'true' => true,
+  _ => throw ArgumentError(
+    'grin: user-define "$key" must be true or false, not "$value".',
+  ),
+};
+
+/// Every file under `rust/` except cargo's `target/` output.
+Iterable<Uri> _sourceDependencies(Uri packageRoot) sync* {
+  final crate = Directory.fromUri(packageRoot.resolve('rust/'));
+  if (!crate.existsSync()) return;
+  final target = crate.uri.resolve('target/').toFilePath();
+  for (final entity in crate.listSync(recursive: true, followLinks: false)) {
+    if (entity is! File) continue;
+    if (entity.path.startsWith(target)) continue;
+    yield entity.uri;
+  }
 }

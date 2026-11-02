@@ -3,8 +3,7 @@
 //   dart run tool/ci.dart                 # everything that runs on this host
 //   dart run tool/ci.dart --list          # print the stages
 //   dart run tool/ci.dart --only rust-test,dart-test
-//   dart run tool/ci.dart --skip nix,android,flutter-build
-//   dart run tool/ci.dart --local-inputs  # Nix with the unpushed kit and fork
+//   dart run tool/ci.dart --skip android,flutter-build
 //
 // Stages, in order:
 //   rust-dups        cargo tree -d shows no duplicated grin or secp crates
@@ -19,50 +18,25 @@
 //                    are up to date)
 //   dart-analyze     dart analyze --fatal-infos in packages/grin
 //   dart-format      dart format --set-exit-if-changed on the Dart sources
-//   dart-test        dart test in packages/grin (test_utils on, cargo mode)
+//   dart-test        dart test in packages/grin (test_utils on)
 //   flutter-analyze  flutter analyze in packages/grin_flutter and its example
 //   flutter-test     flutter test in packages/grin_flutter
 //   flutter-build    flutter build linux and apk (arm64) of the example
-//   nix              the flake's release artifacts for every target this host
-//                    can build, the nm gate on each, and a candidate
-//                    prebuilt_hashes.json written under build/nix
 //
 // The nm gate reads the dynamic symbol table (llvm-nm -D) for ELF files,
-// because the reference build strips the static table, and the COFF export
-// table (llvm-readobj --coff-exports) for a DLL.
-import 'dart:convert';
+// so a stripped library is checked the same way as an unstripped one, and
+// the COFF export table (llvm-readobj --coff-exports) for a DLL.
 import 'dart:io';
 
 const _ndkVersion = '28.2.13676358';
 const _ndkHome = '/home/user/Android/Sdk/ndk/$_ndkVersion';
 const _standardSymbolCount = 35;
 
-// Local wiring until the kit and the fork are pushed (docs/architecture.md
-// D2 and README). --local-inputs passes these to nix.
-const _localKit =
-    'git+file:///home/user/src/stack_wallet/wt/native-build-kit'
-    '?ref=feat/native-build-kit&rev=85f7eb097604e5b99db3f90bccbcada3336836b8';
-const _localFork =
-    'git+file:///home/user/src/grin-wallet'
-    '?ref=optional-tor-rustls&rev=64d361f2e49fa6d544cf0236417da48a99444b2f'
-    '&submodules=1';
-
 const _androidTargets = {
   'aarch64-linux-android': 'arm64-v8a',
   'armv7-linux-androideabi': 'armeabi-v7a',
   'x86_64-linux-android': 'x86_64',
 };
-
-// What the kit's mkCargoLibrary builds on an x86_64-linux host as pure
-// derivations (Apple targets need a macOS host and Xcode).
-const _nixTargets = [
-  'x86_64-unknown-linux-gnu',
-  'aarch64-unknown-linux-gnu',
-  'aarch64-linux-android',
-  'armv7-linux-androideabi',
-  'x86_64-linux-android',
-  'x86_64-pc-windows-msvc',
-];
 
 late final String root;
 String get rust => '$root/packages/grin/rust';
@@ -77,7 +51,6 @@ Future<void> main(List<String> args) async {
   root = _repoRoot();
   final only = _listArg(args, '--only');
   final skip = _listArg(args, '--skip');
-  final localInputs = args.contains('--local-inputs');
 
   final stages = <String, Future<void> Function()>{
     'rust-dups': rustDups,
@@ -93,7 +66,6 @@ Future<void> main(List<String> args) async {
     'flutter-analyze': flutterAnalyze,
     'flutter-test': flutterTest,
     'flutter-build': flutterBuild,
-    'nix': () => nix(localInputs: localInputs),
   };
   if (args.contains('--list')) {
     stages.keys.forEach(stdout.writeln);
@@ -254,59 +226,6 @@ Future<void> flutterBuild() async {
   ], example);
 }
 
-Future<void> nix({required bool localInputs}) async {
-  final overrides = localInputs
-      ? [
-          '--override-input',
-          'kit',
-          _localKit,
-          '--override-input',
-          'grin-wallet',
-          _localFork,
-          '--no-write-lock-file',
-        ]
-      : const <String>[];
-  final flake = 'git+file://$root?dir=packages/grin';
-  final outDir = Directory('$root/build/nix')..createSync(recursive: true);
-  final files = <String, String>{};
-  for (final target in _nixTargets) {
-    // An out-link under build/nix keeps the artifact out of the garbage
-    // collector's reach until the next run.
-    final printed = await _capture(
-      'nix',
-      [
-        'build',
-        '$flake#$target',
-        '--out-link',
-        '${outDir.path}/$target',
-        '--print-out-paths',
-        ...overrides,
-      ],
-      root,
-      environment: {
-        'NIX_CONFIG': 'extra-experimental-features = nix-command flakes',
-      },
-    );
-    final out = printed.trim().split('\n').first;
-    final lib = Directory('$out/lib').listSync().whereType<File>().toList();
-    if (lib.isEmpty) throw _GateFailure('$target: no library in $out/lib');
-    for (final f in lib) {
-      final name = f.uri.pathSegments.last;
-      await _nmGate(f.path);
-      final digest = await _sha256(f.path);
-      files['$target/$name'] = digest;
-      stdout.writeln('$target/$name $digest');
-    }
-  }
-  // The same shape as hook/prebuilt_hashes.json, without a release to point
-  // at. A release workflow fills nativeVersion and releaseUrl.
-  final candidate = const JsonEncoder.withIndent('  ')
-      .convert({'nativeVersion': null, 'releaseUrl': null, 'files': files});
-  File('${outDir.path}/prebuilt_hashes.candidate.json')
-      .writeAsStringSync('$candidate\n');
-  stdout.writeln('wrote ${outDir.path}/prebuilt_hashes.candidate.json');
-}
-
 // ---------------------------------------------------------------- helpers
 
 Future<void> _nmGate(String path) async {
@@ -343,11 +262,6 @@ Future<void> _nmGate(String path) async {
       '$_standardSymbolCount',
     );
   }
-}
-
-Future<String> _sha256(String path) async {
-  final out = await _capture('sha256sum', [path], root);
-  return out.trim().split(RegExp(r'\s+')).first;
 }
 
 Future<void> _run(

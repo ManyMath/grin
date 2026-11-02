@@ -1,31 +1,22 @@
 #!/usr/bin/env bash
 # Release builds of grin-ffi for the Apple targets with the host toolchain
 # (rustup and Xcode), and the symbol gate on each: 35 exported grin_
-# functions and no grin_test_ ones. This is what the hook's cargo mode does
-# on a Mac. Run on macOS:
+# functions and no grin_test_ ones. This is what the build hook does on a
+# Mac. Run on macOS:
 #
-#   tool/verify-apple.sh [path-to-grin-wallet-clone]
+#   tool/verify-apple.sh
 #
-# The fork path is only needed while the fork is not pushed; it feeds
-# tool/local-fork-env.sh. With FLUTTER=1 the example is also built for
-# macOS. With KIT_LOCAL=<path to a native-build-kit clone> and Nix on PATH
-# the flake's Apple shell builds the reference dylibs too (dev mode, any
-# Xcode).
+# With FLUTTER=1 the example app is also built for macOS through the hook.
+# Fetching the grin-wallet fork needs ssh read access to git.cypherstack.com
+# (or the fork's rev already in ~/.cargo/git/db).
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd -P)
-fork=${1:-${GRIN_WALLET_LOCAL:-}}
-if [ -n "$fork" ]; then
-  # shellcheck source=local-fork-env.sh
-  GRIN_WALLET_LOCAL=$fork source "$root/tool/local-fork-env.sh"
-fi
-export GIT_SSH_COMMAND=/bin/false
-# The deployment floors from packages/grin/build-config.json, which the hook's
-# cargo mode also passes. Without them rustc links for iOS 10 while Xcode's
-# clang compiles the C code (secp256k1-zkp, lmdb) for the SDK's own version,
-# and the iOS 10 runtime lacks ___chkstk_darwin.
+# The deployment floors the hook also passes. Without them rustc links for
+# iOS 10 while Xcode's clang compiles the C code (secp256k1-zkp, lmdb) for
+# the SDK's own version, and the iOS 10 runtime lacks ___chkstk_darwin.
 export IPHONEOS_DEPLOYMENT_TARGET=13.0
 export MACOSX_DEPLOYMENT_TARGET=11.0
-export NIX_CONFIG="extra-experimental-features = nix-command flakes"
+export CARGO_NET_GIT_FETCH_WITH_CLI=true
 
 echo "== host"; sw_vers 2>/dev/null || true; xcodebuild -version 2>/dev/null | head -2 || true; rustc --version; cargo --version
 
@@ -45,32 +36,7 @@ done
 
 if [ "${FLUTTER:-0}" = 1 ] && command -v flutter >/dev/null; then
   echo "== flutter build macos (example)"
-  if [ -n "${KIT_LOCAL:-}" ] && [ ! -f "$root/pubspec_overrides.yaml" ]; then
-    # The same uncommitted override the README describes, so pub does not
-    # try to reach the kit's private remote.
-    printf 'dependency_overrides:\n  native_prebuilt_hook:\n    path: %s/dart/native_prebuilt_hook\n' "$KIT_LOCAL" > "$root/pubspec_overrides.yaml"
-  fi
-  if [ -f "$root/pubspec_overrides.yaml" ]; then
-    (cd "$root" && dart pub get >/dev/null && cd packages/grin_flutter/example && flutter build macos) || { echo "FLUTTER_FAIL"; fail=1; }
-  else
-    echo "FLUTTER_SKIPPED (set KIT_LOCAL or provide pubspec_overrides.yaml while the kit is unpushed)"
-  fi
-fi
-
-if [ -n "${KIT_LOCAL:-}" ] && command -v nix >/dev/null; then
-  echo "== nix apple shell (dev mode, any Xcode)"
-  out="$root/build/apple"
-  mkdir -p "$out"
-  (cd "$root" && GRIN_FFI_ANY_XCODE=1 nix develop "git+file://$root?dir=packages/grin#apple" \
-      --override-input kit "git+file://$KIT_LOCAL?ref=feat/native-build-kit" \
-      --override-input grin-wallet "git+file://$fork?ref=optional-tor-rustls&submodules=1" \
-      --no-write-lock-file --command "$root/packages/grin/nix/build-apple.sh" "$out") || { echo "NIX_APPLE_FAIL"; fail=1; }
-  for d in "$out"/*/; do
-    [ -f "$d/libgrin_ffi.dylib" ] || continue
-    std=$(nm -gU "$d/libgrin_ffi.dylib" | awk '{print $3}' | grep -c '^_grin_' || true)
-    test=$(nm -gU "$d/libgrin_ffi.dylib" | awk '{print $3}' | grep -c '^_grin_test_' || true)
-    echo "nm nix $(basename "$d"): $std standard, $test test symbols"
-  done
+  (cd "$root" && dart pub get >/dev/null && cd packages/grin_flutter/example && flutter build macos) || { echo "FLUTTER_FAIL"; fail=1; }
 fi
 
 if [ "$fail" = 0 ]; then echo "VERIFY_APPLE_OK"; else echo "VERIFY_APPLE_FAIL"; exit 1; fi

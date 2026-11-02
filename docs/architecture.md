@@ -14,8 +14,8 @@ This document defines the clean-room architecture and implementation plan (**Pha
    - **Complete `tor` Dependency Gating**: All `tor/`-only dependencies (`arti-client`, `tor-*`, `fs-mistrust`, `fslock-guard`, `sysinfo`, `timer`, `hyper`, `hyper-util`, `http-body-util`, `bytes`, `ed25519-dalek`, `regex`, `base64`, `url`, `sha2`) are gated under the `tor` feature (which stays in `default = ["tor", "native-tls"]` for upstream compatibility).
 3. **Single Native-Assets Build Hook in `packages/grin` Using `hooks.user_defines.grin`**:
    - In Dart Native Assets (`code_assets` + `@ffi.Native`), a `@Native` asset (`assetId: 'package:grin/src/ffi/bindings.g.dart'`) **must** be emitted by the `hook/build.dart` of the package that declares it (`input.packageName == 'grin'`).
-   - Therefore, **intentionally differing from the original prompt's framing where the Flutter package provides the native build**, the single `hook/build.dart` lives in `packages/grin` (using `native_prebuilt_hook` via git while `publish_to: none`; publishing the kit to `pub.dev` is tracked as a prerequisite before `package:grin` is ever published).
-   - Uses the `hooks.user_defines.<package>` contract of `native_prebuilt_hook` at ref `85f7eb097604e5b99db3f90bccbcada3336836b8` (the same kit ref `wt/tor` and `wt/frostdart-kit` pin): a `build` user-define (`prebuilt`, `source`, `dev`, `cargo`; unset lets the hook pick) and prebuilts pinned by a committed `packages/grin/hook/prebuilt_hashes.json` (`dart/native_prebuilt_hook/lib/src/hook.dart` L53-68 and L156-165, `lib/src/prebuilt_hashes.dart` L8-13). Stack Wallet's currently generated pubspec (branch `security/rbf-history-authentication`, commit `b778525f0`, L374-388; `cypherstack/main` has no `pubspec.yaml`, and its `scripts/app_config/templates/pubspec.template.yaml` has no `hooks:` block) still uses the pre-kit keys `native_build`, `prebuilt_manifest_url` and `prebuilt_manifest_sha256` for `tor_ffi_plugin`, `flutter_libepiccash` and `flutter_libmwc`; those keys are not what the pinned kit reads, so `grin` follows the kit (Decision D1 in section 12). `grin` adds one package-specific boolean user-define, `test_utils`, honoured only by its `cargo` mode (`--features test-utils`). No fifth build system.
+   - Therefore, **intentionally differing from the original prompt's framing where the Flutter package provides the native build**, the single `hook/build.dart` lives in `packages/grin`.
+   - The hook is a plain `native_toolchain_rust` `RustBuilder` build of `rust/` with the host toolchain (D1, D11). It reads one user-define under `hooks.user_defines.grin`: `test_utils` (bool), which adds `--features test-utils` for this repository's tests and must stay unset in an app. Prebuilt, hash-verified release artifacts are a later step, planned on [dnix](https://github.com/cypherstack/dnix) rather than native-build-kit (D11). The plan's earlier kit-based design (a `build` user-define with prebuilt, Nix source, Nix dev and cargo modes) was built, verified and then removed on 2026-11-02 at the user's direction.
    - `packages/grin_flutter` holds Flutter-only glue: default platform wallet directory helper (`path_provider`), an app lifecycle observer (`AppLifecycleListener`), and full re-exports of `package:grin/grin.dart`.
 4. **v1 Transport Scope (Outbound HTTP/Tor + Offline Slatepacks; No Inbound Listener)**:
    - Stack Wallet's `tor_ffi_plugin` (pinned at `e30ed0d386a40ee4a999aeaf57aafd32921d601e` in its pubspec L68-71; `rust/Cargo.toml` L18 at that ref: `arti-client = { version = "0.47.0", features = ["static", "onion-service-client"] }`) enables only the client side of onion services, not `onion-service-service`, so it cannot host an inbound v3 `.onion` hidden service.
@@ -46,27 +46,24 @@ This document defines the clean-room architecture and implementation plan (**Pha
 ```text
 /home/user/src/grin/                     (as built; D6 moved the Cargo workspace under packages/grin)
 ├── pubspec.yaml                        # Root pub workspace (publish_to: none; workspace: [...]; no Melos)
-│                                       # hooks.user_defines.grin: build: cargo, test_utils: true for in-repo builds
+│                                       # hooks.user_defines.grin: test_utils: true for in-repo builds
 ├── pubspec.lock
 ├── analysis_options.yaml               # Shared strict lint rules
-├── README.md                           # Layout, gates, the local overrides and how to drop them
+├── README.md                           # Layout, gates, how the fork is fetched
 ├── docs/
 │   ├── architecture.md                 # This file
 │   └── ffi-json.md                     # JSON contract between grin-ffi and package:grin
 ├── tool/
-│   ├── ci.dart                         # Every gate in one command (rust, android, bindings, dart, flutter, nix + nm gate)
+│   ├── ci.dart                         # Every gate in one command (rust, android, bindings, dart, flutter, nm gate)
 │   ├── regen_bindings.dart             # cargo build with GRIN_FFI_WRITE_HEADER=1 -> ffigen -> dart format; --check
-│   └── local-fork-env.sh               # git URL rewrite for the unpushed fork (D2)
+│   ├── regtest.sh, socks5_test_proxy.py # private chain run (section 13)
+│   └── verify-apple.sh, verify-windows.ps1 # host release builds and the symbol gate on a Mac or on Windows
 └── packages/
     ├── grin/                           # Pure Dart package (name: grin, publish_to: none)
-    │   ├── pubspec.yaml                # no flutter sdk; native_prebuilt_hook (kit 85f7eb0) + native_toolchain_rust 1.0.6
+    │   ├── pubspec.yaml                # no flutter sdk; native_toolchain_rust 1.0.6
     │   ├── ffigen.yaml                 # @ffi.Native bindings, asset id package:grin/src/ffi/bindings.g.dart
-    │   ├── build-config.json           # Rust 1.94.0, toolchain pins, floors, targets (read by the hook and the flake)
-    │   ├── flake.nix, flake.lock       # Reference builds through native-build-kit; the fork is a flake input (D7)
-    │   ├── nix/build-apple.sh          # Apple wrapper for the kit's build-apple.sh
     │   ├── hook/
-    │   │   ├── build.dart              # runNativeBuildHook + cargo mode (test_utils -> --features test-utils)
-    │   │   └── prebuilt_hashes.json    # Pinned native release (none yet)
+    │   │   └── build.dart              # RustBuilder build of rust/ (test_utils -> --features test-utils)
     │   ├── rust/                       # The grin-ffi crate, a single-crate Cargo workspace
     │   │   ├── Cargo.toml, Cargo.lock, rust-toolchain.toml, .cargo/config.toml
     │   │   ├── build.rs, cbindgen.toml # Header generation
@@ -78,7 +75,7 @@ This document defines the clean-room architecture and implementation plan (**Pha
     │   │   ├── grin.dart, testing.dart
     │   │   └── src/{ffi,errors,internal,models,wallet,testing}/
     │   ├── test/                       # mnemonic_address, bounds_and_panic, wallet_lifecycle, test_chain,
-    │   │                               # slatepack_e2e, models, tx_models, memory, arguments, kit_pin
+    │   │                               # slatepack_e2e, models, tx_models, memory, arguments, live_node, regtest
     │   └── README.md
     └── grin_flutter/                   # Flutter glue (name: grin_flutter, publish_to: none)
         ├── pubspec.yaml
@@ -88,7 +85,7 @@ This document defines the clean-room architecture and implementation plan (**Pha
         └── example/                    # flutter create app + integration_test/app_test.dart
 ```
 
-The `cypherstack/grin-wallet` fork (`v5.5.1` + submodule `grin` `v5.5.2`) is not part of this tree. It lives in its own repository at `/home/user/src/grin-wallet` (branch `optional-tor-rustls`, commit `64d361f2`) and is pulled in by `packages/grin/rust/Cargo.toml` as a `rev`-pinned git dependency (see 4.1) and by `packages/grin/flake.nix` as a flake input (D7).
+The `cypherstack/grin-wallet` fork (`v5.5.1` + submodule `grin` `v5.5.2`) is not part of this tree. It lives in its own repository (`ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git`, branch `optional-tor-rustls`, commit `64d361f2`; checked out locally at `/home/user/src/grin-wallet`) and is pulled in by `packages/grin/rust/Cargo.toml` as a `rev`-pinned git dependency (see 4.1).
 
 ### 3.1 Why `packages/grin` Owns `hook/build.dart` Instead of `packages/grin_flutter`
 
@@ -97,13 +94,12 @@ The `cypherstack/grin-wallet` fork (`v5.5.1` + submodule `grin` `v5.5.2`) is not
 >
 > Placing `hook/build.dart` in `packages/grin`:
 > - Allows **both** pure Dart (`cd packages/grin && dart test`) and Flutter (`flutter test`, `flutter run`, `flutter build` in `grin_flutter/example` or `stack_wallet`) to automatically invoke `packages/grin/hook/build.dart` and bundle `libgrin_ffi`.
-> - Avoids a fifth build system by using the `hooks.user_defines.<package>` contract of `native_prebuilt_hook` at `85f7eb0` (the kit's `build` user-define; the prebuilt release URL and per-file sha256 live in the package's committed `hook/prebuilt_hashes.json`, so the consumer pins nothing but the git ref of `grin` itself):
+> - Keeps the build to one hook: a `native_toolchain_rust` `RustBuilder` build of `rust/`, with one `grin`-specific user-define:
 >   ```yaml
 >   hooks:
 >     user_defines:
 >       grin:
->         build: prebuilt    # or source, dev, cargo; unset lets the hook pick
->         test_utils: false  # grin-specific; true only in this workspace's root pubspec so dart test gets --features test-utils (cargo mode only)
+>         test_utils: false  # true only in this workspace's root pubspec so dart test gets --features test-utils
 >   ```
 > - Leaves `packages/grin_flutter` focused cleanly on Flutter-specific integration (default wallet storage directory via `path_provider`, `AppLifecycleListener` hooks, and re-exporting `package:grin/grin.dart`).
 
@@ -158,7 +154,7 @@ We fork `mimblewimble/grin-wallet` (`v5.5.1`, commit `f097811ee953fc81be4e70435d
      grin_wallet_libwallet = { git = "ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git", rev = "64d361f2e49fa6d544cf0236417da48a99444b2f" }
      # ... same git + rev for grin_wallet_config, grin_wallet_util, grin_core, grin_keychain, grin_chain, grin_store, grin_util
      ```
-   - No `path` dependencies on the fork are committed. For local iteration against an unpushed fork checkout, an uncommitted `.cargo/config.toml` `[patch."ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git"]` may point the same crates at `/home/user/src/grin-wallet`; CI, Nix, and `Cargo.lock` always resolve the pinned `rev`.
+   - No `path` dependencies on the fork are committed, and no local wiring is needed: the fork is pushed to that URL and `Cargo.lock` records the pinned `rev` (D2 records the wiring used before the push). Cargo fetches it with the git command line (`rust/.cargo/config.toml`, and `CARGO_NET_GIT_FETCH_WITH_CLI` from the hook), so a machine whose cargo git database does not hold the rev yet needs ssh read access to git.cypherstack.com.
    - **No `grin_wallet_controller` dev-dependency**: `grin_wallet_controller` depends on `grin_wallet_impls` with default features, which in `cargo test` would re-enable `tor` and `native-tls` via Cargo feature unification. Because `pub mod test_framework;` is already public in `grin_wallet_impls`, `grin-ffi` needs no wallet dev-dependencies at all.
    - **CI Duplicate Crate Gate (`cargo tree -d`)**: `tool/ci.dart` runs `cargo tree -d` and asserts that zero `grin_*` or `grin_secp256k1zkp` crates are duplicated.
 
@@ -355,9 +351,9 @@ A wallet with 0 balance cannot initiate an `S1` send (`init_send_tx` fails with 
   - When `test_utils: true` is set, `hook/build.dart` passes `--features test-utils` to `cargo build`.
   - Because `test_utils: true` is set in the workspace root `pubspec.yaml`, it applies to every package build resolved from this workspace, including `packages/grin_flutter/example` (`flutter run` / `flutter build`), so those binaries export `grin_test_*`. That is acceptable for development: example and workspace builds are never release artifacts. `stack_wallet` consumes `grin` from its own root `pubspec.yaml`, where `hooks.user_defines.grin.test_utils` is unset, so its source builds compile without `test-utils`.
 - **Release Binary Symbol Verification (`nm` Gate)**:
-  - Release builds (Nix `flake.nix` and `hook/build.dart` when `test_utils` is unset/`false`) compile `grin-ffi` **without** `test-utils`.
-  - The authoritative gate is a release-pipeline step that runs `nm -g` / `llvm-nm` on the exact Nix-built `libgrin_ffi.{so,dylib,a,dll}` files the published prebuilt manifest points to (the same files whose sha256 go into `manifest.json`), and asserts **zero `grin_test_*` symbols** in each before the manifest is generated and uploaded. A failure blocks the release.
-  - `tool/ci.dart` additionally runs the same check on `hook/build.dart` output built with `test_utils` unset. That catches regressions early but does not replace the release-artifact check, since the hook output is not what `native_build: prebuilt` consumers download.
+  - `hook/build.dart` compiles `grin-ffi` **without** `test-utils` unless `test_utils: true` is set; apps never set it.
+  - `tool/ci.dart` runs `llvm-nm` on the host release build and on the three Android release builds (`rust-release` and `android` stages) and asserts 35 `grin_` symbols and **zero `grin_test_*`**; `tool/verify-apple.sh` and `tool/verify-windows.ps1` do the same on a Mac and on Windows.
+  - When release artifacts exist (D11, dnix), the same check moves onto the exact files a release publishes, before their hashes are recorded.
 
 ### 7.3 Test Suites (Rust & Dart)
 1. **C/C++ Header Verification (`crates/grin-ffi/tests/header_test.rs`)**:
@@ -400,7 +396,7 @@ flowchart LR
 
 ### Phase 2: Pure Dart Package (`packages/grin`) & Build Hook
 1. Create root `pubspec.yaml` (`workspace: [packages/grin, packages/grin_flutter, packages/grin_flutter/example]`, `publish_to: none`, `hooks.user_defines.grin`, no Melos).
-2. Create `packages/grin/pubspec.yaml` (`name: grin`, `publish_to: none`, `resolution: workspace`) and `packages/grin/hook/build.dart` supporting `hooks.user_defines.grin` (`native_build: source | prebuilt`, `test_utils`, `prebuilt_manifest_url`, `prebuilt_manifest_sha256`, plus Apple `-DMDB_USE_POSIX_MUTEX=1 -DMDB_USE_ROBUST=0` and Android NDK clang wrapper resolution).
+2. Create `packages/grin/pubspec.yaml` (`name: grin`, `publish_to: none`, `resolution: workspace`) and `packages/grin/hook/build.dart` (as built: a `RustBuilder` build of `rust/` reading `hooks.user_defines.grin.test_utils`, with the Apple deployment floors and Android NDK API-level clang selection; D1, D11).
 3. Configure `packages/grin/ffigen.yaml` (`ffi-native: asset-id: 'package:grin/src/ffi/bindings.g.dart'`) with `symbol-address` enabled for `grin_wallet_close_finalizer`, and generate `lib/src/ffi/bindings.g.dart`.
 4. Implement `memory.dart` (`usingSecretArena`, `unwrapFfiResult`), `grin_exception.dart` (including `GrinWalletBusyException`), typed `BigInt` nanogrin domain models, and `GrinWalletClient` (with `this`-free static `Isolate.run` helpers, `Pointer<Void>.fromAddress(handle)` `NativeFinalizer`, ordered `close()` that rejects new ops, drains the op queue, detaches the finalizer, then calls `grin_wallet_close`, and `Stream<GrinWalletEvent>`).
 
@@ -413,7 +409,7 @@ flowchart LR
 1. Implement `crates/grin-ffi/tests/header_test.rs` and `crates/grin-ffi/tests/ffi_e2e_test.rs` (testing `S1->S3`, `I1->I3` with invoice input-locking verification, Mainnet + Testnet concurrent execution, and the `WalletBusy` double-open guard with a retained session `Arc`).
 2. Implement `packages/grin/test/` suites (`mnemonic_address_test.dart`, `bounds_and_panic_test.dart`, `wallet_lifecycle_test.dart` including close-while-in-flight then immediate reopen, and `slatepack_e2e_test.dart` using `grin_test_create_wallet` & `grin_test_mine_blocks`).
 3. Run `cargo tree -d`, `cargo test`, `(cd packages/grin && dart test)`, `(cd packages/grin_flutter && flutter test)`, `dart analyze`, `flutter analyze`, and the `tool/ci.dart` `nm` check on `hook/build.dart` output built without `test-utils`.
-4. Add the release-pipeline `nm` gate on the Nix-built artifacts referenced by the prebuilt manifest (zero `grin_test_*` symbols, checked before `manifest.json` and its sha256 values are published).
+4. Release artifacts, and the `nm` gate on the exact files a release publishes, are deferred to the dnix pipeline (D11).
 
 ## 9. Stack Wallet integration design (design only; no stack_wallet code changes)
 
@@ -427,7 +423,6 @@ This section is the Phase 5 target contract that [PLAN] §1 item 5 (lines 24-25)
 | [SW-stg] | same repository | local `staging` at 7ce7b34f2 (2026-10-19) |
 | [SW-uni] | same repository | local `refactor/epic-mwc-unify` at 6fadd8c0a (2026-09-07) |
 | [SW-gen] | same repository, working tree | generated, gitignored `pubspec.yaml` (`.gitignore:76`); checkout is on `security/rbf-history-authentication` at b778525f0 |
-| [KIT] | /home/user/src/stack_wallet/wt/native-build-kit/dart/native_prebuilt_hook | 85f7eb097604e5b99db3f90bccbcada3336836b8 (clean HEAD) |
 | [PLAN] | /home/user/src/grin/docs/architecture.md | commit dfb7f04 on main (492 lines; later commits insert sections 9 to 11 above section 12, so numbers above 450 shift). §4.6 rows are cited as `#N` (row N sits on line 275+N) |
 | [GW] | /home/user/src/grin-wallet | fork commit 64d361f2 (grin submodule at v5.5.2, dbaff34f) |
 
@@ -774,7 +769,7 @@ dependencies:
 # %%ENABLE_GRIN%%
 #  grin_flutter:
 #    git:
-#      url: https://github.com/cypherstack/grin.git
+#      url: ssh://git@git.cypherstack.com:222/sneurlax/grin.git
 #      path: packages/grin_flutter
 #      ref: <commit>
 # %%END_ENABLE_GRIN%%
@@ -785,20 +780,10 @@ dependency_overrides:
 # %%ENABLE_GRIN%%
 #  grin:
 #    git:
-#      url: https://github.com/cypherstack/grin.git
+#      url: ssh://git@git.cypherstack.com:222/sneurlax/grin.git
 #      path: packages/grin
 #      ref: <commit>
 # %%END_ENABLE_GRIN%%
-
-# added inside the existing block at pubspec.template.yaml:373-388
-# %%ENABLE_NATIVE_PREBUILTS%%
-#hooks:
-#  user_defines:
-#    tor_ffi_plugin:
-#      ...unchanged...
-#    grin:
-#      build: prebuilt   # or source, dev, cargo; unset lets the hook pick
-# %%END_ENABLE_NATIVE_PREBUILTS%%
 ```
 
 Generated result with both markers enabled:
@@ -807,27 +792,21 @@ Generated result with both markers enabled:
 dependencies:
   grin_flutter:
     git:
-      url: https://github.com/cypherstack/grin.git
+      url: ssh://git@git.cypherstack.com:222/sneurlax/grin.git
       path: packages/grin_flutter
       ref: <commit>
 dependency_overrides:
   grin:
     git:
-      url: https://github.com/cypherstack/grin.git
+      url: ssh://git@git.cypherstack.com:222/sneurlax/grin.git
       path: packages/grin
       ref: <commit>
-hooks:
-  user_defines:
-    grin:
-      build: prebuilt   # or source, dev, cargo; unset lets the hook pick
 ```
 
 Notes:
 
-- The user-define key is `grin`, the package that owns `hook/build.dart` ([PLAN] §3.1, lines 127-130). The kit reads `input.userDefines[spec.userDefineKey]` with `userDefineKey` defaulting to `build` ([KIT] lib/src/hook.dart:60, 204; documented at :28-35) and accepts `prebuilt`, `source`, `dev`, `cargo` ([KIT] lib/src/build_mode.dart:22-30; README.md:8-24).
-- Pins come from `packages/grin/hook/prebuilt_hashes.json` at the git ref ([KIT] lib/src/prebuilt_hashes.dart:43; loaded at lib/src/hook.dart:184-190), so Stack's pubspec carries no manifest URL or sha256. The `tor_ffi_plugin`, `flutter_libepiccash` and `flutter_libmwc` entries in the same block still use the older `native_build` and `prebuilt_manifest_*` keys ([SW-stg] pubspec.template.yaml:374-387; generated at [SW-gen] pubspec.yaml:374-388). The two schemes coexist because each hook reads only its own package's keys.
-- With `build` unset the kit picks `prebuilt` when the hashes cover the target, else `dev` (Nix) or `cargo` ([KIT] README.md:26-37); a Windows host without a release falls back to `cargo` (README.md:68-74). The NATIVE_PREBUILTS block is enabled only by `scripts/build_app.sh -d` ([SW-stg] scripts/build_app.sh:38, 112), so local builds run with `build` unset. A developer who wants `cargo` adds it to the generated, gitignored `pubspec.yaml` by hand.
-- `test_utils` stays unset in Stack ([PLAN] line 390). Only the `cargo` mode of the `grin` hook reads it ([PLAN] D1, lines 458-463), so Stack never links `grin_test_*`.
+- Nothing goes into the `hooks.user_defines` block for `grin` today. The hook reads one key, `hooks.user_defines.grin.test_utils`, and Stack Wallet leaves it unset, so Stack never links `grin_test_*` ([PLAN] D1). Everything else is fixed: the hook always builds `rust/` with the host toolchain, so Stack Wallet's build machines need rustup (the toolchain is pinned by `rust/rust-toolchain.toml`) and the NDK Flutter provides, as they do for the pre-kit `flutter_libepiccash` and `flutter_libmwc` source builds. The `tor_ffi_plugin`, `flutter_libepiccash` and `flutter_libmwc` entries in the NATIVE_PREBUILTS block ([SW-stg] pubspec.template.yaml:374-387) are untouched.
+- Prebuilt artifacts, and the user-define that selects them, arrive with the dnix pipeline (D11). The template block at :373-388 then gains a `grin` entry in dnix's form, next to the dnix entries `flutter_libepiccash` and `flutter_libmwc` already carry on their GitHub main branches (10.2).
 - The template already notes that entries for packages outside the dependency graph are ignored ([SW-stg] pubspec.template.yaml:369-370), which covers app configs that leave `GRIN` off.
 
 ### 9.9 Breaking changes versus the legacy plugin APIs
@@ -876,7 +855,6 @@ Kept as is on purpose: the generated per-wallet password in secure storage (E:54
 ### Sources read
 
 - [PLAN] /home/user/src/grin/docs/architecture.md at commit dfb7f04, whole file; [GW] consensus.rs, genesis.rs, libwallet api_impl/types.rs, config/src/types.rs for the constants in 9.2; /home/user/src/grin/docs/ffi-json.md for the proxy format.
-- [KIT] README.md; lib/src/hook.dart (1-200, user-define reads); lib/src/build_mode.dart; lib/src/prebuilt_hashes.dart and lib/src/build_settings.dart (default paths).
 - [SW-uni] lib/wallets/wallet/intermediate/mimblewimble_wallet.dart; lib/wallets/wallet/supporting/mimblewimble_wallet_info_extension.dart; lib/wallets/wallet/impl/epiccash_wallet.dart; lib/wallets/wallet/impl/mimblewimblecoin_wallet.dart; lib/wallets/crypto_currency/coins/epiccash.dart; lib/wallets/crypto_currency/coins/mimblewimblecoin.dart; lib/wallets/wallet/wallet.dart (diff against staging); lib/wallets/isar/models/wallet_info.dart (WalletInfoKeys); lib/wl_gen/interfaces/libepiccash_interface.dart; lib/wl_gen/interfaces/libmwc_interface.dart; lib/wl_gen/interfaces/mimblewimble_transaction.dart; tool/wl_templates/EPIC_libepiccash_interface_impl.template.dart; tool/wl_templates/MWC_libmwc_interface_impl.template.dart; lib/models/slatepack_models.dart; lib/utilities/slatepack_terms.dart; lib/utilities/enums/mimblewimble_transaction_method.dart; lib/widgets/slatepack_method_toggle.dart; lib/pages/receive_view/receive_view.dart; lib/pages/receive_view/sub_widgets/slatepack_entry_dialog.dart; lib/pages/receive_view/sub_widgets/slatepack_import_dialog.dart; lib/pages/send_view/send_view.dart; lib/pages/send_view/confirm_transaction_view.dart; lib/pages/send_view/sub_widgets/slatepack_dialog.dart; lib/pages/finalize_view/finalize_view.dart; lib/pages/epic_finalize_view/epic_finalize_view.dart; lib/pages/wallet_view/wallet_view.dart; lib/pages/wallet_view/transaction_views/tx_v2/transaction_v2_details_view.dart; lib/pages/settings_views/wallet_settings_view/wallet_settings_view.dart; lib/pages/settings_views/wallet_settings_view/wallet_network_settings_view/wallet_network_settings_view.dart; lib/pages/add_wallet_views/new_wallet_recovery_phrase_warning_view/new_wallet_recovery_phrase_warning_view.dart; lib/pages/add_wallet_views/restore_wallet_view/restore_wallet_view.dart; lib/services/wallets.dart; lib/pages_desktop_specific/my_stack_view/wallet_view/sub_widgets/desktop_receive.dart and desktop_send.dart (grep); lib/pages/settings_views/wallet_settings_view/epicbox_settings/manage_epicbox_view.dart (grep); lib/pages/wallet_view/transaction_views/all_transactions_view.dart (grep); scripts/app_config/templates/pubspec.template.yaml; `git diff --name-status 9517439 refactor/epic-mwc-unify`; `git grep` over lib/ for Mimblewimble predicates and slatepack files.
 - [SW-stg] lib/wallets/wallet/wallet.dart; lib/wallets/wallet/intermediate/bip39_wallet.dart; lib/wallets/wallet/intermediate/external_wallet.dart; lib/wallets/wallet/intermediate/cryptonote_wallet.dart; lib/wallets/wallet/intermediate/lib_monero_wallet.dart; lib/wallets/wallet/impl/bitcoin_frost_wallet.dart; lib/wallets/wallet/impl/stellar_wallet.dart; lib/wallets/wallet/impl/epiccash_wallet.dart and mimblewimblecoin_wallet.dart (exit, diff against 9517439); lib/wallets/crypto_currency/crypto_currency.dart; lib/wallets/crypto_currency/coins/epiccash.dart, mimblewimblecoin.dart, bitcoin.dart, bitcoin_frost.dart; lib/wallets/crypto_currency/intermediate/bip39_currency.dart and frost_currency.dart; lib/wallets/isar/models/wallet_info.dart; lib/models/isar/models/blockchain_data/v2/transaction_v2.dart; lib/models/isar/models/blockchain_data/address.dart; lib/models/node_model.dart; lib/services/tor_service.dart; lib/services/event_bus/events/global/tor_connection_status_changed_event.dart; lib/services/event_bus/events/global/tor_status_changed_event.dart; tool/wl_templates/TOR_tor_service_impl.template.dart; tool/wl_templates/FROST_frost_interface_impl.template.dart; lib/wl_gen/interfaces/frost_interface.dart; lib/electrumx_rpc/electrumx_client.dart; lib/utilities/prefs.dart; lib/utilities/tor_plain_net_option_enum.dart; lib/utilities/dynamic_object.dart; lib/utilities/stack_file_system.dart; lib/utilities/show_loading.dart; lib/utilities/test_node_connection.dart; lib/services/price.dart; lib/services/wallets.dart; lib/widgets/wallet_card.dart; lib/pages/wallet_view/wallet_view.dart; lib/pages/wallets_view/sub_widgets/wallet_list_item.dart; lib/pages/wallets_view/sub_widgets/favorite_card.dart, lib/pages_desktop_specific/my_stack_view/coin_wallets_table.dart, lib/pages_desktop_specific/my_stack_view/wallet_view/desktop_wallet_view.dart and lib/themes/coin_icon_provider.dart (grep); lib/main.dart; lib/app_config.dart; scripts/app_config/templates/pubspec.template.yaml; scripts/app_config/configure_stack_wallet.sh; tool/process_pubspec_deps.dart; tool/gen_interfaces.dart; scripts/build_app.sh (grep); `git grep` for exit callers, `cancelSend`, Tor listeners, killswitch, `torSupport`.
 - [SW-main] lib/wallets/wallet/impl/epiccash_wallet.dart; lib/wallets/wallet/impl/mimblewimblecoin_wallet.dart; lib/models/isar/models/blockchain_data/v2/transaction_v2.dart (diff against unify); lib/wallets/wallet/wallet.dart (`cancelSend` check); scripts/app_config/templates/pubspec.template.yaml; `git ls-tree` for slatepack files and lib/wl_gen.
@@ -1200,14 +1178,13 @@ Every repository, ref and checkout this plan and its implementation rely on, as 
 
 | Item | Location | Ref or version | Used for |
 |---|---|---|---|
-| native-build-kit | /home/user/src/stack_wallet/wt/native-build-kit | branch `feat/native-build-kit` at `85f7eb097604e5b99db3f90bccbcada3336836b8` (HEAD of that checkout); pinned by `packages/grin/pubspec.yaml` and `packages/grin/flake.lock` (narHash `sha256-PbHR2lx+BZ6Zr04H6AbpY0lWdPFoKn44x4gHYSmua5c=`) | `native_prebuilt_hook` (the build hook), `lib.mkCargoLibrary` (the Nix reference build), D1, D6 |
-| kit flake inputs | from the kit's flake.lock | nixpkgs `09063bd1f2b36fd9fd793c36dfade7bd40a93dfc`, rust-overlay `5424e1e6dda30b0626935d2a03a6526db4858d60`, zig-overlay `808bad711d9ffe83fe4f92411c43471c839b1658`, systems `da67096a3b9bf56a91d16901293e51ba5b49a27e`, flake-compat `0f9255e01c2351cc7d116c072cb317785dd33b33` | followed by `packages/grin/flake.nix` |
-| tor plugin, kit port | /home/user/src/stack_wallet/wt/tor | `feat/native-build-kit` at `d8c0fd61b0d838dea9212a1fdb591d1565e1b3ba` | model for `hook/build.dart`, `pubspec.yaml`, `flake.nix`, `build-config.json`, `nix/build-apple.sh`, `test/kit_pin_test.dart` (section 3.1, D1, D6) |
-| frostdart, kit port | /home/user/src/stack_wallet/wt/frostdart-kit | `feat/native-build-kit` at `580f1ed595f69fb36e7836dbd07636c45ce57776` | model for the cargo-mode callback (NDK API-level clang, Linux cc/ar) and the README's "Native library" section |
+| native-build-kit | /home/user/src/stack_wallet/wt/native-build-kit | branch `feat/native-build-kit` at `85f7eb097604e5b99db3f90bccbcada3336836b8` | read for the legacy comparison in section 10 and for the removed kit-era build (D1, D7, D10, D11); no longer a dependency |
+| tor plugin, kit port | /home/user/src/stack_wallet/wt/tor | `feat/native-build-kit` at `d8c0fd61b0d838dea9212a1fdb591d1565e1b3ba` | model for `hook/build.dart` (Apple floors) and `pubspec.yaml` (section 3.1, D6); its pre-kit hook (`RustBuilder` directly) is the shape of the hook as it stands now |
+| frostdart, kit port | /home/user/src/stack_wallet/wt/frostdart-kit | `feat/native-build-kit` at `580f1ed595f69fb36e7836dbd07636c45ce57776` | model for the hook's environment handling (NDK API-level clang, Linux cc/ar) |
 | tor plugin as shipped | /home/user/src/stack_wallet/tor (checkout at `e36c899`) | Stack Wallet pins `e30ed0d386a40ee4a999aeaf57aafd32921d601e`; `rust/Cargo.toml` L18 there: `arti-client 0.47.0`, features `static` and `onion-service-client` | the v1 transport decision (section 1 item 4) |
-| native_toolchain_rust | ~/.pub-cache/hosted/pub.dev/native_toolchain_rust-1.0.6 | 1.0.6 (1.0.7 needs code_assets ^2, which the kit excludes) | `RustBuilder` in the cargo mode |
+| native_toolchain_rust | ~/.pub-cache/hosted/pub.dev/native_toolchain_rust-1.0.6 | 1.0.6 (1.0.7 moves to code_assets ^2; pinned together with code_assets ^1.2.1) | `RustBuilder` in `hook/build.dart` |
 | reqwest | ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/reqwest-0.13.4 | 0.13.4 | the TLS feature analysis in section 1 item 2 and 4.1 |
-| Toolchains on the build machine | | Rust 1.94.0 (rustup; `rust-toolchain.toml`), cargo-ndk 4.1.2, cbindgen 0.29.2, Dart 3.13.2, Flutter 3.47.2, Android NDK 28.2.13676358 (also 26.3, 27.0, 28.0, 28.1, 29.0 installed), Determinate Nix 3.17.0 (Nix 2.33.3), llvm-nm, gcc and clang, xvfb-run | gates in sections 7 and 8 |
+| Toolchains on the build machine | | Rust 1.94.0 (rustup; `rust-toolchain.toml`), cargo-ndk 4.1.2, cbindgen 0.29.2, Dart 3.13.2, Flutter 3.47.2, Android NDK 28.2.13676358 (also 26.3, 27.0, 28.0, 28.1, 29.0 installed), llvm-nm, gcc and clang, xvfb-run | gates in sections 7 and 8 |
 
 ### 11.3 Stack Wallet refs read for section 9
 
@@ -1250,35 +1227,25 @@ All in /home/user/src/stack_wallet/stack_wallet (a checkout on `security/rbf-his
 
 Each entry records a choice made while building, the evidence behind it, and how to reverse it. The settled decisions from the review rounds (sections 1 to 8) are not reopened here.
 
-Three entries do change a settled decision of the brief: D1 (the hook's user-define keys), D2 (the local wiring to the unpushed fork) and D6 (where the Cargo workspace lives). Each was forced by something the brief's own pins contradict, and each says how to reverse it. The brief asked for a stop before such a change; the changes were made and recorded first, and on 2026-11-02 the user, asked to accept or reverse them, delegated the call with the instruction to prefer correctness and security over effort. All three stand on that basis. D2 in particular is the safer of the two wirings: a Cargo `[patch]` on a git source still makes cargo fetch the original ssh URL, which the brief forbids, while the URL rewrite keeps cargo from ever reaching it.
+Three entries change a settled decision of the brief: D1 (the hook), D2 (the local wiring to the fork before it was pushed) and D6 (where the Cargo workspace lives). Each says why and how to reverse it. The brief asked for a stop before such a change; the changes were made and recorded first, and on 2026-11-02 the user, asked to accept or reverse them, delegated the call with the instruction to prefer correctness and security over effort. Later the same day the user directed a larger change, recorded in D11: the Nix build and native-build-kit are removed, which supersedes D1's kit contract, D7 and D10 and makes D2's wiring unnecessary.
 
-### D1. The build hook follows the kit's user-define contract (`build`, `prebuilt_hashes.json`), plus a `grin`-specific `test_utils`
+### D1. The build hook is a plain `native_toolchain_rust` build; the kit's user-define contract was used first and then removed
 
-- The brief named the keys `native_build`, `prebuilt_manifest_url` and `prebuilt_manifest_sha256`, and in the same decision required modelling the hook on `wt/tor` and pinning `native_prebuilt_hook` at `85f7eb097604e5b99db3f90bccbcada3336836b8`. Those two halves cannot both hold: the kit at that ref reads a `build` user-define (`dart/native_prebuilt_hook/lib/src/hook.dart` L60, L94-100; `lib/src/build_mode.dart` L22-30) and loads the release URL and per-file sha256 from the package's own `hook/prebuilt_hashes.json` (`lib/src/prebuilt_hashes.dart` L8-13, L36-43; `hook.dart` L184-190). It has no notion of a manifest URL in the consumer's pubspec.
-- The older keys come from Stack Wallet's generated pubspec on a staging-derived branch (`b778525f0`, L374-388), which still consumes the pre-kit versions of `tor_ffi_plugin`, `flutter_libepiccash` and `flutter_libmwc`. The kit versions of those plugins (`wt/tor` at `d8c0fd6`, `wt/frostdart-kit` at `580f1ed`) all use `build`.
-- Decision: `grin` follows the kit, so that Stack Wallet configures `grin`, `tor_ffi_plugin` and `frostdart` the same way once it moves to the kit versions. The pinning intent of the old keys (a release URL plus sha256) is preserved, moved into `packages/grin/hook/prebuilt_hashes.json` where the kit verifies it. `test_utils` is the one `grin`-specific boolean user-define; only the `cargo` mode reads it, because prebuilt, source and dev artifacts are release-shaped by definition.
-- To reverse: `NativeLibrarySpec.userDefineKey` can be set to `native_build` in `packages/grin/hook/build.dart` without touching the kit; the manifest-URL keys would need a hook that bypasses the kit's prebuilt path, which this design rejects.
+- The brief named the keys `native_build`, `prebuilt_manifest_url` and `prebuilt_manifest_sha256` and, in the same decision, required modelling the hook on `wt/tor` and pinning `native_prebuilt_hook` at `85f7eb097604e5b99db3f90bccbcada3336836b8`. Those two halves cannot both hold: the kit at that ref reads a `build` user-define (`dart/native_prebuilt_hook/lib/src/hook.dart` L60, L94-100; `lib/src/build_mode.dart` L22-30) and loads release hashes from the package's own `hook/prebuilt_hashes.json` (`lib/src/prebuilt_hashes.dart` L8-13, L36-43); it has no notion of a manifest URL in the consumer's pubspec. The hook was first built on the kit's contract (`build: prebuilt | source | dev | cargo`, plus a `grin`-specific `test_utils`), and that is what this document described until 2026-11-02.
+- On 2026-11-02 the user directed that the Nix work and native-build-kit be removed (D11). The hook is now `hook/build.dart` calling `RustBuilder` on `rust/` directly, the shape of the pre-kit `tor` plugin hook, keeping the environment handling of the kit-era cargo mode: Android NDK API-level clang as compiler and linker, Linux `cc` and `ar` from the code config, the Apple deployment floors, `strip = none` on Apple (the Xcode PATH finding in section 13), `CARGO_NET_GIT_FETCH_WITH_CLI` for the ssh git dependency, and `--locked`. The only user-define is `test_utils` (bool, default false), which adds `--features test-utils`; the root workspace pubspec sets it for this repository's tests, and apps leave it unset.
+- Consequence for consumers: there is nothing to configure (9.8). Stack Wallet's build machines compile `rust/` with rustup (toolchain pinned by `rust/rust-toolchain.toml`) and the NDK Flutter provides, as they do for the pre-kit Epic Cash and MWC plugins.
+- To reverse: the kit-based hook, flake, scripts and pin test are in the history of `grin-v1` up to commit `0e756af`.
 
-### D2. Local wiring to the unpushed fork uses a git URL rewrite, not a Cargo `[patch]`
+### D2. Local wiring to the fork before it was pushed used a git URL rewrite, not a Cargo `[patch]` (wiring removed on 2026-11-02)
 
 - The brief proposed an uncommitted `.cargo/config.toml` `[patch."ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git"]` pointing every fork crate at `/home/user/src/grin-wallet`. Measured on this machine with cargo 1.94.0: cargo still fetches the patched-over git source before resolving (`cargo generate-lockfile` failed with "failed to load source for dependency `grin_chain` ... Unable to update ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git" even though all nine crates were patched). A `[source.*] replace-with` to a `file://` git source fails earlier still: "the source requires a lock file to be present first before it can be used against vendored source code". Neither can bootstrap a lock file for a repository that is not reachable.
-- What works: let cargo believe it is fetching the cypherstack URL while git rewrites it to the local clone. With `git-fetch-with-cli = true` in `.cargo/config.toml` (committed; it is also what the kit's hook environment passes through) and these environment variables on any cargo command that has to resolve or update the fork:
-
-  ```sh
-  export CARGO_NET_GIT_FETCH_WITH_CLI=true
-  export GIT_CONFIG_COUNT=1
-  export GIT_CONFIG_KEY_0=url.file:///home/user/src/grin-wallet.insteadOf
-  export GIT_CONFIG_VALUE_0=ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git
-  export GIT_SSH_COMMAND=/bin/false   # hard guard: any real ssh attempt fails
-  ```
-
-  `Cargo.lock` then records `source = "git+ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git?rev=<rev>#<rev>"`, exactly what it will record after the push, and cargo's git database under `~/.cargo/git/db/grin-wallet-<hash>` holds the fork's commits under the cypherstack URL. Once the lock file exists and the pinned `rev` is present in that database, cargo does not fetch again, so ordinary `cargo build`, `cargo test`, `dart test` and `flutter build` need none of the variables. Only `cargo update` or a lock regeneration needs them until the push. The variables are set by `tool/local-fork-env.sh`, which is committed as documentation and is a no-op once the fork is public.
-- Consequence for the committed files: `crates/grin-ffi/Cargo.toml` names the cypherstack URL and `rev` as the brief requires; `Cargo.lock` is already in its final form; there is no `[patch]` section anywhere; the `.cargo/config.toml` that is committed contains only `[net] git-fetch-with-cli = true`.
-- The `grin` submodule inside the fork resolves to `https://github.com/mimblewimble/grin` (`.gitmodules` in the fork), which cargo fetches over https; no cypherstack access is involved.
+- What worked until the push: let cargo believe it was fetching the cypherstack URL while git rewrote it to the local clone, through `git-fetch-with-cli = true` in `.cargo/config.toml` and, on any cargo command that had to resolve or update the fork, `CARGO_NET_GIT_FETCH_WITH_CLI=true`, a `url.file:///home/user/src/grin-wallet.insteadOf=ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git` git config and `GIT_SSH_COMMAND=/bin/false` as a hard guard (set by `tool/local-fork-env.sh`, since removed). `Cargo.lock` therefore recorded `source = "git+ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git?rev=<rev>#<rev>"` from the start, and cargo's git database held the fork under that URL.
+- Now: the fork was pushed on 2026-11-02 (`optional-tor-rustls` at `64d361f2`, to git.cypherstack.com and git.manymath.com), `Cargo.lock` is unchanged, `rust/.cargo/config.toml` keeps `[net] git-fetch-with-cli = true` so cargo uses the machine's ssh setup, and there is no override or rewrite anywhere. A `[patch]` is still the wrong tool for a private git source, for the reason measured above.
+- The `grin` submodule inside the fork resolves to `https://github.com/mimblewimble/grin` (`.gitmodules` in the fork), which cargo fetches over https.
 
 ### D3. Toolchain pin
 
-- `rust-toolchain.toml` pins `1.94.0` (the active toolchain on the build machine; `rustup toolchain list`), with the target list the kit builds (`armv7-linux-androideabi`, `aarch64-linux-android`, `x86_64-linux-android`, `aarch64-apple-ios`, `aarch64-apple-ios-sim`, `x86_64-apple-ios`, `x86_64-pc-windows-msvc`, `aarch64-pc-windows-msvc`, `aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin`, `x86_64-apple-darwin`). `build-config.json` names the same version, and the flake fails evaluation when the two disagree (the `wt/tor` flake pattern).
+- `rust-toolchain.toml` pins `1.94.0` (the active toolchain on the build machine; `rustup toolchain list`), with the target list the hook may be asked to build (`armv7-linux-androideabi`, `aarch64-linux-android`, `x86_64-linux-android`, `aarch64-apple-ios`, `aarch64-apple-ios-sim`, `x86_64-apple-ios`, `x86_64-pc-windows-msvc`, `aarch64-pc-windows-msvc`, `aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin`, `x86_64-apple-darwin`). It is the only toolchain pin.
 
 ### D4. Package names
 
@@ -1290,15 +1257,13 @@ Three entries do change a settled decision of the brief: D1 (the hook's user-def
 
 ### D6. The Cargo workspace lives at `packages/grin/rust`, not at the repository root
 
-- The kit's hook resolves the Nix flake from the package root: `flakeReference(packageRoot)` in `dart/native_prebuilt_hook/lib/src/nix_build.dart` L114-121 is what `nix build <flake>#<target>` is run against (L59-64), and `build-config.json`, `hook/prebuilt_hashes.json` and `nix/build-apple.sh` are read relative to it (`hook.dart` L63-65). A flake cannot reference files outside its own directory, and a `path:` input pointing at the repository root would copy every untracked file (including `target/`) into the store. So everything the Nix build reads has to sit under `packages/grin`.
-- Layout: `packages/grin/rust/` is the `grin-ffi` crate and its own single-crate Cargo workspace (`Cargo.toml` with `[package]` and an empty `[workspace]`, `Cargo.lock`, `rust-toolchain.toml`, `.cargo/config.toml`, `build.rs`, `cbindgen.toml`, `include/grin_ffi.h`, `src/`, `tests/`), and `packages/grin/` holds `flake.nix`, `flake.lock`, `nix/build-apple.sh`, `build-config.json` and `hook/`, mirroring `wt/tor` (`rust/` inside the plugin). The crate sits directly in `rust/` rather than in a `rust/grin-ffi/` member because `native_toolchain_rust`'s `RustBuilder` reads `rust-toolchain.toml` from the crate directory it is pointed at. Section 3's tree, which showed `crates/grin-ffi` and a root `Cargo.toml`, is superseded by this; decision 1 (one monorepo with a Cargo workspace and a pub workspace) is unchanged.
+- Decided while the build went through the kit, whose hook resolved the flake and its config files from the package root, so everything the Nix build read had to sit under `packages/grin`. With the kit gone the constraint that remains is `native_toolchain_rust`'s `RustBuilder`, which is pointed at a path inside the package and reads `rust-toolchain.toml` from the crate directory it is pointed at. The layout also matches the plugins Stack Wallet already builds (`rust/` inside `tor`, `flutter_libepiccash` and `flutter_libmwc`) and what dnix expects (`rust.workspace` and `rust.crate` under the package), so it stays.
+- Layout: `packages/grin/rust/` is the `grin-ffi` crate and its own single-crate Cargo workspace (`Cargo.toml` with `[package]` and an empty `[workspace]`, `Cargo.lock`, `rust-toolchain.toml`, `.cargo/config.toml`, `build.rs`, `cbindgen.toml`, `include/grin_ffi.h`, `src/`, `tests/`), built by `packages/grin/hook/build.dart`. Section 3's tree shows the layout as built; the brief's `crates/grin-ffi` wording predates it.
 - The pub workspace root (`/home/user/src/grin/pubspec.yaml`) stays at the repository root with `tool/` and `docs/`.
 
-### D7. The grin-wallet fork is a flake input, handed to importCargoLock through a fetchgit overlay
+### D7. Withdrawn: the grin-wallet fork as a flake input
 
-- `importCargoLock` vendors a git dependency with `fetchgit`, a fixed-output derivation that runs inside the sandbox without the user's ssh credentials, so it cannot reach a private ssh remote. The fork is therefore an input of `packages/grin/flake.nix` (`grin-wallet`, `flake = false`, `git+ssh://...?ref=optional-tor-rustls&rev=<rev>&submodules=1`), which Nix fetches at evaluation time with the user's ssh setup and pins by rev and narHash in `flake.lock`. An overlay on the kit's `pkgs` replaces `fetchgit` for that one URL with the input's tree (keeping `fetchgit`'s attributes, since it is an overridable function); `cargoLock.outputHashes` carries the input's narHash under `grin_wallet_impls-5.5.1`, which `importCargoLock` keys by commit.
-- Evaluation fails when the input's rev differs from the rev `rust/Cargo.lock` records for `grin_wallet_impls`, so the vendored tree always matches the lock, and when `build-config.json` and `rust-toolchain.toml` disagree on the Rust version.
-- From a checkout the flake must be referenced as `git+file://<repo>?dir=packages/grin` (a `path:` reference would copy `rust/target` into the store), and until the kit and fork are pushed both inputs are overridden with local `git+file` references (README, `tool/ci.dart --local-inputs`). The kit's hook uses `path:` for a package without a `.git` directory, which is why in-repo builds select `build: cargo` in the workspace pubspec and leave Nix to `tool/ci.dart`.
+Removed with the flake on 2026-11-02 (D11). The approach (the fork as a `flake = false` input handed to `importCargoLock` through a `fetchgit` overlay, because a fixed-output fetch inside the Nix sandbox cannot use ssh credentials) is in the history of `grin-v1` up to `0e756af`, should dnix need the same trick for a private git dependency.
 
 ### D8. Scan cancellation runs the batch loop in grin-ffi
 
@@ -1310,7 +1275,7 @@ Three entries do change a settled decision of the brief: D1 (the hook's user-def
 
 ## 13. Verification record (2026-11-01, Linux x86_64 build machine)
 
-What ran, through `dart run tool/ci.dart --local-inputs` on the final tree (commit `534a9f8`), plus the fork gates. Lines are the tools' own output.
+What ran, through `dart run tool/ci.dart --local-inputs` (the `nix` stage still existed) on the tree at commit `534a9f8`, plus the fork gates. Lines are the tools' own output. The rerun after the Nix removal is at the end of this section.
 
 | Gate | Output |
 |---|---|
@@ -1329,7 +1294,7 @@ What ran, through `dart run tool/ci.dart --local-inputs` on the final tree (comm
 | flutter-analyze (package and example), flutter-test | `No issues found!`, `00:00 +8: All tests passed!` |
 | flutter-build | `Built build/linux/x64/release/bundle/grin_flutter_example`, `Built build/app/outputs/flutter-apk/app-release.apk (28.0MB)` |
 | example integration test (`xvfb-run -a flutter test integration_test -d linux`) | `All tests passed!` (mnemonic and address through the real library) |
-| nix (six targets through the kit, local inputs) + nm gate | `35 standard, 0 test symbols` for x86_64 and aarch64 Linux, aarch64/armv7/x86_64 Android, and the Windows DLL; candidate hashes in `build/nix/prebuilt_hashes.candidate.json` |
+| nix (six targets through the kit, local inputs) + nm gate; stage removed since (D11) | `35 standard, 0 test symbols` for x86_64 and aarch64 Linux, aarch64/armv7/x86_64 Android, and the Windows DLL; candidate hashes in `build/nix/prebuilt_hashes.candidate.json` |
 
 Known notices: the hooks runner prints `File modified during build. Build must be rerun.` once per cargo-mode build and then rebuilds successfully; it also appears in a single-process run, so it is not a concurrency artifact. The cause has not been pinned down (build.rs no longer writes into the source tree); it does not affect the result.
 
@@ -1340,22 +1305,7 @@ Apple hosts, run on m3max-mbp (macOS 26, Xcode 27.0.1, rustup 1.94.0) with `tool
 | cargo release builds with the host toolchain (commit `2f0a9e1`) | `nm aarch64-apple-darwin: 35 standard, 0 test symbols`, `nm x86_64-apple-darwin: 35 standard, 0 test symbols`, `nm aarch64-apple-ios: 35 standard, 0 test symbols`, `nm aarch64-apple-ios-sim: 35 standard, 0 test symbols`, `nm x86_64-apple-ios: 35 standard, 0 test symbols` |
 | example through the hook's cargo mode (commit `dc3e37c`) | `flutter build macos`: `Built build/macos/Build/Products/Release/grin_flutter_example.app (62.0MB)`; `flutter build ios --no-codesign`: `Built build/ios/iphoneos/Runner.app (25.7MB)` |
 
-Two things were learned there and fixed: the iOS device link needs the deployment floors (`IPHONEOS_DEPLOYMENT_TARGET=13.0`, which the hook already passes; the script now does too), and inside an Xcode build the hook's cargo mode must build with `strip = none` on Apple, because under Xcode's PATH the stripped host proc-macro dylibs stop loading (reproduced with that PATH alone; `CARGO_PROFILE_RELEASE_STRIP=none` in `hook/build.dart`). The kit's Nix Apple reference build (`nix develop "git+file://$PWD?dir=packages/grin#apple" --command packages/grin/nix/build-apple.sh <out>`, with the local kit and fork as overridden inputs and `GRIN_FFI_ANY_XCODE=1`) fails against the kit at `85f7eb0` and passes once the kit's Apple shell stops faking the host, the change shipped as `docs/kit-apple-shell-real-host.patch` (D10). With that change, on the same Mac (2026-11-02):
-
-| Gate | Output |
-|---|---|
-| kit Apple reference build, all five targets (commit `0b95aa8`; the kit at `85f7eb0` with `docs/kit-apple-shell-real-host.patch` applied in the Mac's scratch kit clone) | `nix apple exit=0` (the kit's leak scan included), `Wrote .../build/apple8/SHA256SUMS.apple`; run twice (once with the same change made in `nix/build-apple.sh`, once with the patch as shipped): `SUMS_SAME`, every hash identical |
-| exported symbols of each reference `libgrin_ffi.dylib` | `aarch64-apple-darwin: 35 standard, 0 test`, `x86_64-apple-darwin: 35 standard, 0 test`, `aarch64-apple-ios: 35 standard, 0 test`, `aarch64-apple-ios-sim: 35 standard, 0 test`, `x86_64-apple-ios: 35 standard, 0 test` |
-
-`SHA256SUMS.apple` from those runs, for comparison with a later build from the patched kit:
-
-```text
-25ba8c9d26164e9dde222275f3db1d24bb7f682323e914695590ed4fdda6b025  ./aarch64-apple-darwin/libgrin_ffi.dylib
-631823db0fd5449edd6dfd6c4b5cb9992f6bae280c11c198d9c9601039a8ad2e  ./aarch64-apple-ios-sim/libgrin_ffi.dylib
-0d2ba29640137857fee237c11f88415180b439ae05769612b199a7bef5cbe612  ./aarch64-apple-ios/libgrin_ffi.dylib
-f1ffd2e181aee2a90db37b65c544149d5af901fde3e5fe94be4e0fdf806c72a6  ./x86_64-apple-darwin/libgrin_ffi.dylib
-e602d685d472d25cb60d18053902bf71248ab910d85dec13d7cd3a6b15d31e48  ./x86_64-apple-ios/libgrin_ffi.dylib
-```
+Two things were learned there and fixed: the iOS device link needs the deployment floors (`IPHONEOS_DEPLOYMENT_TARGET=13.0`, which the hook already passes; the script now does too), and inside an Xcode build the hook's cargo mode must build with `strip = none` on Apple, because under Xcode's PATH the stripped host proc-macro dylibs stop loading (reproduced with that PATH alone; `CARGO_PROFILE_RELEASE_STRIP=none` in `hook/build.dart`). The kit's Nix Apple reference build was also exercised there; its result and the kit bug it found are summarized in D10, withdrawn with the kit.
 
 Windows host, run on desktop-pmacb92 (Windows 10, rustup with the MSVC toolchain; Rust 1.94.0 installed by rust-toolchain.toml) with `tool/verify-windows.ps1` from a clone made out of git bundles copied over scp (git over ssh from that host prompts for a key passphrase):
 
@@ -1368,11 +1318,28 @@ Live node smoke test: no public Grin testnet node answered, so a grin 5.5.2 node
 
 Private chain (regtest) run, on this machine: the node's usernet mode (`ChainTypes::UserTesting`) with its test miner, a grin-wallet CLI wallet (built from the fork) owning the mined coins and running a foreign API listener, and a local SOCKS5 proxy; all set up by `tool/regtest.sh`. `packages/grin/test/regtest_test.dart` passed, both from the hand-run setup (`00:18 +1: All tests passed!`) and from a clean `tool/regtest.sh` run that builds everything into a temp dir (`tip: 22`, `00:56 +1: All tests passed!`, `proxy connections: 3`), and covered: a scan over a populated chain (tip above 100), a Slatepack exchange with another implementation (S1 from grin-wallet, S2 from this library, finalized and posted by grin-wallet, confirmed by the miner), a real HTTP send from this library to grin-wallet's listener (`init_send_tx`, `receive_tx` over HTTP, lock, finalize, post), and the same send through the SOCKS5 proxy (the proxy log shows the CONNECTs to the node and to the listener). What this does not cover is Tor itself (an onion address through a real Tor daemon) and mainnet.
 
-Not verified here: an onion-address send through a real Tor daemon, a mainnet or testnet sync of a populated public chain (the local testnet node was still header-syncing when stopped), a send against a public node (the regtest send went to a grin-wallet listener on a private chain), the Tor path of `grin_tx_send_http` beyond its proxy checks, the GC-finalizer path of `GrinWalletClient` beyond the Rust-side simulation with a retained session, and the kit's Apple reference build against an unpatched kit (D10).
+Not verified here: an onion-address send through a real Tor daemon, a mainnet or testnet sync of a populated public chain (the local testnet node was still header-syncing when stopped), a send against a public node (the regtest send went to a grin-wallet listener on a private chain), the Tor path of `grin_tx_send_http` beyond its proxy checks, and the GC-finalizer path of `GrinWalletClient` beyond the Rust-side simulation with a retained session.
 
-Process note: while testing the brief's Cargo `[patch]` wiring, one command ran without the ssh guard and cargo opened an ssh connection to git.cypherstack.com, which answered that `sneurlax/grin-wallet` does not exist there. Nothing was fetched or pushed. Every later cargo, pub and nix command ran with `GIT_SSH_COMMAND=/bin/false`, and tool/local-fork-env.sh sets it as well.
+Process note: while testing the brief's Cargo `[patch]` wiring, one command ran without the ssh guard and cargo opened an ssh connection to git.cypherstack.com, which answered that `sneurlax/grin-wallet` does not exist there. Nothing was fetched or pushed. Every later cargo, pub and nix command ran with `GIT_SSH_COMMAND=/bin/false` (tool/local-fork-env.sh, since removed, set it as well), until 2026-11-02, when the user created `sneurlax/grin-wallet`, `sneurlax/grin` and `sneurlax/grin-ffi` on that host and asked for the pushes; from then on contact with it is intended.
 
 Independent review: two Opus reviewers read grin-ffi and GrinWalletClient without the authors' conclusions. grin-ffi: no blockers, six should-fix items (sidecar overwrite on read errors, password error mapping, a self-comparing header test, `null` optional args, scan cancellation, a secret-leaking reallocation), all fixed in `4accb74` together with most of the nits; the rest followed in `3bf7bac`. GrinWalletClient: one blocker (`close()` could hang behind a paused `events` listener), seven should-fix items, all fixed in `dc67ca9` and `4accb74`, and the nits in `3bf7bac`. The items left unchanged on purpose are listed in D9.
+
+### Rerun on 2026-11-02, after the Nix removal (D11)
+
+`dart run tool/ci.dart` on the tree with the flake, the kit dependency and the `nix` stage removed and the hook rewritten (D1); every remaining stage passed, output lines as printed:
+
+| Gate | Output |
+|---|---|
+| rust-dups | `no duplicated grin or secp crates` |
+| rust-test | `42 passed` (unit), `14 passed` (ffi_e2e_test), `8 passed` (ffi_tx_test), `4 passed` (header_test) |
+| rust-release, android (three targets) | `nm libgrin_ffi.so: 35 standard, 0 test symbols`, four times |
+| bindings | `regen_bindings --check: no diff` |
+| dart-analyze, dart-format | `No issues found!`, `Formatted 52 files (0 changed)` |
+| dart-test (through the rewritten hook, `test_utils` on) | `00:17 +118 ~2: All tests passed!` (the two skips are the live-node and regtest suites without their variables; the kit pin test is gone) |
+| flutter-analyze, flutter-test | `No issues found!`, `00:00 +8: All tests passed!` |
+| flutter-build (through the rewritten hook) | `Built build/linux/x64/release/bundle/grin_flutter_example`, `Built build/app/outputs/flutter-apk/app-release.apk (28.0MB)` |
+
+Not rerun after the removal: the Apple and Windows host builds (the scripts changed only by losing their Nix and fork-rewrite parts), the live node and regtest suites.
 
 ### D9. Review items left as they are, and why
 
@@ -1384,15 +1351,14 @@ Of the review nits (section 13), three were deliberately not changed:
 
 Every other finding, nits included, was fixed: F18 (the lease is keyed by device and inode on unix, so bind mounts and renamed parents share one key), F21 (the pointer-taking `extern "C"` functions are `unsafe` in Rust; the C header is unchanged), F24 and F25 (the test proxy cannot hang a caller indefinitely and mining restores the thread's chain type on a panic), N3 (a Dart `Finalizer` over a weak reference closes the `events` stream on the GC path; the native close stays with the `NativeFinalizer`), and N10 (the hook warns when `test_utils` is set with a build mode other than `cargo`).
 
-### D10. The kit's Apple shell must not fake the host; the fix is shipped as a kit patch, and a flake-side workaround was tried and reverted
+### D10. Withdrawn: the kit's Apple shell and the fake host
 
-The kit's Nix Apple reference build failed for this crate against the kit at `85f7eb0`. Root cause, from the failing build scripts' own output: the Apple shell exports the kit's fixed-host `RUSTC_WRAPPER` (`nix/cargo-library.nix`, the `apple` shell, L824-826), which answers `rustc -vV` with `host: x86_64-unknown-linux-musl` so that crate metadata hashes do not depend on the build machine. Cargo therefore hands every host build script `TARGET=x86_64-unknown-linux-musl`. On Linux the kit's derivations provide a zig-based compiler for that name; in the Apple shell nothing does, and the host side of this crate compiles C (`libz-sys` and `libgit2-sys`, pulled in by `grin_util`'s `built` build-dependency through its `git2` feature). Two failures follow, in order:
+Removed with the kit on 2026-11-02 (D11). What was found is kept because dnix also builds Apple targets with Nix on a Mac. The kit's Apple dev shell exported a rustc wrapper that reported `host: x86_64-unknown-linux-musl`, so that crate metadata hashes would not depend on the building Mac. Cargo passes that host to the build scripts of host crates as `TARGET`, so any host crate that compiles C configured and compiled it for Linux. For this crate that was `libz-sys` (`--target=x86_64-unknown-linux-musl` handed to Xcode's clang, `'stddef.h' file not found`) and `libgit2-sys` (libgit2's Linux configuration, `no member named 'st_mtim' in 'struct stat'`), both pulled in by `grin_util`'s `built` build-dependency through its `git2` feature. A compiler wrapper for the fake host fixed only the first. Removing the wrapper from the Apple shell fixed both: all five Apple targets then built through the kit on an Apple Silicon Mac (macOS 26, Xcode 27.0.1), passed its leak scan, exported 35 standard and 0 test symbols, and reproduced byte for byte across two runs. The kit patch and the flake-side attempt are in the history of `grin-v1` up to `0e756af`. If dnix fakes the host the same way, grin-ffi will hit the same two failures.
 
-1. `libz-sys`: cc-rs passes `--target=x86_64-unknown-linux-musl` to Xcode's clang, which has no headers for it (`'stddef.h' file not found`).
-2. `libgit2-sys`: its build script selects libgit2's platform configuration from `TARGET`, so it compiles the Linux variant on macOS (`no member named 'st_mtim' in 'struct stat'`).
+### D11. Nix and native-build-kit removed; release artifacts deferred to dnix
 
-Commit `0b95aa8` tried the first fix that is possible from this flake: `families.apple.env` set `CC_x86_64_unknown_linux_musl` and `CXX_x86_64_unknown_linux_musl` to a wrapper that drops the target flags and compiles natively. It got `libz-sys` through and stopped at `libgit2-sys`, whose configuration no compiler wrapper can correct; it was reverted in the next commit. Plugins whose host build scripts compile no C (frostdart, tor) do not hit either failure.
-
-The fix belongs in the kit, and the correct place is the shell, not the script: `build-apple.sh` refuses to run outside the shell, and anything else run in `nix develop .#apple` would hit the same fake host. The change is `docs/kit-apple-shell-real-host.patch` in this repository: it removes `RUSTC_WRAPPER = rustcWrapper;` from the `apple` shell and replaces the comment with the reason. It applies to the kit at `85f7eb0` with `git apply` (checked against the local checkout without modifying it) and was verified on the Mac in a scratch clone of the kit, never in the kit's own checkout: with it every Apple target built and passed the kit's leak scan (section 13), and the hashes matched a run made with the same change placed in `build-apple.sh`, so the two placements are equivalent and the build reproduces on that Mac.
-
-Why not keep the fixed host and give the Apple shell a compiler for it: the host crates' C objects then have to link into host build-script executables and proc macros, which are Mach-O for the real host, so the fake host's objects must be ABI-compatible with the real host. That holds on x86_64 Linux (musl objects link into gnu binaries) and cannot hold on a Mac for a Linux triple. A fixed Apple triple instead (`aarch64-apple-darwin` for every Mac) would break on Intel Macs the same way. The remaining cost of the patch is the one the wrapper existed to avoid: Apple crate metadata hashes depend on the building Mac's architecture, so a build from an Intel Mac and one from an Apple Silicon Mac will not be byte-identical. They already depend on the Mac's Xcode, which `build-apple.sh` pins by version. The upstream alternative, dropping `built`'s `git2` feature in `grin_util`, lives in the grin node repository and would only move the problem to the next crate with C in a host dependency. Until the kit carries the patch, the Apple reference build needs it, and the hook's `cargo` mode is the way Apple builds are made from this checkout.
+- On 2026-11-02 the user directed that the Nix work be removed entirely: it had been built without an explicit instruction beyond the brief's Phase 4, reproducibility should not be a concern before the plugin has settled and has been reviewed by the user's senior/manager, and when a release pipeline is added it will be [dnix](https://github.com/cypherstack/dnix), not native-build-kit.
+- Removed from `grin-v1` (history kept; the last kit-era commit is `0e756af`): `packages/grin/flake.nix`, `flake.lock`, `nix/build-apple.sh`, `build-config.json`, `hook/prebuilt_hashes.json`, `test/kit_pin_test.dart`, `docs/kit-apple-shell-real-host.patch`, `tool/local-fork-env.sh`, the `nix` stage and `--local-inputs` of `tool/ci.dart`, the Nix parts of `tool/verify-apple.sh` and the fork rewrite in `tool/verify-windows.ps1`, the `native_prebuilt_hook` dependency, the `build` user-define and the uncommitted `pubspec_overrides.yaml`. The hook as it stands is described in D1.
+- Kept: the `nm` symbol gate on every release build `tool/ci.dart` makes (host and Android) and on the host builds the verify scripts make; `rust/rust-toolchain.toml` as the only toolchain pin; the crate layout (D6).
+- What dnix will want, from its README as read on 2026-11-02 (not pinned or verified here): `hook/build.dart` calling `buildNativeLibrary(args)` from `package:dnix/dnix.dart`, a `dnix.json` in the package root naming `rust.workspace` and `rust.crate`, `library`, `targets` and `toolchains.rust`, a `flake.nix` calling `dnix.lib.package`, a `dnix.lock` of per-library hashes, and a `cdylib` with an explicit release profile. `packages/grin/rust` already satisfies the crate side (cdylib, release profile, single-crate workspace, Rust 1.94.0 pin). Two things from the removed hook to carry over when that happens, if dnix's source path does not handle them: the Android API-level linker selection and the Apple `strip = none` finding (D1).
+- Verification after the removal is recorded at the end of section 13.

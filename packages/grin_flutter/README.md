@@ -6,36 +6,31 @@ Flutter glue for [`grin`](../grin). It adds three things:
 - `GrinLifecycleObserver` wraps `AppLifecycleListener` and calls `GrinWalletClient.cancelScan()` when the app is `paused` or `detached`. Dispose it before closing the client.
 - It re-exports `package:grin/grin.dart`, so one import gives the whole API.
 
-The native library is not built here. The build hook of `grin` builds or downloads it for every Flutter target. See [`packages/grin/README.md`](../grin/README.md) for the build modes (`prebuilt`, `source`, `dev`, `cargo`) and the `test_utils` option, which must stay unset in an app.
+The native library is not built here. The build hook of `grin` builds it for every Flutter target with the host Rust toolchain; see [`packages/grin/README.md`](../grin/README.md). Its one option, `test_utils`, must stay unset in an app.
 
 ## Using it from Stack Wallet
 
-Both packages come from the same repository, so `grin` is pinned in `dependency_overrides` at the same url and ref:
+Both packages come from the same repository, so `grin` is pinned in `dependency_overrides` at the same url and ref. Nothing goes under `hooks.user_defines` for `grin`.
 
 ```yaml
 dependencies:
   grin_flutter:
     git:
-      url: https://github.com/cypherstack/grin.git
+      url: ssh://git@git.cypherstack.com:222/sneurlax/grin.git
       path: packages/grin_flutter
       ref: <commit>
 
 dependency_overrides:
   grin:
     git:
-      url: https://github.com/cypherstack/grin.git
+      url: ssh://git@git.cypherstack.com:222/sneurlax/grin.git
       path: packages/grin
       ref: <commit>
-
-hooks:
-  user_defines:
-    grin:
-      build: prebuilt   # or source, dev, cargo; unset lets the hook pick
 ```
 
 ## Example app and tests
 
-`example/` creates a testnet wallet and shows its address. In this workspace the root pubspec builds the library with cargo, so the Rust toolchain is needed.
+`example/` creates a testnet wallet and shows its address. The root pubspec of this workspace turns on `test_utils`; the Rust toolchain is needed either way.
 
 ```
 cd example

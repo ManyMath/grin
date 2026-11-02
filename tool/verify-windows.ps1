@@ -1,15 +1,14 @@
 # Release build of grin-ffi for x86_64-pc-windows-msvc with the host
 # toolchain (rustup with the MSVC linker), and the export gate: 35 grin_
-# functions and no grin_test_ ones. This is what the hook's cargo mode does
-# on a Windows host. Run in PowerShell:
+# functions and no grin_test_ ones. This is what the build hook does on a
+# Windows host. Run in PowerShell:
 #
-#   tool\verify-windows.ps1 [-Fork C:\path\to\grin-wallet] [-Flutter]
+#   tool\verify-windows.ps1 [-Flutter]
 #
-# -Fork is only needed while the fork is not pushed (the same git URL
-# rewrite as tool/local-fork-env.sh). -Flutter also builds the example app
-# for Windows when flutter is on PATH.
+# -Flutter also builds the example app for Windows when flutter is on PATH.
+# Fetching the grin-wallet fork needs ssh read access to git.cypherstack.com
+# (or the fork's rev already in the cargo git database).
 param(
-  [string]$Fork = $env:GRIN_WALLET_LOCAL,
   [switch]$Flutter
 )
 # Native tools write progress to stderr (rustup's "info:" lines), which
@@ -17,15 +16,7 @@ param(
 # output is redirected. Exit codes are checked explicitly instead.
 $ErrorActionPreference = 'Continue'
 $root = Split-Path -Parent $PSScriptRoot
-if ($Fork) {
-  $forkUrl = 'file:///' + ($Fork -replace '\\', '/')
-  $env:CARGO_NET_GIT_FETCH_WITH_CLI = 'true'
-  $env:GIT_CONFIG_COUNT = '1'
-  $env:GIT_CONFIG_KEY_0 = "url.$forkUrl.insteadOf"
-  $env:GIT_CONFIG_VALUE_0 = 'ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git'
-}
-# Hard guard: no real ssh from this script.
-$env:GIT_SSH_COMMAND = 'cmd /c exit 1'
+$env:CARGO_NET_GIT_FETCH_WITH_CLI = 'true'
 
 Write-Output '== host'
 rustc --version; cargo --version

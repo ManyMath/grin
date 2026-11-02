@@ -15,9 +15,6 @@ workspace:
 hooks:
   user_defines:
     grin:
-      # Build with the host Rust toolchain while developing in this repo.
-      # Release artifacts come from the Nix flake (tool/ci.dart).
-      build: cargo
       # Export grin_test_* so dart test can drive an in-process chain.
-      # Only the cargo mode honours this; never set it in an app.
+      # Never set it in an app.
       test_utils: true

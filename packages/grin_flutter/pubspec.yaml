@@ -1,7 +1,7 @@
 name: grin_flutter
 description: Flutter glue for package:grin. A default wallet directory, an app lifecycle observer, and re-exports; the native library comes from package:grin's build hook.
 version: 0.1.0
-repository: https://github.com/cypherstack/grin
+repository: https://git.cypherstack.com/sneurlax/grin
 publish_to: none
 resolution: workspace
 
