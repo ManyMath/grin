@@ -238,3 +238,7 @@ GRIN_NODE_URL=http://127.0.0.1:13413 dart test test/live_node_test.dart
 ```
 
 `GRIN_NODE_NETWORK=mainnet` switches the wallet to mainnet; the test only reads the tip and scans an empty wallet.
+
+### Private chain (regtest) run
+
+`tool/regtest.sh` (repository root) builds the node and the grin-wallet CLI from the fork, starts a usernet chain with the test miner, a CLI wallet listener and a SOCKS5 test proxy, and runs `test/regtest_test.dart`: populated-chain scan, a Slatepack exchange with grin-wallet, a real HTTP send and the same send through the proxy. The test is skipped unless the `GRIN_REGTEST_*` variables it documents are set.
