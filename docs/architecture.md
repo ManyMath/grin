@@ -1308,7 +1308,7 @@ Each entry records a choice made while building, the evidence behind it, and how
 
 ## 13. Verification record (2026-11-01, Linux x86_64 build machine)
 
-What ran, through `dart run tool/ci.dart --local-inputs` on the final tree (commit `3bf7bac`), plus the fork gates. Lines are the tools' own output.
+What ran, through `dart run tool/ci.dart --local-inputs` on the final tree (commit `534a9f8`), plus the fork gates. Lines are the tools' own output.
 
 | Gate | Output |
 |---|---|
@@ -1318,14 +1318,14 @@ What ran, through `dart run tool/ci.dart --local-inputs` on the final tree (comm
 | fork: `cargo check -p grin_wallet_impls --no-default-features` | `error: grin_wallet_impls needs a TLS backend: enable the `rustls` or `native-tls` feature` (expected) |
 | rust-dups (`cargo tree -d`) | `no duplicated grin or secp crates` |
 | rust-fmt, rust-clippy (with and without test-utils, `-D warnings`) | ok |
-| rust-test (`cargo test -p grin-ffi --features test-utils --locked`) | `39 passed` (unit), `14 passed` (ffi_e2e_test), `8 passed` (ffi_tx_test), `4 passed` (header_test: C11 and C++11 with -Wall -Wextra -pedantic, committed header equals the generated one) |
+| rust-test (`cargo test -p grin-ffi --features test-utils --locked`) | `42 passed` (unit), `14 passed` (ffi_e2e_test), `8 passed` (ffi_tx_test), `4 passed` (header_test: C11 and C++11 with -Wall -Wextra -pedantic, committed header equals the generated one) |
 | rust-release (host) | `nm libgrin_ffi.so: 35 standard, 0 test symbols` |
 | android (cargo-ndk, NDK 28.2.13676358, API 24; aarch64, armv7, x86_64) | `nm libgrin_ffi.so: 35 standard, 0 test symbols` for each |
 | bindings (`tool/regen_bindings.dart --check`) | `regen_bindings --check: no diff` |
 | dart-analyze (`--fatal-infos`), dart-format | `No issues found!`, `Formatted 51 files (0 changed)` |
 | dart-test (`packages/grin`, test_utils on) | `00:18 +120: All tests passed!` |
 | flutter-analyze (package and example), flutter-test | `No issues found!`, `00:00 +8: All tests passed!` |
-| flutter-build | `Built build/linux/x64/release/bundle/grin_flutter_example`, `Built build/app/outputs/flutter-apk/app-release.apk (27.8MB)` |
+| flutter-build | `Built build/linux/x64/release/bundle/grin_flutter_example`, `Built build/app/outputs/flutter-apk/app-release.apk (28.0MB)` |
 | example integration test (`xvfb-run -a flutter test integration_test -d linux`) | `All tests passed!` (mnemonic and address through the real library) |
 | nix (six targets through the kit, local inputs) + nm gate | `35 standard, 0 test symbols` for x86_64 and aarch64 Linux, aarch64/armv7/x86_64 Android, and the Windows DLL; candidate hashes in `build/nix/prebuilt_hashes.candidate.json` |
 
