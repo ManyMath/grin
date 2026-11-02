@@ -1303,3 +1303,34 @@ Each entry records a choice made while building, the evidence behind it, and how
 - The first implementation called `owner::scan`, which has no hook between its 10,000-block batches, so a cancel could only stop the next scan from starting. The independent review flagged that `close`, `delete` and the finalizer path then waited for a whole scan (review finding F5).
 - `grin_wallet_libwallet::scan`, `refresh_outputs`, `WalletBackend::batch` and `save_last_scanned_block` are all public in the fork, so `scan.rs` now runs the same steps as `owner::scan` itself: refresh outputs, read the tip, then scan in batches of 10,001 heights, saving the last scanned block after each batch and checking one atomic (running, cancel requested, closed) before the next. A cancel or a close makes the call return `Cancelled` with `{"scanned_height", "tip_height"}`; a batch that has started runs to its end, so a cancel can wait for one batch. A cancel with no scan running is a no-op, and every scan starts with the flag cleared, so the lifecycle observer's cancel on every pause cannot fail the next scan.
 - Dart: `GrinWalletClient.close()` cancels directly, drains the queue, and a scan that was still queued when `close()` ran throws `StateError` instead of starting. Section 4.6 rows 19 to 21 and 7.3 item 4 now describe what is built.
+
+---
+
+## 13. Verification record (2026-11-01, Linux x86_64 build machine)
+
+What ran, through `dart run tool/ci.dart --local-inputs` after the review fixes (commit `4accb74`), plus the fork gates. Lines are the tools' own output.
+
+| Gate | Output |
+|---|---|
+| fork: `cargo test -p grin_wallet_impls --no-default-features --features rustls` | `test result: ok. 12 passed; 0 failed` |
+| fork: `cargo test -p grin_wallet_impls` (defaults) | `test result: ok. 16 passed; 0 failed` |
+| fork: `cargo check --workspace --all-targets` | exit 0 |
+| fork: `cargo check -p grin_wallet_impls --no-default-features` | `error: grin_wallet_impls needs a TLS backend: enable the `rustls` or `native-tls` feature` (expected) |
+| rust-dups (`cargo tree -d`) | `no duplicated grin or secp crates` |
+| rust-fmt, rust-clippy (with and without test-utils, `-D warnings`) | ok |
+| rust-test (`cargo test -p grin-ffi --features test-utils --locked`) | `37 passed` (unit), `12 passed` (ffi_e2e_test), `7 passed` (ffi_tx_test), `4 passed` (header_test: C11 and C++11 with -Wall -Wextra -pedantic, committed header equals the generated one) |
+| rust-release (host) | `nm libgrin_ffi.so: 35 standard, 0 test symbols` |
+| android (cargo-ndk, NDK 28.2.13676358, API 24; aarch64, armv7, x86_64) | `nm libgrin_ffi.so: 35 standard, 0 test symbols` for each |
+| bindings (`tool/regen_bindings.dart --check`) | `regen_bindings --check: no diff` |
+| dart-analyze (`--fatal-infos`), dart-format | `No issues found!`, `Formatted 51 files (0 changed)` |
+| dart-test (`packages/grin`, test_utils on) | `00:17 +118: All tests passed!` |
+| flutter-analyze (package and example), flutter-test | `No issues found!`, `00:00 +8: All tests passed!` |
+| flutter-build | `Built build/linux/x64/release/bundle/grin_flutter_example`, `Built build/app/outputs/flutter-apk/app-release.apk (27.8MB)` |
+| example integration test (`xvfb-run -a flutter test integration_test -d linux`) | `All tests passed!` (mnemonic and address through the real library) |
+| nix (six targets through the kit, local inputs) + nm gate | `35 standard, 0 test symbols` for x86_64 and aarch64 Linux, aarch64/armv7/x86_64 Android, and the Windows DLL; candidate hashes in `build/nix/prebuilt_hashes.candidate.json` |
+
+Known notices: the hooks runner prints `File modified during build. Build must be rerun.` once per cargo-mode build and then rebuilds successfully; it also appears in a single-process run, so it is not a concurrency artifact. The cause has not been pinned down (build.rs no longer writes into the source tree); it does not affect the result.
+
+Not verified here: macOS and iOS builds (no Apple SDK; the flake's `apple` shell and `nix/build-apple.sh` are written but never run), a Windows host build (the DLL was cross-built by the kit and only its export table was checked), any sync or send against a real node (no public Grin testnet node answered), the Tor path of `grin_tx_send_http` beyond its proxy checks, and the GC-finalizer path of `GrinWalletClient` beyond the Rust-side simulation with a retained session.
+
+Independent review: two Opus reviewers read grin-ffi and GrinWalletClient without the authors' conclusions. grin-ffi: no blockers, six should-fix items (sidecar overwrite on read errors, password error mapping, a self-comparing header test, `null` optional args, scan cancellation, a secret-leaking reallocation), all fixed in `4accb74` together with twelve of the nits. GrinWalletClient: one blocker (`close()` could hang behind a paused `events` listener), seven should-fix items, all fixed in `dc67ca9` and `4accb74`; the remaining nits are recorded in the review reports under the session scratchpad and summarized in the project report.
