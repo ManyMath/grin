@@ -1,122 +1,144 @@
 import 'package:flutter/material.dart';
+import 'package:grin_flutter/grin_flutter.dart';
 
-void main() {
-  runApp(const MyApp());
-}
+void main() => runApp(const ExampleApp());
 
-class MyApp extends StatelessWidget {
-  const MyApp({super.key});
-
-  // This widget is the root of your application.
-  @override
-  Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'Flutter Demo',
-      theme: ThemeData(
-        // This is the theme of your application.
-        //
-        // TRY THIS: Try running your application with "flutter run". You'll see
-        // the application has a purple toolbar. Then, without quitting the app,
-        // try changing the seedColor in the colorScheme below to Colors.green
-        // and then invoke "hot reload" (save your changes or press the "hot
-        // reload" button in a Flutter-supported IDE, or press "r" if you used
-        // the command line to start the app).
-        //
-        // Notice that the counter didn't reset back to zero; the application
-        // state is not lost during the reload. To reset the state, use hot
-        // restart instead.
-        //
-        // This works for code too, not just values: Most code changes can be
-        // tested with just a hot reload.
-        colorScheme: .fromSeed(seedColor: Colors.deepPurple),
-      ),
-      home: const MyHomePage(title: 'Flutter Demo Home Page'),
-    );
-  }
-}
-
-class MyHomePage extends StatefulWidget {
-  const MyHomePage({super.key, required this.title});
-
-  // This widget is the home page of your application. It is stateful, meaning
-  // that it has a State object (defined below) that contains fields that affect
-  // how it looks.
-
-  // This class is the configuration for the state. It holds the values (in this
-  // case the title) provided by the parent (in this case the App widget) and
-  // used by the build method of the State. Fields in a Widget subclass are
-  // always marked "final".
-
-  final String title;
+/// Creates or opens a testnet wallet and shows what the native library
+/// returns. No node is needed: nothing here contacts one.
+class ExampleApp extends StatelessWidget {
+  const ExampleApp({super.key});
 
   @override
-  State<MyHomePage> createState() => _MyHomePageState();
+  Widget build(BuildContext context) => MaterialApp(
+    title: 'Grin example',
+    theme: ThemeData(colorSchemeSeed: Colors.amber),
+    home: const WalletPage(),
+  );
 }
 
-class _MyHomePageState extends State<MyHomePage> {
-  int _counter = 0;
+class WalletPage extends StatefulWidget {
+  const WalletPage({super.key});
 
-  void _incrementCounter() {
-    setState(() {
-      // This call to setState tells the Flutter framework that something has
-      // changed in this State, which causes it to rerun the build method below
-      // so that the display can reflect the updated values. If we changed
-      // _counter without calling setState(), then the build method would not be
-      // called again, and so nothing would appear to happen.
-      _counter++;
-    });
+  @override
+  State<WalletPage> createState() => _WalletPageState();
+}
+
+class _WalletPageState extends State<WalletPage> {
+  static const _password = 'example';
+
+  GrinWalletClient? _client;
+  GrinLifecycleObserver? _observer;
+  String _mnemonic = 'starting...';
+  String _address = '';
+  String _onion = '';
+  String _balance = '';
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _start();
   }
 
+  Future<void> _start() async {
+    try {
+      GrinWalletClient.initLogs();
+      final dir = await GrinFlutter.defaultWalletDirectory('example');
+      final config = GrinWalletConfig(
+        walletDir: dir,
+        network: GrinNetwork.testnet,
+        nodeUrl: 'http://127.0.0.1:13413',
+      );
+      GrinWalletClient client;
+      try {
+        client = await GrinWalletClient.open(
+          config: config,
+          password: _password,
+        );
+      } on GrinWalletNotFoundException {
+        client = await GrinWalletClient.create(
+          config: config,
+          mnemonic: await GrinWalletClient.generateMnemonic(wordCount: 24),
+          password: _password,
+        );
+      }
+      if (!mounted) {
+        await client.close();
+        return;
+      }
+      _client = client;
+      _observer = GrinLifecycleObserver(
+        client: client,
+        onError: (e) => debugPrint('cancelScan failed: $e'),
+      );
+      final words = (await client.getMnemonic(_password)).split(' ');
+      final address = await client.getAddress();
+      if (!mounted) return;
+      setState(() {
+        _mnemonic = '${words.take(3).join(' ')} ... (${words.length} words)';
+        _address = address.slatepackAddress;
+        _onion = address.onionV3Url;
+      });
+    } catch (e) {
+      if (mounted) setState(() => _error = 'Start failed: $e');
+    }
+  }
+
+  Future<void> _showBalance() async {
+    try {
+      final balance = await _client!.getBalance(
+        refreshFromNode: false,
+        minimumConfirmations: 1,
+      );
+      if (mounted) {
+        setState(() {
+          _balance = 'Spendable: ${formatGrin(balance.spendable)} GRIN';
+          _error = null;
+        });
+      }
+    } catch (e) {
+      if (mounted) setState(() => _error = 'Balance failed: $e');
+    }
+  }
+
   @override
-  Widget build(BuildContext context) {
-    // This method is rerun every time setState is called, for instance as done
-    // by the _incrementCounter method above.
-    //
-    // The Flutter framework has been optimized to make rerunning build methods
-    // fast, so that you can just rebuild anything that needs updating rather
-    // than having to individually change instances of widgets.
-    return Scaffold(
-      appBar: AppBar(
-        // TRY THIS: Try changing the color here to a specific color (to
-        // Colors.amber, perhaps?) and trigger a hot reload to see the AppBar
-        // change color while the other colors stay the same.
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        // Here we take the value from the MyHomePage object that was created by
-        // the App.build method, and use it to set our appbar title.
-        title: Text(widget.title),
-      ),
-      body: Center(
-        // Center is a layout widget. It takes a single child and positions it
-        // in the middle of the parent.
-        child: Column(
-          // Column is also a layout widget. It takes a list of children and
-          // arranges them vertically. By default, it sizes itself to fit its
-          // children horizontally, and tries to be as tall as its parent.
-          //
-          // Column has various properties to control how it sizes itself and
-          // how it positions its children. Here we use mainAxisAlignment to
-          // center the children vertically; the main axis here is the vertical
-          // axis because Columns are vertical (the cross axis would be
-          // horizontal).
-          //
-          // TRY THIS: Invoke "debug painting" (choose the "Toggle Debug Paint"
-          // action in the IDE, or press "p" in the console), to see the
-          // wireframe for each widget.
-          mainAxisAlignment: .center,
-          children: [
-            const Text('You have pushed the button this many times:'),
-            Text(
-              '$_counter',
-              style: Theme.of(context).textTheme.headlineMedium,
-            ),
-          ],
+  void dispose() {
+    _observer?.dispose();
+    _client?.close();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(title: const Text('Grin example')),
+    body: ListView(
+      padding: const EdgeInsets.all(16),
+      children: [
+        const Text('Mnemonic (first 3 words)'),
+        SelectableText(_mnemonic, key: const ValueKey('mnemonic')),
+        const SizedBox(height: 16),
+        const Text('Slatepack address'),
+        SelectableText(_address, key: const ValueKey('address')),
+        const SizedBox(height: 16),
+        const Text('Onion URL'),
+        SelectableText(_onion, key: const ValueKey('onion')),
+        const SizedBox(height: 16),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: FilledButton(
+            key: const ValueKey('balance-button'),
+            onPressed: _client == null ? null : _showBalance,
+            child: const Text('Balance (local)'),
+          ),
         ),
-      ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _incrementCounter,
-        tooltip: 'Increment',
-        child: const Icon(Icons.add),
-      ),
-    );
-  }
+        Text(_balance, key: const ValueKey('balance')),
+        if (_error != null)
+          Text(
+            _error!,
+            key: const ValueKey('error'),
+            style: TextStyle(color: Theme.of(context).colorScheme.error),
+          ),
+      ],
+    ),
+  );
 }
