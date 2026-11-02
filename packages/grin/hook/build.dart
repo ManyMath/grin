@@ -71,12 +71,12 @@ Future<void> _cargoBuild(BuildInput input, BuildOutputBuilder output) async {
     // key. The prebuilt, source and dev modes do not need to fetch it.
     'CARGO_NET_GIT_FETCH_WITH_CLI': 'true',
     // Inside an Xcode build, PATH starts with Xcode's SwiftBuild and Metal
-    // toolchain directories. With the crate's `strip = "debuginfo"` rustc
-    // runs a strip step whose tool then resolves to the Metal toolchain,
-    // and the stripped host proc-macro dylibs no longer load (arc-swap
-    // fails with "can't find crate for rustversion"; seen on macOS 26 with
-    // Xcode 27). Xcode strips the final product itself, so keep debuginfo
-    // in the cargo mode on Apple.
+    // toolchain directories. Under that PATH, with the crate's
+    // `strip = "debuginfo"`, the host proc-macro dylibs rustc strips no
+    // longer load (arc-swap fails with "can't find crate for rustversion";
+    // reproduced on macOS 26 with Xcode 27 by setting that PATH alone, and
+    // gone with strip = none). Xcode strips the final product itself, so
+    // keep debuginfo in the cargo mode on Apple.
     if (config.targetOS == OS.macOS || config.targetOS == OS.iOS)
       'CARGO_PROFILE_RELEASE_STRIP': 'none',
     if (config.targetOS == OS.macOS)
