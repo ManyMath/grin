@@ -1331,7 +1331,16 @@ What ran, through `dart run tool/ci.dart --local-inputs` on the final tree (comm
 
 Known notices: the hooks runner prints `File modified during build. Build must be rerun.` once per cargo-mode build and then rebuilds successfully; it also appears in a single-process run, so it is not a concurrency artifact. The cause has not been pinned down (build.rs no longer writes into the source tree); it does not affect the result.
 
-Not verified here: macOS and iOS builds (no Apple SDK; the flake's `apple` shell and `nix/build-apple.sh` are written but never run), a Windows host build (the DLL was cross-built by the kit and only its export table was checked), any sync or send against a real node (no public Grin testnet node answered), the Tor path of `grin_tx_send_http` beyond its proxy checks, and the GC-finalizer path of `GrinWalletClient` beyond the Rust-side simulation with a retained session.
+Apple hosts, run on m3max-mbp (macOS 26, Xcode 27.0.1, rustup 1.94.0) with `tool/verify-apple.sh` from a clone of this repository at the commits named below, authorized by the user and reached through the Herdr fleet:
+
+| Gate | Output |
+|---|---|
+| cargo release builds with the host toolchain (commit `2f0a9e1`) | `nm aarch64-apple-darwin: 35 standard, 0 test symbols`, `nm x86_64-apple-darwin: 35 standard, 0 test symbols`, `nm aarch64-apple-ios: 35 standard, 0 test symbols`, `nm aarch64-apple-ios-sim: 35 standard, 0 test symbols`, `nm x86_64-apple-ios: 35 standard, 0 test symbols` |
+| example through the hook's cargo mode (commit `dc3e37c`) | `flutter build macos`: `Built build/macos/Build/Products/Release/grin_flutter_example.app (62.0MB)`; `flutter build ios --no-codesign`: `Built build/ios/iphoneos/Runner.app (25.7MB)` |
+
+Two things were learned there and fixed: the iOS device link needs the deployment floors (`IPHONEOS_DEPLOYMENT_TARGET=13.0`, which the hook already passes; the script now does too), and inside an Xcode build the hook's cargo mode must build with `strip = none` on Apple, because under Xcode's PATH the stripped host proc-macro dylibs stop loading (reproduced with that PATH alone; `CARGO_PROFILE_RELEASE_STRIP=none` in `hook/build.dart`). The flake's Apple shell (`nix develop .#apple` in dev mode) started building but failed in `libz-sys`'s build script with `'stddef.h' file not found`, a kit-side Apple environment problem that the kit's own README also lists as unrechecked; the reference Apple dylibs therefore remain unverified.
+
+Not verified here: the kit's Nix Apple reference build (above), any sync or send against a real node (no public Grin testnet node answered), the Tor path of `grin_tx_send_http` beyond its proxy checks, and the GC-finalizer path of `GrinWalletClient` beyond the Rust-side simulation with a retained session.
 
 Process note: while testing the brief's Cargo `[patch]` wiring, one command ran without the ssh guard and cargo opened an ssh connection to git.cypherstack.com, which answered that `sneurlax/grin-wallet` does not exist there. Nothing was fetched or pushed. Every later cargo, pub and nix command ran with `GIT_SSH_COMMAND=/bin/false`, and tool/local-fork-env.sh sets it as well.
 
