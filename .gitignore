@@ -1,0 +1,9 @@
+.research/
+.cargo/config.toml
+pubspec_overrides.yaml
+**/pubspec_overrides.yaml
+target/
+.dart_tool/
+build/
+result
+result-*
