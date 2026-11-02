@@ -228,3 +228,13 @@ Dropping both after the kit and the fork are pushed:
 
 `cargo update -p grin_wallet_impls` is not needed: the fork revision is pinned
 in `Cargo.toml` and `Cargo.lock` already names the final source.
+
+### Live node smoke test
+
+`test/live_node_test.dart` talks to a real node over HTTP (connection test, create, tip, scan, balance). It is skipped unless `GRIN_NODE_URL` names a node's foreign API base URL:
+
+```sh
+GRIN_NODE_URL=http://127.0.0.1:13413 dart test test/live_node_test.dart
+```
+
+`GRIN_NODE_NETWORK=mainnet` switches the wallet to mainnet; the test only reads the tip and scans an empty wallet.
