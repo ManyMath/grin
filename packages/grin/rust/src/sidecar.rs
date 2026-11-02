@@ -56,7 +56,8 @@ pub struct Sidecar {
 
 impl Sidecar {
     /// Reads the sidecar from `data_dir`. A missing file is empty; an
-    /// unreadable or corrupt one is logged and treated as empty.
+    /// unreadable, corrupt or newer-format one is logged and read as empty
+    /// (and `upsert` refuses to overwrite it).
     pub fn load(data_dir: &Path) -> Sidecar {
         match read_file(data_dir) {
             Ok(entries) => Sidecar { entries },
@@ -80,14 +81,14 @@ impl Sidecar {
     }
 
     /// Merges `update` into the entry for `slate_id` and rewrites the file
-    /// atomically (temp file, fsync, rename). A corrupt existing file is
-    /// replaced.
+    /// atomically (temp file, fsync, rename). Only a missing file starts
+    /// from an empty map. If the existing file cannot be read, does not
+    /// parse or has a newer format, nothing is written and the read error
+    /// is returned, so the entries already stored are never replaced by
+    /// this one alone. Callers log the error and carry on.
     pub fn upsert(data_dir: &Path, slate_id: Uuid, update: TxSidecarEntry) -> io::Result<()> {
         let _guard = WRITE_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
-        let mut entries = read_file(data_dir).unwrap_or_else(|e| {
-            log::warn!("replacing unreadable transaction sidecar: {e}");
-            BTreeMap::new()
-        });
+        let mut entries = read_file(data_dir)?;
         entries.entry(slate_id).or_default().merge(update);
         write_file(data_dir, entries)
     }
@@ -204,22 +205,59 @@ mod tests {
     }
 
     #[test]
-    fn corrupt_file_is_empty_and_replaced() {
+    fn corrupt_file_reads_as_empty_and_is_never_replaced() {
         let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join(SIDECAR_FILE), b"{not json").unwrap();
+        let path = dir.path().join(SIDECAR_FILE);
+        fs::write(&path, b"{not json").unwrap();
         fs::write(dir.path().join(SIDECAR_TMP), b"stale").unwrap();
         assert!(Sidecar::load(dir.path()).is_empty());
+        let update = TxSidecarEntry {
+            armored_slatepack: None,
+            counterparty_address: Some("grin1x".into()),
+        };
+        let e = Sidecar::upsert(dir.path(), Uuid::new_v4(), update).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(fs::read(&path).unwrap(), b"{not json");
+    }
+
+    #[test]
+    fn newer_format_is_never_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(SIDECAR_FILE);
         let id = Uuid::new_v4();
-        Sidecar::upsert(
-            dir.path(),
-            id,
-            TxSidecarEntry {
-                armored_slatepack: None,
-                counterparty_address: Some("grin1x".into()),
-            },
-        )
-        .unwrap();
-        assert_eq!(Sidecar::load(dir.path()).len(), 1);
+        let newer = format!(
+            r#"{{"version": {}, "entries": {{"{id}": {{"armored_slatepack": "kept", "counterparty_address": null}}}}}}"#,
+            FORMAT_VERSION + 1
+        );
+        fs::write(&path, &newer).unwrap();
+        assert!(Sidecar::upsert(dir.path(), Uuid::new_v4(), TxSidecarEntry::default()).is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), newer);
+        assert!(!dir.path().join(SIDECAR_TMP).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_file_is_never_replaced() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let id = Uuid::new_v4();
+        let entry = TxSidecarEntry {
+            armored_slatepack: Some("kept".into()),
+            counterparty_address: None,
+        };
+        Sidecar::upsert(dir.path(), id, entry.clone()).unwrap();
+        let path = dir.path().join(SIDECAR_FILE);
+        let before = fs::read(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o200)).unwrap();
+        if fs::read(&path).is_ok() {
+            // Running as root: permissions do not stop the read.
+            return;
+        }
+        let e = Sidecar::upsert(dir.path(), Uuid::new_v4(), TxSidecarEntry::default());
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(e.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert_eq!(Sidecar::load(dir.path()).get(&id), Some(&entry));
     }
 
     #[test]

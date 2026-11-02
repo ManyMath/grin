@@ -1,5 +1,6 @@
-# C header for grin-ffi. build.rs writes it to $OUT_DIR/grin_ffi.h and copies
-# it to include/grin_ffi.h, which is committed as the ABI contract.
+# C header for grin-ffi. build.rs writes it to $OUT_DIR/grin_ffi.h and, when
+# GRIN_FFI_WRITE_HEADER=1 is set, copies it to include/grin_ffi.h, which is
+# committed as the ABI contract.
 language = "C"
 include_guard = "GRIN_FFI_H"
 cpp_compat = true

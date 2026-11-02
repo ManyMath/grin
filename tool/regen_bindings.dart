@@ -20,7 +20,15 @@ Future<void> main(List<String> args) async {
   final rust = p.join(root, 'packages', 'grin', 'rust');
   final grin = p.join(root, 'packages', 'grin');
 
-  await _run('cargo', ['build', '-p', 'grin-ffi', '--locked'], rust);
+  // build.rs only refreshes the committed header when asked, so a plain
+  // cargo build never rewrites a checkout; tests/header_test.rs compares
+  // the committed file with the freshly generated one.
+  await _run(
+    'cargo',
+    ['build', '-p', 'grin-ffi', '--locked'],
+    rust,
+    environment: {'GRIN_FFI_WRITE_HEADER': '1'},
+  );
   await _run('dart', ['run', 'ffigen', '--config', 'ffigen.yaml'], grin);
   await _run('dart', ['format', p.join(root, _bindings)], root);
 
@@ -55,12 +63,18 @@ String _repoRoot() {
   return dir.path;
 }
 
-Future<void> _run(String exe, List<String> args, String cwd) async {
+Future<void> _run(
+  String exe,
+  List<String> args,
+  String cwd, {
+  Map<String, String> environment = const {},
+}) async {
   stdout.writeln('\$ (cd $cwd && $exe ${args.join(' ')})');
   final process = await Process.start(
     exe,
     args,
     workingDirectory: cwd,
+    environment: environment,
     mode: ProcessStartMode.inheritStdio,
   );
   final code = await process.exitCode;

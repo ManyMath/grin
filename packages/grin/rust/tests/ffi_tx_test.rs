@@ -269,8 +269,11 @@ fn slatepack_s1_s2_s3_with_payment_proof() {
     assert_eq!(u(&s3["fee"]), fee);
     let excess = s(&s3["kernel_excess"]).to_owned();
     assert_eq!(excess.len(), 66);
-    // The transaction context is gone once finalized.
-    assert_eq!(code_of(finalize(alice, &armored(&s2), false)), NOT_FOUND);
+    // The transaction context is gone once finalized. The error still names
+    // the slate, as every failure after the wallet recorded it does.
+    let e = finalize(alice, &armored(&s2), false).unwrap_err();
+    assert_eq!(e.0, NOT_FOUND);
+    assert_eq!(e.1["details"]["slate_id"], slate_id.as_str());
     // The broadcast mined height 6; one more block confirms it further.
     assert_eq!(mine(alice, 1), 7);
 
@@ -452,6 +455,15 @@ fn invoice_i1_i2_i3_locks_payer_inputs() {
     .unwrap();
     assert_eq!(i3["state"], "I3");
     assert_eq!(i3["posted"], true);
+    let e = call(grin_tx_finalize_invoice(
+        bob,
+        cs(&armored(&i2)).as_ptr(),
+        false,
+        false,
+    ))
+    .unwrap_err();
+    assert_eq!(e.0, NOT_FOUND, "{}", e.1);
+    assert_eq!(e.1["details"]["slate_id"], slate_id.as_str());
     assert_eq!(u(&i3["amount"]), amount);
     assert_eq!(u(&i3["fee"]), fee);
     let excess = s(&i3["kernel_excess"]).to_owned();
@@ -595,6 +607,77 @@ fn repost_a_finalized_transaction() {
         code_of(call(grin_tx_repost(alice, -1, ptr::null(), false))),
         INVALID_ARGUMENT
     );
+
+    // A finalized transaction that was cancelled before it was posted has a
+    // stored copy, but reposting it is refused, by slate id and by tx id.
+    let s1 = init_send(
+        alice,
+        json!({"amount": amount, "min_confirms": 1, "recipient_address": address(bob)}),
+    )
+    .unwrap();
+    let cancelled_id = s(&s1["slate_id"]).to_owned();
+    let s2 = receive(bob, &armored(&s1)).unwrap();
+    finalize(alice, &armored(&s2), false).unwrap();
+    assert_eq!(
+        entry(&txs(alice, false), &cancelled_id)["has_stored_tx"],
+        true
+    );
+    call(grin_tx_cancel(alice, -1, cs(&cancelled_id).as_ptr())).unwrap();
+    let e = call(grin_tx_repost(alice, -1, cs(&cancelled_id).as_ptr(), false)).unwrap_err();
+    assert_eq!(e.0, TRANSACTION, "{}", e.1);
+    assert!(s(&e.1["message"]).contains("cancelled"), "{}", e.1);
+    let id = u(&entry(&txs(alice, false), &cancelled_id)["id"]);
+    assert_eq!(
+        code_of(call(grin_tx_repost(alice, id as i64, ptr::null(), false))),
+        TRANSACTION
+    );
+    close(alice);
+    close(bob);
+}
+
+#[test]
+fn estimate_when_change_comes_out_at_zero() {
+    let tmp = tempfile::tempdir().unwrap();
+    // Height 4: one mature coinbase output of REWARD.
+    let (alice, bob) = alice_and_bob(tmp.path(), 4);
+    let est = call(grin_tx_estimate_fee(alice, 50 * GRIN, 1, false, false)).unwrap();
+    assert_eq!(est["inputs_count"], 1);
+    assert_eq!(est["change_outputs"], 1);
+    // The fee of one input and two outputs.
+    let fee = u(&est["fee"]);
+
+    // REWARD - fee: libwallet's first try (fee for one output) leaves
+    // change, so it prices a change output; with that fee the one input
+    // pays exactly and no change output is made. The fee keeps the change
+    // output's weight, which must not be read as 21 more inputs.
+    let amount = REWARD - fee;
+    let check = |est: &Value| {
+        assert_eq!(u(&est["fee"]), fee, "{est}");
+        assert_eq!(u(&est["total"]), REWARD, "{est}");
+        assert_eq!(est["change_outputs"], 0, "{est}");
+        assert_eq!(est["inputs_count"], 1, "{est}");
+    };
+    // With one spendable output, pricing a further change output runs out
+    // of funds.
+    check(&call(grin_tx_estimate_fee(alice, amount, 1, false, false)).unwrap());
+    // With two, it selects both and the fee moves.
+    assert_eq!(mine(alice, 1), 5);
+    let est = call(grin_tx_estimate_fee(alice, amount, 1, false, false)).unwrap();
+    check(&est);
+
+    // The real send agrees.
+    let s1 = init_send(alice, json!({"amount": amount, "min_confirms": 1})).unwrap();
+    assert_eq!(u(&s1["fee"]), fee);
+    let e = entry(&txs(alice, false), s(&s1["slate_id"]));
+    assert_eq!(e["num_inputs"], est["inputs_count"], "{e}");
+    call(grin_tx_cancel(alice, -1, cs(s(&s1["slate_id"])).as_ptr())).unwrap();
+
+    // The whole output with the fee taken out of it: paid exactly on the
+    // first try, priced for one output.
+    let est = call(grin_tx_estimate_fee(alice, REWARD, 1, false, true)).unwrap();
+    assert_eq!(est["change_outputs"], 0, "{est}");
+    assert_eq!(est["inputs_count"], 1, "{est}");
+    assert_eq!(u(&est["total"]), REWARD);
     close(alice);
     close(bob);
 }
@@ -709,6 +792,23 @@ fn synchronous_http_send() {
         )),
         INVALID_ADDRESS
     );
+    // A slatepack or onion target is Bob's key; asking for the proof from
+    // another key is refused up front.
+    let alice_addr = address(alice);
+    for target in [bob_addr.as_str(), onion.as_str()] {
+        let e = send_http(
+            alice,
+            json!({
+                "amount": amount,
+                "min_confirms": 1,
+                "recipient_url_or_address": target,
+                "recipient_address": alice_addr,
+            }),
+        )
+        .unwrap_err();
+        assert_eq!(e.0, INVALID_ARGUMENT, "{target}: {}", e.1);
+        assert!(s(&e.1["message"]).contains("differs"), "{target}: {}", e.1);
+    }
 
     // Nobody listens on port 1: a transport error, and nothing stays locked.
     let e = send_http(
@@ -823,6 +923,29 @@ fn argument_errors() {
         JSON
     );
     assert_eq!(code_of(init_send(alice, json!({"min_confirms": 1}))), JSON);
+    // null takes the default for every optional key: 10 confirmations, which
+    // nothing on this 5-block chain has.
+    let e = init_send(
+        alice,
+        json!({"amount": GRIN, "min_confirms": null, "selection_strategy_is_all": null,
+               "amount_includes_fee": null, "recipient_address": null, "ttl_blocks": null,
+               "late_lock": null}),
+    )
+    .unwrap_err();
+    assert_eq!(e.0, INSUFFICIENT_FUNDS, "{}", e.1);
+    let i1 = call(grin_tx_issue_invoice(
+        bob,
+        cs(r#"{"amount": 1000000000, "dest_acct_name": null, "recipient_address": null}"#).as_ptr(),
+    ))
+    .unwrap();
+    let e = call(grin_tx_process_invoice(
+        alice,
+        cs(&armored(&i1)).as_ptr(),
+        cs(r#"{"min_confirms": null, "selection_strategy_is_all": null, "ttl_blocks": null}"#)
+            .as_ptr(),
+    ))
+    .unwrap_err();
+    assert_eq!(e.0, INSUFFICIENT_FUNDS, "{}", e.1);
     assert_eq!(code_of(init_send(alice, json!({"amount": "1"}))), JSON);
     assert_eq!(
         code_of(init_send(alice, json!({"amount": 0}))),

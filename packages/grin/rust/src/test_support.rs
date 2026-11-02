@@ -29,7 +29,7 @@ use std::collections::HashMap;
 use std::os::raw::c_char;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, TryRecvError};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::thread;
@@ -311,4 +311,53 @@ pub extern "C" fn grin_test_panic() -> GrinFfiResult {
 /// that outlives `grin_wallet_close`. Plain Rust, not exported.
 pub fn retain_session(handle: u64) -> Option<Arc<WalletSession>> {
     lookup_session(handle)
+}
+
+/// Called by `grin_wallet_scan` after each batch is saved, with the last
+/// height of that batch.
+pub type AfterBatch = Box<dyn Fn(u64) + Send + Sync>;
+
+/// Per-session scan knobs for tests. The test chain is far shorter than one
+/// production batch, so tests shrink the batch and use the callback to act
+/// at an exact batch boundary.
+#[derive(Default)]
+pub struct ScanTestHooks {
+    /// Heights per scan batch; 0 keeps the production size.
+    pub(crate) batch_heights: AtomicU64,
+    pub(crate) after_batch: Mutex<Option<AfterBatch>>,
+}
+
+impl ScanTestHooks {
+    pub(crate) fn run_after_batch(&self, height: u64) {
+        let hook = self
+            .after_batch
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(f) = hook.as_ref() {
+            f(height);
+        }
+    }
+}
+
+/// Sets the scan batch size (0 for the production size) and the per-batch
+/// callback of a registered session. Returns false for an unknown handle.
+/// Plain Rust, not exported.
+pub fn set_scan_test_hooks(
+    handle: u64,
+    batch_heights: u64,
+    after_batch: Option<AfterBatch>,
+) -> bool {
+    let Some(session) = lookup_session(handle) else {
+        return false;
+    };
+    session
+        .scan_hooks
+        .batch_heights
+        .store(batch_heights, Ordering::Release);
+    *session
+        .scan_hooks
+        .after_batch
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner) = after_batch;
+    true
 }

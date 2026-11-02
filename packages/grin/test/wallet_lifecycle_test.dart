@@ -244,13 +244,29 @@ void main() {
     expect(events.last, isA<GrinWalletClosed>());
   });
 
-  test('a scan with a pending cancel does not start', () async {
+  test('a cancel with no scan running is a no-op', () async {
     final dir = await makeTempDir();
     final wallet = await createTestWallet(dir);
     wallet.cancelScan();
-    expect(wallet.scanProgress().cancelRequested, isTrue);
-    await expectLater(wallet.scan(), throwsA(isA<GrinCancelledException>()));
     expect(wallet.scanProgress().cancelRequested, isFalse);
+    // The next scan runs normally (no node is reachable here, so it fails
+    // with a node error rather than Cancelled).
+    await expectLater(
+      wallet.scan(),
+      throwsA(isNot(isA<GrinCancelledException>())),
+    );
+    expect(wallet.scanProgress().cancelRequested, isFalse);
+  });
+
+  test('a scan queued before close does not start', () async {
+    final dir = await makeTempDir();
+    final wallet = await createTestWallet(dir);
+    final blocker = wallet.getBalance(refreshFromNode: false);
+    final queuedScan = wallet.scan();
+    final closing = wallet.close();
+    await blocker;
+    await expectLater(queuedScan, throwsA(isA<StateError>()));
+    await closing;
   });
 
   test('close completes while an events listener is paused', () async {

@@ -194,8 +194,10 @@ struct GrinFfiResult grin_payment_proof_verify(uint64_t handle, const char *proo
 
 /*
  Scans the chain from `start_height` (0 means from the first block) and
- repairs wallet outputs. Runs on the calling thread and returns
- `{"scanned_height", "tip_height"}`.
+ repairs wallet outputs. Runs on the calling thread in batches of 10,001
+ heights and returns `{"scanned_height", "tip_height"}`.
+ `grin_wallet_scan_cancel` or closing the handle stops it between batches
+ with Cancelled and `{"scanned_height", "tip_height"}` in the details.
  */
 struct GrinFfiResult grin_wallet_scan(uint64_t handle,
                                       uint64_t start_height,
@@ -207,9 +209,11 @@ struct GrinFfiResult grin_wallet_scan(uint64_t handle,
 struct GrinFfiResult grin_wallet_scan_progress(uint64_t handle);
 
 /*
- Requests cancellation. Takes no wallet lock. A scan that is already
- running cannot be interrupted and finishes normally; if no scan is
- running, the next `grin_wallet_scan` returns Cancelled without starting.
+ Asks a running scan to stop before its next batch and returns at once;
+ the `grin_wallet_scan` call then returns Cancelled with the last saved
+ height. Takes no wallet lock. With no scan running it does nothing and
+ the next scan runs normally. Closing the handle has the same effect on a
+ running scan.
  */
 struct GrinFfiResult grin_wallet_scan_cancel(uint64_t handle);
 

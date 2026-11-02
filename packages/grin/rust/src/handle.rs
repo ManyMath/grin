@@ -9,7 +9,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
 
 use grin_core::global::{self, ChainTypes};
@@ -31,17 +31,101 @@ pub type WalletLc = DefaultLCProvider<FfiNodeClient, ExtKeychain>;
 pub type WalletInstance =
     Arc<grin_util::Mutex<Box<dyn WalletInst<'static, WalletLc, FfiNodeClient, ExtKeychain>>>>;
 
-/// Progress of the most recent scan, readable without the wallet mutex.
+/// Bits of `ScanProgressState::flags`.
+const SCANNING: u8 = 1;
+const CANCEL: u8 = 2;
+const CLOSED: u8 = 4;
+
+/// Outcome of `ScanProgressState::begin_scan`.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ScanStart {
+    Started,
+    /// Another scan is running on this wallet.
+    Busy,
+    /// The handle was closed; the session only lives on in this call.
+    Closed,
+}
+
+/// Progress of the current or most recent scan, readable without the wallet
+/// mutex.
+///
+/// The running, cancel and closed states share one atomic word, so starting
+/// a scan, cancelling it and closing the wallet cannot interleave in a way
+/// that loses a cancel or lets a stale one stop a later scan.
 #[derive(Debug, Default)]
 pub struct ScanProgressState {
-    pub is_scanning: AtomicBool,
-    pub cancel_requested: AtomicBool,
+    flags: AtomicU8,
     pub scanned_height: AtomicU64,
     pub tip_height: AtomicU64,
     pub start_height: AtomicU64,
 }
 
 impl ScanProgressState {
+    /// Marks a scan as running and drops a cancel request left over from an
+    /// earlier scan. A closed session never starts one.
+    pub fn begin_scan(&self) -> ScanStart {
+        let r = self
+            .flags
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |f| {
+                if f & (SCANNING | CLOSED) == 0 {
+                    Some(SCANNING)
+                } else {
+                    None
+                }
+            });
+        match r {
+            Ok(_) => ScanStart::Started,
+            Err(f) if f & CLOSED != 0 => ScanStart::Closed,
+            Err(_) => ScanStart::Busy,
+        }
+    }
+
+    /// Clears the running and cancel bits when a scan ends, however it ends.
+    pub fn end_scan(&self) {
+        self.flags.fetch_and(!(SCANNING | CANCEL), Ordering::AcqRel);
+    }
+
+    /// Asks the running scan to stop at its next batch boundary. Does
+    /// nothing (and returns false) when no scan is running.
+    pub fn request_cancel(&self) -> bool {
+        self.flags
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |f| {
+                if f & SCANNING != 0 {
+                    Some(f | CANCEL)
+                } else {
+                    None
+                }
+            })
+            .is_ok()
+    }
+
+    /// Set when the handle is closed. Stops a running scan at its next batch
+    /// boundary and keeps an in-flight call from starting a new one.
+    pub fn mark_closed(&self) {
+        self.flags.fetch_or(CLOSED, Ordering::AcqRel);
+    }
+
+    /// True once a cancel or a close asks the running scan to stop.
+    pub fn should_stop(&self) -> bool {
+        self.flags.load(Ordering::Acquire) & (CANCEL | CLOSED) != 0
+    }
+
+    pub fn is_scanning(&self) -> bool {
+        self.flags.load(Ordering::Acquire) & SCANNING != 0
+    }
+
+    /// Same as `should_stop`; the name `grin_wallet_scan_progress` reports.
+    pub fn cancel_requested(&self) -> bool {
+        self.should_stop()
+    }
+
+    /// Resets the heights for a scan that is starting at `start`.
+    pub fn reset(&self, start: u64) {
+        self.start_height.store(start, Ordering::Release);
+        self.tip_height.store(0, Ordering::Release);
+        self.scanned_height.store(0, Ordering::Release);
+    }
+
     /// Percentage of the current or last scan range covered, 0 to 100.
     pub fn progress_pct(&self) -> u8 {
         let start = self.start_height.load(Ordering::Acquire);
@@ -73,6 +157,9 @@ pub struct WalletSession {
     /// In-process chain of a wallet made by `grin_test_create_wallet`.
     #[cfg(feature = "test-utils")]
     pub(crate) test_chain: Option<Arc<crate::test_support::TestChain>>,
+    /// Batch size and per-batch callback that tests set for scans.
+    #[cfg(feature = "test-utils")]
+    pub(crate) scan_hooks: crate::test_support::ScanTestHooks,
     /// Declared last so it is dropped after everything above.
     _lease: DirLease,
 }
@@ -96,6 +183,8 @@ impl WalletSession {
             node: Mutex::new(node),
             #[cfg(feature = "test-utils")]
             test_chain: None,
+            #[cfg(feature = "test-utils")]
+            scan_hooks: Default::default(),
             _lease: lease,
         }
     }
@@ -135,9 +224,7 @@ impl std::fmt::Debug for WalletSession {
 
 impl Drop for WalletSession {
     fn drop(&mut self) {
-        self.scan_state
-            .cancel_requested
-            .store(true, Ordering::Release);
+        self.scan_state.mark_closed();
         {
             let mut w = self.wallet.lock();
             match w.lc_provider() {
@@ -214,16 +301,17 @@ pub(crate) fn lookup_session(handle: u64) -> Option<Arc<WalletSession>> {
     registry().get(&handle).cloned()
 }
 
-/// Marks the session cancelled and removes it from the registry. The caller
-/// drops the returned `Arc` after the lock is gone; if it was the last one,
-/// the backend closes right there.
+/// Removes the session from the registry and marks it closed, which stops
+/// a running scan at its next batch boundary. The caller drops the returned
+/// `Arc` after the lock is gone; if it was the last one, the backend closes
+/// right there.
 pub(crate) fn remove_session(handle: u64) -> Option<Arc<WalletSession>> {
     if handle == 0 {
         return None;
     }
     let session = registry().remove(&handle);
     if let Some(s) = &session {
-        s.scan_state.cancel_requested.store(true, Ordering::Release);
+        s.scan_state.mark_closed();
     }
     session
 }
@@ -311,6 +399,33 @@ mod tests {
         assert_eq!(s.progress_pct(), 50);
         s.scanned_height.store(500, Ordering::Release);
         assert_eq!(s.progress_pct(), 100);
+    }
+
+    #[test]
+    fn scan_flags() {
+        let s = ScanProgressState::default();
+        // Cancel with no scan running does nothing.
+        assert!(!s.request_cancel());
+        assert!(!s.cancel_requested());
+        assert_eq!(s.begin_scan(), ScanStart::Started);
+        assert!(s.is_scanning());
+        assert_eq!(s.begin_scan(), ScanStart::Busy);
+        assert!(s.request_cancel());
+        assert!(s.should_stop());
+        s.end_scan();
+        assert!(!s.is_scanning() && !s.cancel_requested());
+        // A new scan starts clean even if a cancel slipped in at the end.
+        assert_eq!(s.begin_scan(), ScanStart::Started);
+        assert!(s.request_cancel());
+        s.end_scan();
+        assert_eq!(s.begin_scan(), ScanStart::Started);
+        assert!(!s.should_stop());
+        // Closing stops the running scan and blocks new ones.
+        s.mark_closed();
+        assert!(s.should_stop() && s.cancel_requested());
+        s.end_scan();
+        assert_eq!(s.begin_scan(), ScanStart::Closed);
+        assert!(s.cancel_requested());
     }
 
     #[test]

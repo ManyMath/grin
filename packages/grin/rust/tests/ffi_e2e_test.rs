@@ -7,11 +7,12 @@ use std::ffi::{c_void, CStr, CString};
 use std::os::raw::c_char;
 use std::path::{Path, PathBuf};
 use std::ptr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 
-use grin_ffi::test_support::retain_session;
+use grin_ffi::test_support::{retain_session, set_scan_test_hooks};
 use grin_ffi::*;
+use grin_wallet_libwallet::ScannedBlockInfo;
 use serde_json::{json, Value};
 
 const OK: i32 = 0;
@@ -22,6 +23,7 @@ const WALLET_NOT_FOUND: i32 = GrinErrorCode::WalletNotFound as i32;
 const INVALID_PASSWORD: i32 = GrinErrorCode::InvalidPassword as i32;
 const WALLET_EXISTS: i32 = GrinErrorCode::WalletExists as i32;
 const INVALID_HANDLE: i32 = GrinErrorCode::InvalidHandle as i32;
+const LIFECYCLE: i32 = GrinErrorCode::Lifecycle as i32;
 const NODE: i32 = GrinErrorCode::Node as i32;
 const CANCELLED: i32 = GrinErrorCode::Cancelled as i32;
 const INTERNAL_PANIC: i32 = GrinErrorCode::InternalPanic as i32;
@@ -134,6 +136,22 @@ fn address(handle: u64, index: u32) -> String {
 
 fn delete(dir: &str, handle: u64) -> Result<Value, (i32, Value)> {
     call(grin_wallet_delete(cs(dir).as_ptr(), handle))
+}
+
+fn progress(handle: u64) -> Value {
+    call(grin_wallet_scan_progress(handle)).unwrap()
+}
+
+/// The last scanned block the wallet saved, read through the library.
+fn last_scanned_block(handle: u64) -> ScannedBlockInfo {
+    let session = retain_session(handle).expect("session is registered");
+    let mut w = session.wallet.lock();
+    w.lc_provider()
+        .unwrap()
+        .wallet_inst()
+        .unwrap()
+        .last_scanned_block()
+        .unwrap()
 }
 
 fn test_wallet(chain: &Path, dir: &Path, client_id: &str) -> u64 {
@@ -303,12 +321,15 @@ fn funded_wallet_on_test_chain() {
     let after = call(grin_wallet_get_balance(alice, false, 1)).unwrap();
     assert_eq!(after["amount_currently_spendable"], spendable);
 
-    // Cancel before a scan stops that scan from starting, once.
+    // A cancel with no scan running does nothing and cannot stop the next
+    // scan (scan_cancels_between_batches covers a running one).
     call(grin_wallet_scan_cancel(alice)).unwrap();
-    let p = call(grin_wallet_scan_progress(alice)).unwrap();
-    assert_eq!(p["cancel_requested"], true);
-    assert_eq!(code_of(call(grin_wallet_scan(alice, 0, false))), CANCELLED);
-    call(grin_wallet_scan(alice, 3, false)).unwrap();
+    let p = progress(alice);
+    assert_eq!(p["cancel_requested"], false);
+    assert_eq!(p["is_scanning"], false);
+    let v = call(grin_wallet_scan(alice, 3, false)).unwrap();
+    assert_eq!(v, json!({"scanned_height": 5, "tip_height": 5}));
+    assert_eq!(progress(alice)["start_height"], 3);
 
     // History holds only the coinbase outputs so far.
     let txs = call(grin_txs_get(alice, false)).unwrap();
@@ -328,15 +349,29 @@ fn funded_wallet_on_test_chain() {
     close(alice);
 }
 
+/// A symlink to `target` (made before `target` exists), or None where
+/// symlinks need privileges.
+#[cfg(unix)]
+fn dir_link(tmp: &Path, target: &Path) -> Option<String> {
+    let link = tmp.join("link");
+    std::os::unix::fs::symlink(target, &link).unwrap();
+    Some(path_str(&link))
+}
+
+#[cfg(not(unix))]
+fn dir_link(_tmp: &Path, _target: &Path) -> Option<String> {
+    None
+}
+
 fn wallet_busy_case(use_finalizer: bool) {
     let tmp = tempfile::tempdir().unwrap();
     let real = tmp.path().join("w");
     let dir = path_str(&real);
-    let link = tmp.path().join("link");
-    std::os::unix::fs::symlink(&real, &link).unwrap();
-    let link = path_str(&link);
+    let link = dir_link(tmp.path(), &real);
     let dotted = format!("{dir}/./");
     assert!(!real.exists(), "directory must not exist yet");
+    let mut aliases = vec![dir.clone(), dotted.clone()];
+    aliases.extend(link.clone());
 
     let h = create(&dir, AUTOMATED, None).unwrap();
     let addr = address(h, 0);
@@ -351,7 +386,7 @@ fn wallet_busy_case(use_finalizer: bool) {
     }
     assert_eq!(code_of(call(grin_wallet_get_address(h, 0))), INVALID_HANDLE);
 
-    for d in [&dir, &dotted, &link] {
+    for d in &aliases {
         let e = open(d, AUTOMATED).unwrap_err();
         assert_eq!(e.0, WALLET_BUSY, "open {d}");
         assert_eq!(
@@ -371,8 +406,9 @@ fn wallet_busy_case(use_finalizer: bool) {
     drop(retained);
     let h = open(&dir, AUTOMATED).unwrap();
     assert_eq!(address(h, 0), addr);
-    assert_eq!(code_of(open(&dir, AUTOMATED)), WALLET_BUSY);
-    assert_eq!(code_of(open(&link, AUTOMATED)), WALLET_BUSY);
+    for d in &aliases {
+        assert_eq!(code_of(open(d, AUTOMATED)), WALLET_BUSY, "open {d}");
+    }
     close(h);
 
     // Failures after the lease is taken release it again.
@@ -390,7 +426,7 @@ fn wallet_busy_case(use_finalizer: bool) {
     let other_h = create(&other, AUTOMATED, None).unwrap();
     assert_eq!(code_of(delete(&dir, other_h)), INVALID_ARGUMENT);
     close(other_h);
-    delete(&link, h).unwrap();
+    delete(aliases.last().unwrap(), h).unwrap();
     assert_eq!(code_of(call(grin_wallet_get_address(h, 0))), INVALID_HANDLE);
     assert!(!canonical.exists());
     assert!(real.exists(), "only wallet_data is removed");
@@ -527,6 +563,252 @@ fn network_settings() {
         ))),
         INVALID_ARGUMENT
     );
+}
+
+#[test]
+fn scan_cancels_between_batches() {
+    let tmp = tempfile::tempdir().unwrap();
+    let chain = tmp.path().join("chain");
+    let dir = tmp.path().join("w");
+    let w = test_wallet(&chain, &dir, "w");
+    call(grin_test_mine_blocks(w, 10)).unwrap();
+    let spendable =
+        call(grin_wallet_get_balance(w, true, 1)).unwrap()["amount_currently_spendable"].clone();
+    assert!(spendable.as_u64().unwrap() > 0);
+
+    let v = call(grin_wallet_scan(w, 0, false)).unwrap();
+    assert_eq!(v, json!({"scanned_height": 10, "tip_height": 10}));
+    assert_eq!(progress(w)["progress_pct"], 100);
+    assert_eq!(last_scanned_block(w).height, 10);
+
+    // Two more blocks the wallet has not seen; the refresh at the start of
+    // a scan records the new tip as the last confirmed height.
+    call(grin_test_mine_blocks(w, 2)).unwrap();
+    let tip_hash = call(grin_wallet_get_chain_height(w)).unwrap()["hash"].clone();
+
+    // Two heights per batch: 1-2, 3-4, 5-6, ... The hook runs after each
+    // batch is saved and cancels after the one ending at 4.
+    let seen: Arc<Mutex<Vec<Value>>> = Arc::default();
+    let log = seen.clone();
+    let hooked = set_scan_test_hooks(
+        w,
+        2,
+        Some(Box::new(move |height| {
+            let mut p = progress(w);
+            p["batch_end"] = json!(height);
+            if height == 4 {
+                call(grin_wallet_scan_cancel(w)).unwrap();
+                p["after_cancel"] = progress(w)["cancel_requested"].clone();
+            }
+            log.lock().unwrap().push(p);
+        })),
+    );
+    assert!(hooked);
+    let e = call(grin_wallet_scan(w, 0, false)).unwrap_err();
+    assert_eq!(e.0, CANCELLED, "{}", e.1);
+    assert_eq!(
+        e.1["details"],
+        json!({"scanned_height": 4, "tip_height": 12})
+    );
+    let seen = std::mem::take(&mut *seen.lock().unwrap());
+    assert_eq!(seen.len(), 2, "{seen:?}");
+    // The heights were reset for this scan: the previous one ended at 100%.
+    let first = &seen[0];
+    assert_eq!(first["batch_end"], 2);
+    assert_eq!(first["is_scanning"], true);
+    assert_eq!(first["cancel_requested"], false);
+    assert_eq!(first["start_height"], 1);
+    assert_eq!(first["tip_height"], 12);
+    assert!(first["scanned_height"].as_u64().unwrap() < 12, "{first}");
+    assert!(first["progress_pct"].as_u64().unwrap() < 100, "{first}");
+    assert_eq!(seen[1]["after_cancel"], true);
+    // The scan stopped before the batch starting at 5, and what it saved
+    // matches what it reported.
+    let p = progress(w);
+    assert_eq!(p["is_scanning"], false);
+    assert_eq!(p["cancel_requested"], false);
+    assert_eq!(p["scanned_height"], 4);
+    assert_eq!(p["tip_height"], 12);
+    assert_eq!(last_scanned_block(w).height, 4);
+    let b = call(grin_wallet_get_balance(w, false, 1)).unwrap();
+    assert_eq!(b["last_confirmed_height"], 12);
+
+    // A cancel that arrives after the last batch has nothing to stop, and
+    // the flag it leaves does not fail the next scan.
+    set_scan_test_hooks(
+        w,
+        5,
+        Some(Box::new(move |height| {
+            if height == 12 {
+                call(grin_wallet_scan_cancel(w)).unwrap();
+            }
+        })),
+    );
+    let v = call(grin_wallet_scan(w, 0, false)).unwrap();
+    assert_eq!(v, json!({"scanned_height": 12, "tip_height": 12}));
+    set_scan_test_hooks(w, 0, None);
+    let v = call(grin_wallet_scan(w, 0, false)).unwrap();
+    assert_eq!(v, json!({"scanned_height": 12, "tip_height": 12}));
+    let saved = last_scanned_block(w);
+    assert_eq!(saved.height, 12);
+    assert_eq!(json!(saved.hash), tip_hash);
+    let b = call(grin_wallet_get_balance(w, true, 1)).unwrap();
+    assert!(b["amount_currently_spendable"].as_u64().unwrap() >= spendable.as_u64().unwrap());
+
+    // Closing the handle stops a running scan too, so close does not wait
+    // for the whole scan, and the directory is free once the scan returns.
+    set_scan_test_hooks(
+        w,
+        2,
+        Some(Box::new(move |height| {
+            if height == 2 {
+                call(grin_wallet_close(w)).unwrap();
+            }
+        })),
+    );
+    let e = call(grin_wallet_scan(w, 0, false)).unwrap_err();
+    assert_eq!(e.0, CANCELLED, "{}", e.1);
+    assert_eq!(e.1["details"]["scanned_height"], 2);
+    assert_eq!(code_of(call(grin_wallet_scan_progress(w))), INVALID_HANDLE);
+    let w = test_wallet(&chain, &dir, "w");
+    let v = call(grin_wallet_scan(w, 0, false)).unwrap();
+    assert_eq!(v, json!({"scanned_height": 12, "tip_height": 12}));
+    close(w);
+}
+
+#[test]
+fn password_errors_are_precise() {
+    let tmp = tempfile::tempdir().unwrap();
+    // A path that mentions a password must not turn other errors into
+    // InvalidPassword.
+    let wallet = tmp.path().join("password-store");
+    let dir = path_str(&wallet);
+    let data = wallet.join("wallet_data");
+    let seed = data.join("wallet.seed");
+    let h = create(&dir, AUTOMATED, None).unwrap();
+    let original = std::fs::read(&seed).unwrap();
+    let mnemonic = |h: u64, pw: &str| call(grin_wallet_get_mnemonic(h, cs(pw).as_ptr()));
+    let change = |h: u64, old: &str, new: &str| {
+        call(grin_wallet_change_password(
+            h,
+            cs(old).as_ptr(),
+            cs(new).as_ptr(),
+        ))
+    };
+
+    assert_eq!(code_of(mnemonic(h, "nope")), INVALID_PASSWORD);
+    assert_eq!(code_of(change(h, "nope", "x")), INVALID_PASSWORD);
+    assert_eq!(std::fs::read(&seed).unwrap(), original);
+
+    // A damaged or missing seed file is not a wrong password.
+    std::fs::write(&seed, b"garbage").unwrap();
+    let e = mnemonic(h, PASSWORD).unwrap_err();
+    assert_eq!(e.0, LIFECYCLE, "{}", e.1);
+    assert!(
+        e.1["message"].as_str().unwrap().contains("damaged"),
+        "{}",
+        e.1
+    );
+    assert_eq!(code_of(change(h, PASSWORD, "x")), LIFECYCLE);
+    std::fs::remove_file(&seed).unwrap();
+    assert_eq!(code_of(mnemonic(h, PASSWORD)), WALLET_NOT_FOUND);
+    assert_eq!(code_of(change(h, PASSWORD, "x")), WALLET_NOT_FOUND);
+    std::fs::write(&seed, &original).unwrap();
+
+    // With the old password verified, a later failure is Lifecycle with the
+    // provider's own message. A read-only wallet_data makes moving the seed
+    // aside fail, and the seed stays as it was.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let set_mode =
+            |m: u32| std::fs::set_permissions(&data, std::fs::Permissions::from_mode(m)).unwrap();
+        set_mode(0o555);
+        let probe = data.join("probe");
+        if std::fs::write(&probe, b"").is_ok() {
+            // Running as root: permissions do not stop the rename.
+            std::fs::remove_file(&probe).unwrap();
+        } else {
+            let e = change(h, PASSWORD, "new password");
+            set_mode(0o755);
+            let e = e.unwrap_err();
+            assert_eq!(e.0, LIFECYCLE, "{}", e.1);
+            let message = e.1["message"].as_str().unwrap();
+            assert!(message.contains("password change failed"), "{message}");
+            assert!(message.contains("backing up"), "{message}");
+            assert_eq!(e.1["details"]["seed_present"], true);
+            assert_eq!(std::fs::read(&seed).unwrap(), original);
+        }
+        set_mode(0o755);
+    }
+    assert_eq!(
+        mnemonic(h, PASSWORD).unwrap()["mnemonic"]
+            .as_str()
+            .unwrap()
+            .split_whitespace()
+            .count(),
+        24
+    );
+    close(h);
+
+    assert_eq!(
+        code_of(open_with(&dir, AUTOMATED, "wrong")),
+        INVALID_PASSWORD
+    );
+    std::fs::write(&seed, b"garbage").unwrap();
+    assert_eq!(code_of(open(&dir, AUTOMATED)), LIFECYCLE);
+    std::fs::write(&seed, &original).unwrap();
+    close(open(&dir, AUTOMATED).unwrap());
+}
+
+#[test]
+fn create_refuses_leftover_wallet_data() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = path_str(&tmp.path().join("w"));
+    let data = tmp.path().join("w").join("wallet_data");
+    close(create(&dir, AUTOMATED, None).unwrap());
+    // A delete that stopped half way, or a seed removed by hand.
+    std::fs::remove_file(data.join("wallet.seed")).unwrap();
+
+    let e = create(&dir, AUTOMATED, Some(MNEMONIC)).unwrap_err();
+    assert_eq!(e.0, WALLET_EXISTS, "{}", e.1);
+    assert!(
+        e.1["message"]
+            .as_str()
+            .unwrap()
+            .contains("leftover wallet data"),
+        "{}",
+        e.1
+    );
+    assert_eq!(e.1["details"]["reason"], "leftover_wallet_data");
+    assert_eq!(e.1["details"]["path"], "db");
+    assert!(data.join("db").is_dir(), "nothing is removed");
+    assert!(!data.join("wallet.seed").exists());
+    assert_eq!(code_of(open(&dir, AUTOMATED)), WALLET_NOT_FOUND);
+
+    delete(&dir, 0).unwrap();
+    close(create(&dir, AUTOMATED, Some(MNEMONIC)).unwrap());
+}
+
+/// Removing files LMDB has open only works on unix.
+#[cfg(unix)]
+#[test]
+fn delete_closes_a_handle_whose_data_is_gone() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = path_str(&tmp.path().join("w"));
+    let h = create(&dir, AUTOMATED, None).unwrap();
+    std::fs::remove_dir_all(tmp.path().join("w").join("wallet_data")).unwrap();
+    delete(&dir, h).unwrap();
+    assert_eq!(code_of(call(grin_wallet_get_address(h, 0))), INVALID_HANDLE);
+    close(create(&dir, AUTOMATED, None).unwrap());
+
+    // A handle whose data still exists is not closed by deleting some other,
+    // missing directory.
+    let other = create(&path_str(&tmp.path().join("other")), AUTOMATED, None).unwrap();
+    let missing = path_str(&tmp.path().join("missing"));
+    assert_eq!(code_of(delete(&missing, other)), INVALID_ARGUMENT);
+    address(other, 0);
+    close(other);
 }
 
 #[test]

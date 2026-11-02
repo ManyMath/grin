@@ -1,9 +1,13 @@
 //! Generates the C header with cbindgen.
 //!
-//! The header is written to `$OUT_DIR/grin_ffi.h` and copied to
-//! `include/grin_ffi.h` when the content differs. The copy is best effort so
-//! builds from a read-only source tree (Nix) still work; tests/header_test.rs
-//! fails if the committed header is stale.
+//! The header is always written to `$OUT_DIR/grin_ffi.h`, and
+//! tests/header_test.rs compares it with the committed `include/grin_ffi.h`,
+//! so a change to an `extern "C"` signature fails the tests until the
+//! committed header is regenerated. The build only writes into the source
+//! tree when `GRIN_FFI_WRITE_HEADER=1` is set (tool/regen_bindings.dart sets
+//! it); then it copies the header to `include/grin_ffi.h` if the content
+//! differs. That copy is best effort, so a read-only source tree (Nix) still
+//! builds.
 
 use std::env;
 use std::fs;
@@ -16,6 +20,7 @@ fn main() {
     println!("cargo:rerun-if-changed=src");
     println!("cargo:rerun-if-changed=cbindgen.toml");
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-env-changed=GRIN_FFI_WRITE_HEADER");
 
     let config = cbindgen::Config::from_file(crate_dir.join("cbindgen.toml"))
         .expect("cbindgen.toml should parse");
@@ -31,6 +36,9 @@ fn main() {
     bindings.write_to_file(&generated);
     println!("cargo:rustc-env=GRIN_FFI_HEADER={}", generated.display());
 
+    if env::var("GRIN_FFI_WRITE_HEADER").as_deref() != Ok("1") {
+        return;
+    }
     let committed = crate_dir.join("include").join("grin_ffi.h");
     let new = fs::read(&generated).expect("generated header should be readable");
     if fs::read(&committed).ok().as_deref() != Some(new.as_slice()) {

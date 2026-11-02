@@ -2,6 +2,7 @@
 //! every wallet in this crate is built with.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::time::Duration;
@@ -38,7 +39,7 @@ pub fn chain_type_from_u8(network: u8) -> Result<ChainTypes, GrinError> {
 
 /// `config_json` accepted by `grin_wallet_create` and `grin_wallet_open`.
 /// Unknown keys are ignored so newer callers can add fields.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct WalletConfigJson {
     pub wallet_dir: String,
     pub network: u8,
@@ -49,6 +50,26 @@ pub struct WalletConfigJson {
     pub socks_proxy: Option<String>,
     #[serde(default)]
     pub request_timeout_secs: Option<u64>,
+}
+
+/// Shown in place of the node API secret by the `Debug` impls.
+const REDACTED: &str = "<redacted>";
+
+impl fmt::Debug for WalletConfigJson {
+    // Written by hand so the node API secret never reaches a log.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WalletConfigJson")
+            .field("wallet_dir", &self.wallet_dir)
+            .field("network", &self.network)
+            .field("node_url", &self.node_url)
+            .field(
+                "node_api_secret",
+                &self.node_api_secret.as_ref().map(|_| REDACTED),
+            )
+            .field("socks_proxy", &self.socks_proxy)
+            .field("request_timeout_secs", &self.request_timeout_secs)
+            .finish()
+    }
 }
 
 /// Validated form of `WalletConfigJson`.
@@ -90,12 +111,24 @@ impl WalletConfig {
 }
 
 /// Node connection settings kept per session.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct NodeSettings {
     pub url: String,
     pub api_secret: Option<String>,
     pub socks_proxy: Option<SocketAddr>,
     pub timeout: Duration,
+}
+
+impl fmt::Debug for NodeSettings {
+    // Written by hand so the node API secret never reaches a log.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("NodeSettings")
+            .field("url", &self.url)
+            .field("api_secret", &self.api_secret.as_ref().map(|_| REDACTED))
+            .field("socks_proxy", &self.socks_proxy)
+            .field("timeout", &self.timeout)
+            .finish()
+    }
 }
 
 impl NodeSettings {
@@ -324,5 +357,21 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(e.code, GrinErrorCode::InvalidArgument);
+    }
+
+    #[test]
+    fn debug_never_prints_the_api_secret() {
+        let json = r#"{"wallet_dir":"/w","network":0,"node_url":"http://a","node_api_secret":"hunter2-secret"}"#;
+        let raw: WalletConfigJson = serde_json::from_str(json).unwrap();
+        let c = WalletConfig::parse(json).unwrap();
+        assert_eq!(c.node.api_secret.as_deref(), Some("hunter2-secret"));
+        for text in [
+            format!("{raw:?}"),
+            format!("{c:?}"),
+            format!("{:?}", c.node),
+        ] {
+            assert!(!text.contains("hunter2"), "{text}");
+            assert!(text.contains(REDACTED), "{text}");
+        }
     }
 }

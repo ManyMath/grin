@@ -137,11 +137,11 @@ impl From<LibwalletError> for GrinError {
             LibwalletError::WalletSeedExists(_) => C::WalletExists,
             LibwalletError::WalletSeedDoesntExist => C::WalletNotFound,
             LibwalletError::WalletSeedDecryption => C::InvalidPassword,
-            // DefaultLCProvider reports a failed seed decryption as a
-            // Lifecycle error whose text mentions the password.
-            LibwalletError::Lifecycle(msg) if msg.to_lowercase().contains("password") => {
-                C::InvalidPassword
-            }
+            // DefaultLCProvider reports a seed that fails to decrypt as a
+            // plain Lifecycle error. The entry points that can meet one
+            // (open, get_mnemonic, change_password) recognise its exact
+            // message and check the seed file themselves, see
+            // lifecycle::seed_open_error.
             LibwalletError::Lifecycle(_)
             | LibwalletError::KeychainDoesntExist
             | LibwalletError::InvalidKeychainMask => C::Lifecycle,
@@ -251,11 +251,29 @@ where
     match catch_unwind(AssertUnwindSafe(f)) {
         Ok(Ok(data)) => GrinFfiResult::ok(data),
         Ok(Err(e)) => GrinFfiResult::err(&e),
-        Err(payload) => GrinFfiResult::err(&GrinError::new(
-            GrinErrorCode::InternalPanic,
-            panic_message(payload.as_ref()),
-        )),
+        Err(payload) => {
+            let message = panic_message(payload.as_ref());
+            drop_payload(payload);
+            GrinFfiResult::err(&GrinError::new(GrinErrorCode::InternalPanic, message))
+        }
     }
+}
+
+/// Drops a panic payload without letting a panicking `Drop` unwind into an
+/// `extern "C"` frame (which aborts the process). A payload whose drop
+/// panics again is leaked instead.
+fn drop_payload(payload: Box<dyn Any + Send>) {
+    if let Err(again) = catch_unwind(AssertUnwindSafe(move || drop(payload))) {
+        std::mem::forget(again);
+    }
+}
+
+/// For the places outside `ffi_guard!` that catch a panic and cannot report
+/// it to the caller (the void entry points): logs the message and drops the
+/// payload safely.
+pub(crate) fn log_caught_panic(context: &str, payload: Box<dyn Any + Send>) {
+    log::error!("{context} panicked: {}", panic_message(payload.as_ref()));
+    drop_payload(payload);
 }
 
 pub(crate) fn panic_message(payload: &(dyn Any + Send)) -> String {
@@ -325,14 +343,45 @@ pub(crate) fn to_json<T: Serialize>(value: &T) -> FfiOutcome {
     Ok(Some(serde_json::to_string(value)?))
 }
 
-/// Serializes a value that holds secret text (a mnemonic). The buffer is
-/// sized up front so it is not reallocated, which would leave an unzeroed
-/// copy behind; `grin_ffi_result_free` zeroes it before freeing.
-pub(crate) fn to_secret_json<T: Serialize>(value: &T, size_hint: usize) -> FfiOutcome {
-    let mut buf: Vec<u8> = Vec::with_capacity(size_hint * 2 + 64);
+/// `io::Write` sink that only counts bytes.
+struct ByteCounter(usize);
+
+impl std::io::Write for ByteCounter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0 += buf.len();
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Serializes a value that holds secret text (a mnemonic) so the secret is
+/// never left in freed memory. A first pass counts the bytes; the real
+/// buffer then gets a capacity of exactly that length plus one, the room
+/// `GrinFfiResult::ok` needs for the NUL. With that capacity
+/// `CString::new` appends the NUL in place and its `into_boxed_slice` has
+/// nothing to shrink, so the buffer is never reallocated (a shrinking
+/// realloc can move the block and free the old one unzeroed). There is no
+/// intermediate copy; the buffer is zeroed on every error path, and
+/// `grin_ffi_result_free` zeroes the final string before freeing it.
+pub(crate) fn to_secret_json<T: Serialize>(value: &T) -> FfiOutcome {
+    let mut counter = ByteCounter(0);
+    serde_json::to_writer(&mut counter, value)?;
+    let len = counter.0;
+    let mut buf: Vec<u8> = Vec::with_capacity(len + 1);
     if let Err(e) = serde_json::to_writer(&mut buf, value) {
         buf.zeroize();
         return Err(e.into());
+    }
+    if buf.len() != len {
+        // Serialization is deterministic; a different length would mean the
+        // buffer grew, so give up rather than return it.
+        buf.zeroize();
+        return Err(GrinError::internal(
+            "secret JSON changed length between passes",
+        ));
     }
     match String::from_utf8(buf) {
         Ok(s) => Ok(Some(s)),
@@ -361,11 +410,13 @@ unsafe fn free_c_string(ptr: *mut c_char) {
 #[no_mangle]
 pub extern "C" fn grin_ffi_result_free(res: GrinFfiResult) {
     // Free errors cannot be reported through a void function, so a panic
-    // here is swallowed rather than allowed to cross the C boundary.
-    let _ = catch_unwind(AssertUnwindSafe(|| unsafe {
+    // here is logged rather than allowed to cross the C boundary.
+    if let Err(payload) = catch_unwind(AssertUnwindSafe(|| unsafe {
         free_c_string(res.data);
         free_c_string(res.error);
-    }));
+    })) {
+        log_caught_panic("grin_ffi_result_free", payload);
+    }
 }
 
 /// Frees one string allocated by this library. NULL is ignored.
@@ -374,7 +425,9 @@ pub extern "C" fn grin_ffi_result_free(res: GrinFfiResult) {
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn grin_string_free(ptr: *mut c_char) {
-    let _ = catch_unwind(AssertUnwindSafe(|| unsafe { free_c_string(ptr) }));
+    if let Err(payload) = catch_unwind(AssertUnwindSafe(|| unsafe { free_c_string(ptr) })) {
+        log_caught_panic("grin_string_free", payload);
+    }
 }
 
 /// Reads a required string argument. The C caller guarantees `ptr` is NULL or
@@ -531,12 +584,61 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_password_mapping() {
-        let e: GrinError =
-            LibwalletError::Lifecycle("Error opening wallet (is password correct?)".into()).into();
+    fn lifecycle_errors_are_not_mapped_by_text() {
+        // Only a typed decryption error is a wrong password here; Lifecycle
+        // text is never inspected, so a data directory with "password" in
+        // its path stays a Lifecycle error.
+        let e: GrinError = LibwalletError::WalletSeedDecryption.into();
         assert_eq!(e.code, GrinErrorCode::InvalidPassword);
-        let e: GrinError = LibwalletError::Lifecycle("Error opening wallet: x".into()).into();
+        let e: GrinError = LibwalletError::Lifecycle(
+            "Error opening wallet: LMDB error, Data Dir: /home/u/password-store/wallet_data".into(),
+        )
+        .into();
         assert_eq!(e.code, GrinErrorCode::Lifecycle);
+        let e: GrinError = LibwalletError::Lifecycle(
+            "New and Old wallet seeds are not equal on password change, not removing backups."
+                .into(),
+        )
+        .into();
+        assert_eq!(e.code, GrinErrorCode::Lifecycle);
+    }
+
+    #[test]
+    fn secret_json_is_never_reallocated() {
+        #[derive(Serialize)]
+        struct M<'a> {
+            mnemonic: &'a str,
+        }
+        let words = "abandon \"quoted\" word\twith escapes ".repeat(8);
+        let s = to_secret_json(&M { mnemonic: &words }).unwrap().unwrap();
+        let expected = serde_json::to_string(&M { mnemonic: &words }).unwrap();
+        assert_eq!(s, expected);
+        // Exactly the room CString::new needs for its NUL, so neither its
+        // reserve nor its into_boxed_slice touches the allocation.
+        assert_eq!(s.capacity(), s.len() + 1);
+        let before = s.as_ptr();
+        let c = CString::new(s).unwrap();
+        assert_eq!(c.as_ptr().cast::<u8>(), before);
+        let res = GrinFfiResult::ok(Some(c.into_string().unwrap()));
+        let (code, data, _) = take(res);
+        assert_eq!(code, 0);
+        assert_eq!(data.as_deref(), Some(expected.as_str()));
+    }
+
+    #[test]
+    fn caught_panic_payloads_are_dropped_safely() {
+        struct PanicsOnDrop;
+        impl Drop for PanicsOnDrop {
+            fn drop(&mut self) {
+                panic!("drop of the payload panicked");
+            }
+        }
+        // A payload whose own Drop panics must not escape.
+        log_caught_panic("test", Box::new(PanicsOnDrop));
+        let (code, _, err) = take(guard(|| std::panic::panic_any(PanicsOnDrop)));
+        assert_eq!(code, GrinErrorCode::InternalPanic as i32);
+        let v: Value = serde_json::from_str(&err.unwrap()).unwrap();
+        assert_eq!(v["message"], "panic with a non-string payload");
     }
 
     #[test]

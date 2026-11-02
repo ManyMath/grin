@@ -383,6 +383,11 @@ class GrinWalletClient implements Finalizable {
     final nativeStartHeight = requireU64(startHeight, 'startHeight');
     final handle = _handle;
     return _enqueue(() async {
+      // A cancel only reaches a scan that is running, so a scan that was
+      // still queued when close() ran must not start now.
+      if (_closed) {
+        throw StateError('GrinWalletClient was closed before the scan ran');
+      }
       _emit(GrinScanStarted(startHeight: nativeStartHeight));
       try {
         final result = await _scan(
@@ -412,12 +417,13 @@ class GrinWalletClient implements Finalizable {
     );
   }
 
-  /// Asks for the scan to stop. A direct call that is not queued.
+  /// Asks a running scan to stop. A direct call that is not queued.
   ///
-  /// The native scan has no hook between its 10,000-block batches, so a scan
-  /// that is running cannot be interrupted and finishes normally. If none is
-  /// running, the next [scan] throws [GrinCancelledException] without
-  /// starting.
+  /// The native scan checks for a cancel between its batches of 10,001
+  /// blocks, so a running [scan] stops at the next batch boundary and its
+  /// future completes with [GrinCancelledException], whose `details` carry
+  /// the last saved `scanned_height`. With no scan running this does
+  /// nothing; the next scan runs normally.
   void cancelScan() {
     _ensureOpen();
     unwrapFfiResult(bindings.grin_wallet_scan_cancel(_handle));
@@ -447,10 +453,9 @@ class GrinWalletClient implements Finalizable {
   /// without reopening the database. Nothing contacts the node.
   ///
   /// Like every operation it runs in the queue, so it starts only after the
-  /// operations before it. A running scan cannot be interrupted by the
-  /// native library in this version, so the change waits for the whole scan
-  /// to finish; [cancelScan] only stops the next scan from starting. See
-  /// section 8 of docs/ffi-json.md.
+  /// operations before it. To apply it during a long scan, call [cancelScan]
+  /// first; the scan then stops at its next batch boundary. See section 8 of
+  /// docs/ffi-json.md.
   Future<void> updateNetwork({
     required String nodeUrl,
     String? apiSecret,
@@ -759,14 +764,14 @@ class GrinWalletClient implements Finalizable {
   /// Safe to call more than once: every call returns the same future. In
   /// order, it
   /// 1. marks the client closed, so new calls throw [StateError],
-  /// 2. calls [cancelScan], which only stops a scan that has not started,
+  /// 2. calls [cancelScan], so a running scan stops at its next batch
+  ///    boundary and a scan still waiting in the queue is skipped,
   /// 3. waits for the operations already queued, ignoring their errors,
   /// 4. detaches the native finalizer,
   /// 5. closes the native handle and then the [events] stream.
   ///
-  /// A running scan cannot be interrupted by the native library in this
-  /// version, so step 3 waits for the whole scan to finish, which can take
-  /// long for a scan from a low height. See section 8 of docs/ffi-json.md.
+  /// Step 3 can still take up to one scan batch (10,001 blocks and their
+  /// node requests). See section 8 of docs/ffi-json.md.
   ///
   /// When the returned future completes, the wallet directory is free to be
   /// opened again. The [events] stream is closed without waiting for its

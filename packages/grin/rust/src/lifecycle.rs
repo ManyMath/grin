@@ -20,8 +20,8 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::config::{FfiNodeClient, NodeSettings, WalletConfig};
 use crate::error::{
-    read_opt_nonempty, read_opt_secret, read_secret, read_str, to_json, to_secret_json, GrinError,
-    GrinErrorCode, GrinFfiResult,
+    log_caught_panic, read_opt_nonempty, read_opt_secret, read_secret, read_str, to_json,
+    to_secret_json, GrinError, GrinErrorCode, GrinFfiResult,
 };
 use crate::handle::{
     canonical_data_dir_create, canonical_data_dir_existing, get_session, lookup_session,
@@ -31,6 +31,29 @@ use crate::handle::{
 /// Name of the encrypted seed file inside `wallet_data` (impls keeps its own
 /// constant in a private module).
 pub const SEED_FILE: &str = "wallet.seed";
+
+/// Directory of the wallet database inside `wallet_data` (libwallet's
+/// `DB_DIR`; the LMDB files live below it).
+const DB_DIR: &str = "db";
+
+/// `DefaultLCProvider::open_wallet`'s message when `wallet.seed` cannot be
+/// read or decrypted.
+const OPEN_SEED_FAILED: &str = "Error opening wallet (is password correct?)";
+
+/// `DefaultLCProvider::get_mnemonic`'s and `change_password`'s message when
+/// `wallet.seed` cannot be read or decrypted.
+const READ_SEED_FAILED: &str = "Error opening wallet seed file";
+
+/// Fields of the encrypted `wallet.seed` JSON (impls' private
+/// `EncryptedWalletSeed`). Only used to tell a damaged file from a wrong
+/// password.
+#[derive(serde::Deserialize)]
+#[allow(dead_code)]
+struct SeedFileShape {
+    encrypted_seed: String,
+    salt: String,
+    nonce: String,
+}
 
 /// What `open_backend` does before opening.
 pub(crate) enum OpenMode {
@@ -82,7 +105,8 @@ pub(crate) fn open_backend(
         if let OpenMode::Create(mnemonic) = mode {
             lc.create_wallet(None, mnemonic, 32, password.clone(), false)?;
         }
-        lc.open_wallet(None, password, true, false)?
+        lc.open_wallet(None, password, true, false)
+            .map_err(|e| seed_error(e, OPEN_SEED_FAILED, data_dir))?
     };
     Ok((Arc::new(grin_util::Mutex::new(wallet)), mask))
 }
@@ -110,16 +134,110 @@ pub(crate) fn validate_mnemonic_words(words: &str) -> Result<(), GrinError> {
     }
 }
 
-/// `get_mnemonic` and `change_password` report a seed that fails to decrypt
-/// as this Lifecycle error. The session is open, so the file exists and a
-/// decryption failure means a wrong password.
-fn seed_error(e: LibwalletError) -> GrinError {
+/// The lifecycle provider reports every failure to read `wallet.seed` (file
+/// missing, unreadable, not valid JSON, wrong password) with one fixed
+/// Lifecycle message. Only that exact message is looked at here, and the
+/// file is then checked directly: if it reads and has the shape of a seed
+/// file, the decryption is what failed and the password is wrong.
+fn seed_error(e: LibwalletError, seed_message: &str, data_dir: &Path) -> GrinError {
     match &e {
-        LibwalletError::Lifecycle(msg) if msg == "Error opening wallet seed file" => {
-            GrinError::new(GrinErrorCode::InvalidPassword, "wrong password")
-        }
+        LibwalletError::Lifecycle(msg) if msg == seed_message => seed_open_error(data_dir),
         _ => e.into(),
     }
+}
+
+fn seed_open_error(data_dir: &Path) -> GrinError {
+    match std::fs::read(data_dir.join(SEED_FILE)) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => GrinError::new(
+            GrinErrorCode::WalletNotFound,
+            format!("{SEED_FILE} is missing from the wallet directory"),
+        ),
+        Err(e) => GrinError::new(
+            GrinErrorCode::Io,
+            format!("could not read {SEED_FILE}: {e}"),
+        ),
+        Ok(bytes) => match serde_json::from_slice::<SeedFileShape>(&bytes) {
+            Ok(_) => GrinError::new(GrinErrorCode::InvalidPassword, "wrong password"),
+            Err(_) => GrinError::new(
+                GrinErrorCode::Lifecycle,
+                format!("{SEED_FILE} is damaged: it is not a valid seed file"),
+            ),
+        },
+    }
+}
+
+/// Names of the `wallet.seed.bak*` files in `data_dir`.
+fn seed_backups(data_dir: &Path) -> Vec<String> {
+    let prefix = format!("{SEED_FILE}.bak");
+    let mut names: Vec<String> = std::fs::read_dir(data_dir)
+        .map(|rd| {
+            rd.filter_map(Result::ok)
+                .filter_map(|e| e.file_name().into_string().ok())
+                .filter(|n| n.starts_with(&prefix))
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
+/// A `change_password` failure after the old password was verified. The
+/// provider moves `wallet.seed` to a `wallet.seed.bak*` file before writing
+/// the new one, so the message says where the old seed is.
+fn change_password_error(
+    e: LibwalletError,
+    data_dir: &Path,
+    backups_before: &[String],
+) -> GrinError {
+    let seed_present = data_dir.join(SEED_FILE).is_file();
+    let backup = seed_backups(data_dir)
+        .into_iter()
+        .rfind(|n| !backups_before.contains(n));
+    let mut message = format!("the password change failed: {e}");
+    match (&backup, seed_present) {
+        (Some(b), false) => message.push_str(&format!(
+            ". {SEED_FILE} is missing; the seed encrypted with the old password is kept \
+             as {b} in the wallet directory (rename it to {SEED_FILE} to restore it)"
+        )),
+        (Some(b), true) => message.push_str(&format!(
+            ". The seed encrypted with the old password is also kept as {b}"
+        )),
+        (None, _) => {}
+    }
+    GrinError::new(GrinErrorCode::Lifecycle, message).with_details(serde_json::json!({
+        "seed_present": seed_present,
+        "backup_file": backup,
+    }))
+}
+
+/// Anything in a `wallet_data` without `wallet.seed` that shows an earlier
+/// wallet lived there: the database directory or an LMDB file. Returns the
+/// first such path, relative to `data_dir`.
+fn leftover_wallet_data(data_dir: &Path) -> Option<String> {
+    if std::fs::symlink_metadata(data_dir.join(DB_DIR)).is_ok() {
+        return Some(DB_DIR.to_owned());
+    }
+    fn find_mdb(dir: &Path, depth: u32) -> Option<std::path::PathBuf> {
+        for entry in std::fs::read_dir(dir).ok()?.filter_map(Result::ok) {
+            let path = entry.path();
+            let file_type = entry.file_type().ok()?;
+            if file_type.is_file() && path.extension().is_some_and(|x| x == "mdb") {
+                return Some(path);
+            }
+            if file_type.is_dir() && depth > 0 {
+                if let Some(p) = find_mdb(&path, depth - 1) {
+                    return Some(p);
+                }
+            }
+        }
+        None
+    }
+    find_mdb(data_dir, 3).map(|p| {
+        p.strip_prefix(data_dir)
+            .unwrap_or(&p)
+            .to_string_lossy()
+            .into_owned()
+    })
 }
 
 fn wallet_not_found(wallet_dir: &str) -> GrinError {
@@ -151,12 +269,28 @@ pub extern "C" fn grin_wallet_create(
         check_data_dir_name(&data_dir)?;
         let lease = DirLease::acquire(&data_dir)?;
 
+        let leftover = if existed { leftover_wallet_data(&data_dir) } else { None };
         let opened = if data_dir.join(SEED_FILE).exists() {
             Err(GrinError::new(
                 GrinErrorCode::WalletExists,
                 "a wallet already exists in this directory",
             )
             .with_details(serde_json::json!({ "wallet_dir": config.wallet_dir })))
+        } else if let Some(found) = leftover {
+            // A new seed must not start on another seed's database (its
+            // outputs, history and transaction contexts).
+            Err(GrinError::new(
+                GrinErrorCode::WalletExists,
+                format!(
+                    "the wallet directory holds leftover wallet data ({found}) but no {SEED_FILE}; \
+                     delete the wallet directory before creating a wallet in it"
+                ),
+            )
+            .with_details(serde_json::json!({
+                "wallet_dir": config.wallet_dir,
+                "reason": "leftover_wallet_data",
+                "path": found,
+            })))
         } else {
             config.node.http_client().and_then(|c| {
                 open_backend(
@@ -242,17 +376,22 @@ pub extern "C" fn grin_wallet_close(handle: u64) -> GrinFfiResult {
 #[no_mangle]
 pub extern "C" fn grin_wallet_close_finalizer(token: *mut c_void) {
     let handle = token as usize as u64;
-    let _ = catch_unwind(AssertUnwindSafe(|| {
+    if let Err(payload) = catch_unwind(AssertUnwindSafe(|| {
         if let Some(session) = remove_session(handle) {
             drop(session);
         }
-    }));
+    })) {
+        log_caught_panic("grin_wallet_close_finalizer", payload);
+    }
 }
 
 /// Deletes `<wallet_dir>/wallet_data`. A non-zero `handle` for this
 /// directory is closed first; a handle for another directory is rejected,
 /// and a handle that is not registered is ignored. A missing directory
 /// counts as already deleted.
+// (Plain comment: doc comments here are copied into include/grin_ffi.h.)
+// With the directory missing, a handle whose own data directory is gone too
+// is taken to be this wallet's and is closed.
 #[no_mangle]
 pub extern "C" fn grin_wallet_delete(wallet_dir: *const c_char, handle: u64) -> GrinFfiResult {
     ffi_guard! {
@@ -262,7 +401,17 @@ pub extern "C" fn grin_wallet_delete(wallet_dir: *const c_char, handle: u64) -> 
         }
         let target = canonical_data_dir_existing(wallet_dir)?;
         if let Some(session) = lookup_session(handle) {
-            if target.as_deref() != Some(session.data_dir.as_path()) {
+            let same = match &target {
+                Some(t) => *t == session.data_dir,
+                // The directory was removed behind the wallet's back (its
+                // canonical path no longer resolves); if the handle's own
+                // data directory is gone as well, it is this wallet.
+                None => matches!(
+                    std::fs::symlink_metadata(&session.data_dir),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound
+                ),
+            };
+            if !same {
                 return Err(GrinError::invalid_argument(
                     "handle belongs to a different wallet directory",
                 ));
@@ -294,9 +443,18 @@ pub extern "C" fn grin_wallet_change_password(
         let old = read_secret(old_pw, "old_pw")?;
         let new = read_secret(new_pw, "new_pw")?;
         let mut w = session.wallet.lock();
-        w.lc_provider()?
-            .change_password(None, old, new)
-            .map_err(seed_error)?;
+        let lc = w.lc_provider()?;
+        // Decrypt the seed with the old password first, so InvalidPassword
+        // means exactly that. The provider's change_password reports a
+        // failure to write the new seed with the same text as a wrong
+        // password, after it has already moved wallet.seed aside.
+        drop(
+            lc.get_mnemonic(None, old.clone())
+                .map_err(|e| seed_error(e, READ_SEED_FAILED, &session.data_dir))?,
+        );
+        let backups_before = seed_backups(&session.data_dir);
+        lc.change_password(None, old, new)
+            .map_err(|e| change_password_error(e, &session.data_dir, &backups_before))?;
         Ok(None)
     }
 }
@@ -311,9 +469,9 @@ pub extern "C" fn grin_wallet_get_mnemonic(handle: u64, password: *const c_char)
             let mut w = session.wallet.lock();
             w.lc_provider()?
                 .get_mnemonic(None, password)
-                .map_err(seed_error)?
+                .map_err(|e| seed_error(e, READ_SEED_FAILED, &session.data_dir))?
         };
-        to_secret_json(&MnemonicOut { mnemonic: &words }, words.len())
+        to_secret_json(&MnemonicOut { mnemonic: &words })
     }
 }
 
@@ -334,12 +492,15 @@ pub extern "C" fn grin_wallet_update_network(
         let timeout = session.node_settings().timeout;
         let settings = NodeSettings::new(url, secret, proxy, timeout)?;
         let client = settings.http_client()?;
-        {
-            let mut w = session.wallet.lock();
-            let backend = w.lc_provider()?.wallet_inst()?;
-            *backend.w2n_client() = FfiNodeClient::Http(client);
-        }
-        *session.node_settings() = settings;
+        // Both change while the wallet mutex is held, with the settings
+        // lock taken inside it (the only place the two are held together),
+        // so a reader holding the wallet mutex never sees the new client
+        // with the old settings or the other way round.
+        let mut w = session.wallet.lock();
+        let backend = w.lc_provider()?.wallet_inst()?;
+        let mut node = session.node_settings();
+        *backend.w2n_client() = FfiNodeClient::Http(client);
+        *node = settings;
         Ok(None)
     }
 }
@@ -369,7 +530,7 @@ pub extern "C" fn grin_mnemonic_generate(word_count: u32) -> GrinFfiResult {
             mnemonic::from_entropy(&entropy)
                 .map_err(|e| GrinError::internal(format!("mnemonic encoding failed: {e}")))?,
         );
-        to_secret_json(&MnemonicOut { mnemonic: &words }, words.len())
+        to_secret_json(&MnemonicOut { mnemonic: &words })
     }
 }
 
@@ -402,5 +563,81 @@ mod tests {
     fn data_dir_name_check() {
         assert!(check_data_dir_name(Path::new("/a/wallet_data")).is_ok());
         assert!(check_data_dir_name(Path::new("/a/other")).is_err());
+    }
+
+    #[test]
+    fn seed_errors_are_told_apart() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let read_failed = || LibwalletError::Lifecycle(READ_SEED_FAILED.into());
+        assert_eq!(
+            seed_error(read_failed(), READ_SEED_FAILED, d).code,
+            GrinErrorCode::WalletNotFound
+        );
+        std::fs::write(d.join(SEED_FILE), b"not json").unwrap();
+        assert_eq!(
+            seed_error(read_failed(), READ_SEED_FAILED, d).code,
+            GrinErrorCode::Lifecycle
+        );
+        std::fs::write(
+            d.join(SEED_FILE),
+            br#"{"encrypted_seed": "00", "salt": "00", "nonce": "00"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            seed_error(read_failed(), READ_SEED_FAILED, d).code,
+            GrinErrorCode::InvalidPassword
+        );
+        // Other messages are never read as a wrong password, even when they
+        // mention one.
+        let other = LibwalletError::Lifecycle(
+            "New and Old wallet seeds are not equal on password change, not removing backups."
+                .into(),
+        );
+        assert_eq!(
+            seed_error(other, READ_SEED_FAILED, d).code,
+            GrinErrorCode::Lifecycle
+        );
+        let open = LibwalletError::Lifecycle(OPEN_SEED_FAILED.into());
+        assert_eq!(
+            seed_error(open, READ_SEED_FAILED, d).code,
+            GrinErrorCode::Lifecycle
+        );
+    }
+
+    #[test]
+    fn change_password_failure_names_the_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        std::fs::write(d.join(format!("{SEED_FILE}.bak")), b"older").unwrap();
+        let before = seed_backups(d);
+        // What the provider leaves behind when writing the new seed fails:
+        // the old one moved aside, no wallet.seed.
+        std::fs::write(d.join(format!("{SEED_FILE}.bak.1")), b"old").unwrap();
+        let e = change_password_error(
+            LibwalletError::Lifecycle(READ_SEED_FAILED.into()),
+            d,
+            &before,
+        );
+        assert_eq!(e.code, GrinErrorCode::Lifecycle);
+        assert!(e.message.contains("wallet.seed.bak.1"), "{}", e.message);
+        assert!(e.message.contains("is missing"), "{}", e.message);
+        let details = e.details.unwrap();
+        assert_eq!(details["seed_present"], false);
+        assert_eq!(details["backup_file"], "wallet.seed.bak.1");
+    }
+
+    #[test]
+    fn leftover_data_is_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        assert_eq!(leftover_wallet_data(d), None);
+        std::fs::write(d.join("tx_metadata.json"), b"{}").unwrap();
+        assert_eq!(leftover_wallet_data(d), None);
+        std::fs::create_dir_all(d.join("saved_txs").join("lmdb")).unwrap();
+        std::fs::write(d.join("saved_txs").join("lmdb").join("data.mdb"), b"").unwrap();
+        assert!(leftover_wallet_data(d).unwrap().ends_with("data.mdb"));
+        std::fs::create_dir(d.join(DB_DIR)).unwrap();
+        assert_eq!(leftover_wallet_data(d).as_deref(), Some(DB_DIR));
     }
 }

@@ -320,8 +320,10 @@ external GrinFfiResult grin_wallet_open(
 );
 
 /// Scans the chain from `start_height` (0 means from the first block) and
-/// repairs wallet outputs. Runs on the calling thread and returns
-/// `{"scanned_height", "tip_height"}`.
+/// repairs wallet outputs. Runs on the calling thread in batches of 10,001
+/// heights and returns `{"scanned_height", "tip_height"}`.
+/// `grin_wallet_scan_cancel` or closing the handle stops it between batches
+/// with Cancelled and `{"scanned_height", "tip_height"}` in the details.
 @ffi.Native<GrinFfiResult Function(ffi.Uint64, ffi.Uint64, ffi.Bool)>()
 external GrinFfiResult grin_wallet_scan(
   int handle,
@@ -329,9 +331,11 @@ external GrinFfiResult grin_wallet_scan(
   bool delete_unconfirmed,
 );
 
-/// Requests cancellation. Takes no wallet lock. A scan that is already
-/// running cannot be interrupted and finishes normally; if no scan is
-/// running, the next `grin_wallet_scan` returns Cancelled without starting.
+/// Asks a running scan to stop before its next batch and returns at once;
+/// the `grin_wallet_scan` call then returns Cancelled with the last saved
+/// height. Takes no wallet lock. With no scan running it does nothing and
+/// the next scan runs normally. Closing the handle has the same effect on a
+/// running scan.
 @ffi.Native<GrinFfiResult Function(ffi.Uint64)>()
 external GrinFfiResult grin_wallet_scan_cancel(int handle);
 

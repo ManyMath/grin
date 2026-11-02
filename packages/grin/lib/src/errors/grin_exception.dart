@@ -187,7 +187,8 @@ final class GrinNotFoundException extends GrinException {
   const GrinNotFoundException._(super.code, super.message, super.details);
 }
 
-/// Code 14: a scan was cancelled before it started.
+/// Code 14: a scan was cancelled between batches; `details` carry the last
+/// saved `scanned_height` and the `tip_height`.
 final class GrinCancelledException extends GrinException {
   const GrinCancelledException._(super.code, super.message, super.details);
 }

@@ -1,6 +1,11 @@
 //! Checks the committed C header: it must match what cbindgen generates now,
 //! and it must compile as C11 and C++11 with warnings as errors, both with
 //! and without GRIN_FFI_TEST_UTILS.
+//!
+//! build.rs writes the fresh header only to `$OUT_DIR` (passed in as
+//! `GRIN_FFI_HEADER`) unless `GRIN_FFI_WRITE_HEADER=1` is set, so the
+//! comparison below really is between the committed file and the current
+//! signatures.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -74,7 +79,8 @@ fn committed_header_matches_generated() {
     let committed = std::fs::read_to_string(committed_header()).expect("committed header");
     assert!(
         generated == committed,
-        "include/grin_ffi.h is stale; rebuild the crate in a writable tree and commit the result"
+        "include/grin_ffi.h is stale; regenerate it with GRIN_FFI_WRITE_HEADER=1 cargo build \
+         (or tool/regen_bindings.dart) and commit the result"
     );
 }
 
