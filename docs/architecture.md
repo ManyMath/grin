@@ -1333,4 +1333,19 @@ Known notices: the hooks runner prints `File modified during build. Build must b
 
 Not verified here: macOS and iOS builds (no Apple SDK; the flake's `apple` shell and `nix/build-apple.sh` are written but never run), a Windows host build (the DLL was cross-built by the kit and only its export table was checked), any sync or send against a real node (no public Grin testnet node answered), the Tor path of `grin_tx_send_http` beyond its proxy checks, and the GC-finalizer path of `GrinWalletClient` beyond the Rust-side simulation with a retained session.
 
+Process note: while testing the brief's Cargo `[patch]` wiring, one command ran without the ssh guard and cargo opened an ssh connection to git.cypherstack.com, which answered that `sneurlax/grin-wallet` does not exist there. Nothing was fetched or pushed. Every later cargo, pub and nix command ran with `GIT_SSH_COMMAND=/bin/false`, and tool/local-fork-env.sh sets it as well.
+
 Independent review: two Opus reviewers read grin-ffi and GrinWalletClient without the authors' conclusions. grin-ffi: no blockers, six should-fix items (sidecar overwrite on read errors, password error mapping, a self-comparing header test, `null` optional args, scan cancellation, a secret-leaking reallocation), all fixed in `4accb74` together with twelve of the nits. GrinWalletClient: one blocker (`close()` could hang behind a paused `events` listener), seven should-fix items, all fixed in `dc67ca9` and `4accb74`; the remaining nits are recorded in the review reports under the session scratchpad and summarized in the project report.
+
+### D9. Review items left as they are, and why
+
+The two independent reviews (section 13) listed nits that were deliberately not changed in this revision:
+
+- F17 (fork): `grin_store::Store::new` can leave an open cached environment behind after a setup failure, and its drop refcount is not atomic. That is in the fork's `grin` submodule, outside this crate; the directory lease keeps the FFI from depending on it. A fix belongs upstream.
+- F18: the directory lease is keyed by canonical path, so the same database reached through a bind mount, or a directory renamed while open, gets a second key. heed itself refuses a second open of the same environment, so the consequence is an error rather than corruption.
+- F21: the `extern "C"` functions have safe Rust signatures although they dereference raw pointers. The only Rust callers are this crate's tests; the C ABI is unchanged either way. Marking them `unsafe` would be right for a Rust-facing rlib and is a mechanical follow-up.
+- F24, F25 (test harness only): the in-process proxy can hang a caller that violates the harness rules (two node calls on one test wallet, mining while broadcasting), and the chain type is not restored if mining panics. Both are documented in test_support.rs and do not ship.
+- N3: on the GC path the LMDB close runs inside the native finalizer and the client's `events` stream is never closed. That is the designed fallback for a client dropped without `close()`; the normal path is `close()`, and `OPEN_DIRS` keeps a reopen safe in the meantime (4.5).
+- N7: a mnemonic returned to Dart leaves copies on the Dart heap that cannot be wiped; this is inherent to Dart strings and is stated on `getMnemonic`.
+- N10: `test_utils: true` with a build mode other than `cargo` is silently ignored, because the kit's prebuilt, source and dev artifacts are release builds by definition; the README says so.
+- F26: an embedded NUL cannot cross the C boundary; the Dart side now rejects it with `ArgumentError`.
