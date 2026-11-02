@@ -85,17 +85,17 @@ Values are append-only; Dart maps them by number.
 | 1 | `InvalidArgument` | NULL where not allowed, out-of-range value, bad URL or proxy, handle for another directory. | null |
 | 2 | `InvalidUtf8` | A string argument is not valid UTF-8. | null |
 | 3 | `Json` | A JSON argument does not parse or misses a required key. | null |
-| 4 | `WalletNotFound` | No `wallet_data` directory or no `wallet.seed` in it. | `{"wallet_dir": string}` (as given) |
-| 5 | `InvalidPassword` | The password does not decrypt `wallet.seed`. | null |
-| 6 | `WalletExists` | `grin_wallet_create` on a directory that already has `wallet.seed`. | `{"wallet_dir": string}` (as given) |
+| 4 | `WalletNotFound` | No `wallet_data` directory or no `wallet.seed` in it. | `{"wallet_dir": string}` (as given) from create, open and delete; null when `wallet.seed` disappeared under an open wallet |
+| 5 | `InvalidPassword` | The password does not decrypt `wallet.seed`. Only returned when the seed file is present and well formed, so it never stands for a damaged or unreadable file or a failed write. | null |
+| 6 | `WalletExists` | `grin_wallet_create` on a directory that already has `wallet.seed`, or that has leftover wallet data (`db/` or an LMDB file) without one. | `{"wallet_dir": string}` (as given); for leftover data also `"reason": "leftover_wallet_data"` and `"path"` (what was found, relative to `wallet_data`) |
 | 7 | `InvalidHandle` | Handle is 0, unknown, or already closed. | null |
-| 8 | `Lifecycle` | Other wallet open/close/seed failures from the lifecycle provider. | null |
+| 8 | `Lifecycle` | Other wallet open/close/seed failures from the lifecycle provider, including a damaged `wallet.seed` and a password change that failed after the old password was verified. | null; for a failed password change `{"seed_present": bool, "backup_file": string or null}` |
 | 9 | `Node` | The node could not be reached or gave an unusable answer, including a failed broadcast and a cancel that could not refresh first. | null, or `{"slate_id"}` (section 9.1) |
 | 10 | `InsufficientFunds` | Not enough spendable funds. | `{"required": u64, "available": u64}` |
 | 11 | `Slate` | Slate or Slatepack could not be parsed, encrypted, decrypted or is in the wrong state. | null, or `{"slate_id"}` (section 9.1) |
 | 12 | `Transaction` | Transaction building or bookkeeping failed, or a payment proof does not verify. | null, or `{"slate_id"}` (section 9.1) |
-| 13 | `NotFound` | Transaction, stored finalized transaction or payment proof does not exist. | null |
-| 14 | `Cancelled` | A scan was cancelled before it started. | null |
+| 13 | `NotFound` | Transaction, stored finalized transaction or payment proof does not exist. | null, or `{"slate_id"}` (section 9.1) |
+| 14 | `Cancelled` | A running scan was stopped between batches by `grin_wallet_scan_cancel` or by closing the wallet. | `{"scanned_height": u64, "tip_height": u64}`, or null when the handle was closed before the scan started |
 | 15 | `Io` | File system error. | null |
 | 16 | `InternalPanic` | A Rust panic was caught. | null |
 | 17 | `Internal` | Unexpected internal error. | null |
@@ -218,6 +218,11 @@ See 1.1.
 - Returns `{"handle": u64}`.
 - If creation fails after this call made `wallet_data`, the directory is
   removed again. Nothing is written for a config or mnemonic error.
+- A `wallet_data` without `wallet.seed` that still holds a database (`db/`
+  or any `*.mdb` file, for example after a delete that stopped half way) is
+  `WalletExists` with `"reason": "leftover_wallet_data"`: a new seed must not
+  start on another seed's outputs, history and transaction contexts. Nothing
+  is removed; `grin_wallet_delete` clears the directory.
 - Errors: `Json`, `InvalidArgument`, `InvalidUtf8`, `InvalidMnemonic`,
   `WalletExists`, `WalletBusy`, `Lifecycle`, `Io`, `Node` (HTTP client could not
   be built).
@@ -227,6 +232,9 @@ See 1.1.
 - Returns `{"handle": u64}`.
 - Errors: `Json`, `InvalidArgument`, `InvalidUtf8`, `WalletNotFound`,
   `InvalidPassword`, `WalletBusy`, `Lifecycle`, `Io`.
+- `InvalidPassword` means the seed file was read, is well formed and does
+  not decrypt with `password`. A damaged `wallet.seed` is `Lifecycle`, an
+  unreadable one `Io`.
 - Neither create nor open contacts the node.
 
 ### `grin_wallet_close(handle)`
@@ -248,7 +256,10 @@ See 1.1.
 - `handle`: 0, or the handle of the wallet in this directory, which is closed
   first. A handle that belongs to another directory is `InvalidArgument`; a
   handle that is not registered is ignored.
-- A missing `wallet_data` counts as already deleted (success).
+- A missing `wallet_data` counts as already deleted (success). If `handle`
+  is registered and its own data directory is gone as well (removed outside
+  the library), the handle is closed; if its data directory still exists, it
+  belongs to another directory and the call is `InvalidArgument`.
 - Returns nothing.
 - Errors: `InvalidArgument`, `InvalidUtf8`, `WalletBusy` (another open wallet
   or a call still running on a closed one holds the directory; nothing is
@@ -267,20 +278,36 @@ another name (`InvalidArgument`).
 ### `grin_wallet_change_password(handle, old_pw, new_pw)`
 
 - Re-encrypts `wallet.seed`. Returns nothing.
+- `old_pw` is checked first by decrypting the seed. Only that check gives
+  `InvalidPassword` (or `WalletNotFound` if `wallet.seed` is missing,
+  `Lifecycle` if it is damaged, `Io` if it cannot be read).
+- Any failure after that is `Lifecycle` with the lifecycle provider's own
+  message. The provider moves `wallet.seed` to `wallet.seed.bak` (or
+  `.bak.N`) before writing the new file, so the message says where the seed
+  encrypted with `old_pw` is, and `details` carries
+  `{"seed_present": bool, "backup_file": string or null}`. With
+  `seed_present: false`, renaming `backup_file` back to `wallet.seed`
+  restores the wallet with the old password.
 - Errors: `InvalidHandle`, `InvalidArgument`, `InvalidUtf8`,
-  `InvalidPassword`, `Lifecycle`, `Io`.
+  `InvalidPassword`, `WalletNotFound`, `Lifecycle`, `Io`.
 
 ### `grin_wallet_get_mnemonic(handle, password)`
 
 - Returns `{"mnemonic": "word1 word2 ..."}`.
+- `InvalidPassword` only when the seed file is present, well formed and
+  does not decrypt; a missing file is `WalletNotFound`, a damaged one
+  `Lifecycle`, an unreadable one `Io`.
 - Errors: `InvalidHandle`, `InvalidArgument`, `InvalidUtf8`,
-  `InvalidPassword`, `Lifecycle`.
+  `InvalidPassword`, `WalletNotFound`, `Lifecycle`, `Io`.
 
 ### `grin_wallet_update_network(handle, node_url, api_secret, socks_proxy)`
 
 - `node_url` required; `api_secret` and `socks_proxy` nullable (section 3
   rules). Keeps the wallet's request timeout. Does not reopen the database
   and does not contact the node.
+- The node client and the stored node settings (used for the proxy of
+  `grin_tx_send_http`) change together while the wallet lock is held, so
+  no call that holds the wallet lock sees one without the other.
 - Returns nothing.
 - Errors: `InvalidHandle`, `InvalidArgument`, `InvalidUtf8`, `Node`.
 
@@ -330,16 +357,32 @@ another name (`InvalidArgument`).
 
 - Scans the UTXO set from `start_height` (0 means from height 1) to the
   current tip and repairs the wallet's outputs. Transaction history is kept.
-  Runs on the calling thread until done.
-- Returns `{"scanned_height": u64, "tip_height": u64}`.
+  Runs on the calling thread until done or cancelled.
+- Steps, the same as libwallet's `owner::scan`: refresh every wallet output
+  from the node (this also stores the node height as the wallet's
+  `last_confirmed_height`; a refresh failure is only logged), read the tip,
+  then scan in batches of 10,001 heights, saving the last scanned block
+  after each batch (with the tip hash on the last one).
+- Returns `{"scanned_height": u64, "tip_height": u64}`; on success both are
+  the tip.
 - Errors: `InvalidHandle`, `Node`, `Cancelled`, `WalletBusy` (a scan is
   already running on this wallet), `Lifecycle`, `Io`.
-- Cancellation, current limitation: libwallet's scan has no hook between its
-  10,000-block batches, so a scan that has started cannot be stopped.
-  `grin_wallet_scan_cancel` sets a flag; if no scan is running, the next
-  `grin_wallet_scan` returns `Cancelled` without starting and clears the flag.
-  If a scan is running it finishes normally and the flag is cleared when it
-  returns. Closing a wallet also sets the flag.
+- Cancellation: before each batch the scan checks whether
+  `grin_wallet_scan_cancel` was called or the handle was closed. If so it
+  stops and returns `Cancelled` with
+  `{"scanned_height": u64, "tip_height": u64}`, where `scanned_height` is
+  the last height of the last batch that was saved (one below the
+  effective start height when none was). Every batch up to there is saved,
+  so a later scan can start from `scanned_height + 1`. A batch that has
+  started always finishes, so a cancel can wait for up to one batch (10,001
+  blocks and its node requests). A cancel that arrives after the last batch
+  has nothing to stop and the scan succeeds.
+- A cancel only reaches a scan that is running. Every scan starts with the
+  cancel request cleared, so a cancel from earlier never stops a later
+  scan. Closing the handle stops the running scan the same way, and a call
+  that still holds a closed wallet cannot start a new scan (`Cancelled`
+  without details). The database closes and the directory is released when
+  the stopped scan returns.
 
 ### `grin_wallet_scan_progress(handle)`
 
@@ -358,15 +401,28 @@ another name (`InvalidArgument`).
 ```
 
   The heights describe the current or most recent scan (all 0 before the
-  first). `scanned_height` is estimated from libwallet's percentage messages
-  and reaches `tip_height` when the scan finishes. `progress_pct` is 0 to 100.
+  first). They are reset when a scan starts: `start_height` to the
+  effective start, `tip_height` and `scanned_height` to 0 until the tip is
+  known, so a new scan never shows the previous one's 100%. While a batch
+  runs, `scanned_height` is estimated from libwallet's percentage messages;
+  after each batch it is at least that batch's last height. When the scan
+  ends it is exact: `tip_height` on success, the last saved height on
+  `Cancelled` or an error. `cancel_requested` is true from a cancel or close
+  until the scan returns, and false once no scan is running.
+  `progress_pct` is 0 to 100.
 - Errors: `InvalidHandle`.
 
 ### `grin_wallet_scan_cancel(handle)`
 
-- Takes no wallet lock. Returns nothing. See the limitation under
-  `grin_wallet_scan`.
+- Takes no wallet lock and returns at once. Asks the running scan to stop
+  before its next batch; the `grin_wallet_scan` call then returns
+  `Cancelled` (see there). With no scan running it does nothing and returns
+  success; it does not affect a scan started later.
+- Returns nothing.
 - Errors: `InvalidHandle`.
+- The doc comment of this function in `include/grin_ffi.h` still describes
+  the earlier behaviour (cancel before start); this section is the
+  contract until the header is regenerated.
 
 ## 9. Transactions and Slatepacks
 
@@ -390,7 +446,13 @@ another name (`InvalidArgument`).
 - After the wallet has recorded a transaction (outputs locked, slate
   received or finalized), a later failure adds `{"slate_id": string}` to the
   error's `details`, so the caller can still cancel or repost it. This
-  applies to any code, including `Node` when a broadcast fails.
+  applies to any code, including `Node` when a broadcast fails. Finalizing
+  (`grin_tx_finalize_slatepack`, `grin_tx_finalize_invoice`) acts on a
+  transaction this wallet recorded when it made the S1 or I1, so every
+  failure after the Slatepack is decoded and its state checked carries it;
+  `grin_tx_process_invoice` adds it to failures after
+  `process_invoice_tx` saved the transaction (locking the inputs and
+  later).
 - Arguments JSON: unknown keys are ignored. A missing required key or a
   wrong type is `Json`; a bad value is `InvalidArgument`. Optional keys may
   be absent or `null`.
@@ -398,7 +460,10 @@ another name (`InvalidArgument`).
   (the node could not be reached), `Lifecycle` and `Internal`.
 - The sidecar file (`tx_metadata.json`, docs/architecture.md 4.4) is
   written after each step that produces a Slatepack. Its writes are best
-  effort: a failure is logged and never fails the call.
+  effort: a failure is logged and never fails the call. Only a missing file
+  starts empty; a file that cannot be read, does not parse or has a newer
+  format version is left untouched and the write is skipped (and logged),
+  so stored Slatepacks and addresses are never replaced by one entry.
 
 ### 9.2 `GrinSlatepack` result
 
@@ -481,6 +546,12 @@ it with `grin_tx_repost`.
 | `total` | `amount + fee`, what leaves the wallet apart from change. |
 | `inputs_count` | Outputs the send would spend. |
 | `change_outputs` | 0 when the inputs add up exactly, otherwise 1. |
+
+- libwallet can price a change output into the fee and then find that the
+  change comes out at exactly 0 (no change output is made, but the fee
+  keeps the output's weight). `inputs_count` accounts for that: when the
+  fee alone fits both ways, a second estimate under the same wallet lock
+  tells them apart.
 
 - Errors: `InvalidArgument` (`amount` 0), `InsufficientFunds` with
   `{"required": u64, "available": u64}`, `Transaction` (with
@@ -611,8 +682,10 @@ it with `grin_tx_repost`.
   `InvalidArgument`. When the wallet has a proxy, every send goes through
   it, clearnet URLs included.
 - Payment proof: requested from the slatepack address when the target is
-  one. For an onion or URL target, `recipient_address` requests one (it
-  must match a slatepack target if both are given).
+  one. For an onion or URL target, `recipient_address` requests one. A
+  slatepack or onion target is itself a slatepack key, so a
+  `recipient_address` for another key is `InvalidArgument`, checked before
+  anything is built or locked (and before the proxy check).
 - Order: build the S1 (nothing locked yet), `check_version` and
   `receive_tx` on the other wallet with the wallet mutex released, lock the
   inputs, finalize, broadcast when `post`. A failed exchange leaves nothing
@@ -644,8 +717,8 @@ it with `grin_tx_repost`.
   `GrinFinalized` (9.3) with state `S3`.
 - Errors: `Slate` (not an S2), `NotFound` (this wallet has no open
   transaction for the slate: unknown, or already finalized), `Transaction`
-  (bad signature, payment proof mismatch, expired), `Node` with
-  `{"slate_id"}`.
+  (bad signature, payment proof mismatch, expired), `Node`. Every failure
+  after the S2 is decoded carries `{"slate_id"}`.
 
 ## 10. Invoices, repost, cancel and proofs
 
@@ -682,7 +755,9 @@ it with `grin_tx_repost`.
   Returns a `GrinSlatepack` with state `I2`, encrypted to the invoicer when
   the I1 named one.
 - Errors: `Slate` (not an I1), `InsufficientFunds`, `Transaction`
-  (already paid or cancelled, expired), `Json`, `InvalidArgument`.
+  (already paid or cancelled, expired), `Json`, `InvalidArgument`. A
+  failure after libwallet saved the payment (locking the inputs, armoring
+  the I2) carries `{"slate_id"}`.
 
 ### `grin_tx_finalize_invoice(handle, armored_i2, broadcast, fluff)`
 
@@ -695,10 +770,12 @@ it with `grin_tx_repost`.
 
 - Broadcasts the stored finalized transaction again (9.1 for the
   identifiers). The transaction is validated first.
+- A cancelled entry (`TxSentCancelled`, `TxReceivedCancelled`) is refused
+  with `Transaction`, even when a finalized copy is stored.
 - Returns `{"posted": true}`.
 - Errors: `InvalidArgument`, `NotFound` (no such transaction, nothing
-  stored, or the stored copy is not finalized yet), `Node` with
-  `{"slate_id"}`.
+  stored, or the stored copy is not finalized yet), `Transaction`
+  (cancelled), `Node` with `{"slate_id"}`.
 
 ### `grin_tx_cancel(handle, tx_id, slate_id)`
 

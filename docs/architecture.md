@@ -44,85 +44,51 @@ This document defines the clean-room architecture and implementation plan (**Pha
 ## 3. Repository & Workspace Layout (`/home/user/src/grin`)
 
 ```text
-/home/user/src/grin/
-├── pubspec.yaml                        # Root Dart workspace (publish_to: none; workspace: [...]; NO melos)
+/home/user/src/grin/                     (as built; D6 moved the Cargo workspace under packages/grin)
+├── pubspec.yaml                        # Root pub workspace (publish_to: none; workspace: [...]; no Melos)
+│                                       # hooks.user_defines.grin: build: cargo, test_utils: true for in-repo builds
+├── pubspec.lock
 ├── analysis_options.yaml               # Shared strict lint rules
-├── Cargo.toml                          # Root Rust workspace (members = ["crates/grin-ffi"])
-├── Cargo.lock                          # Committed & locked (--locked enforced in CI and hooks)
-├── rust-toolchain.toml                 # Pinned Rust toolchain (matching CI/Nix baseline)
-├── flake.nix                           # Reproducible Nix build for release artifacts
-├── flake.lock
+├── README.md                           # Layout, gates, the local overrides and how to drop them
+├── docs/
+│   ├── architecture.md                 # This file
+│   └── ffi-json.md                     # JSON contract between grin-ffi and package:grin
 ├── tool/
-│   ├── ci.dart                         # Pure-Dart workspace runner (cargo tree -d, analyze, format, test, nm check)
-│   └── regen_bindings.dart             # Runs cargo build -> cbindgen -> dart run ffigen
-├── crates/
-│   └── grin-ffi/                       # Rust FFI wrapper crate (`libgrin_ffi.so` / `.dylib` / `.a` / `.dll`)
-│       ├── Cargo.toml                  # name = "grin-ffi", crate-type = ["staticlib", "cdylib", "lib"]
-│       ├── cbindgen.toml               # C header generation config
-│       ├── build.rs                    # Emits target/include/grin_ffi.h via cbindgen
-│       ├── src/
-│       │   ├── lib.rs                  # Module exports (NO process-global chain_type init)
-│       │   ├── error.rs                # GrinErrorCode enum, GrinFfiResult #[repr(C)], ffi_guard! (catch_unwind)
-│       │   ├── handle.rs               # Session registry (u64 -> Arc<WalletSession>), OPEN_DIRS LMDB guard, Drop closes LMDB, set_local_chain_type
-│       │   ├── logging.rs              # Idempotent grin_init_logs
-│       │   ├── config.rs               # Wallet, Node, and SOCKS5 Proxy configuration
-│       │   ├── lifecycle.rs            # create, open, close, close_finalizer, delete, change_password, mnemonic
-│       │   ├── address.rs              # SlatepackAddress (grin1/tgrin1) <-> OnionV3Address (.onion)
-│       │   ├── balance.rs              # Summary info (nanogrin u64) & chain tip height
-│       │   ├── scan.rs                 # Cancellable chunked UTXO scanner + per-wallet atomic ScanProgressState
-│       │   ├── sidecar.rs              # Atomic temp-rename JSON store for armored_slatepack & fallback counterparty_address
-│       │   ├── slatepack.rs            # Armored Slatepack encode/decode (age X25519) & Slate V4 metadata extraction
-│       │   ├── transaction.rs          # init_send, send_http (HttpSlateSender), receive, finalize, issue/process/finalize_invoice, repost, cancel, fee
-│       │   ├── proof.rs                # Payment proof export & verification
-│       │   └── test_support.rs         # #[cfg(any(test, feature = "test-utils"))] In-process test_framework (LocalWalletClient + WalletProxy)
-│       └── tests/
-│           ├── header_test.rs          # Verifies cbindgen header compiles under C11 & C++11 (-Wall -Wextra -pedantic)
-│           └── ffi_e2e_test.rs         # Rust E2E & Mainnet+Testnet concurrency tests via test_support (impls::test_framework)
+│   ├── ci.dart                         # Every gate in one command (rust, android, bindings, dart, flutter, nix + nm gate)
+│   ├── regen_bindings.dart             # cargo build with GRIN_FFI_WRITE_HEADER=1 -> ffigen -> dart format; --check
+│   └── local-fork-env.sh               # git URL rewrite for the unpushed fork (D2)
 └── packages/
-    ├── grin/                           # Pure Dart package (`name: grin`, publish_to: none, targets pub.dev/packages/grin)
-    │   ├── pubspec.yaml                # Pure Dart (no flutter sdk); owns hook/build.dart & native_prebuilt_hook
-    │   ├── ffigen.yaml                 # Generates @ffi.Native bindings with assetId: 'package:grin/src/ffi/bindings.g.dart'
+    ├── grin/                           # Pure Dart package (name: grin, publish_to: none)
+    │   ├── pubspec.yaml                # no flutter sdk; native_prebuilt_hook (kit 85f7eb0) + native_toolchain_rust 1.0.6
+    │   ├── ffigen.yaml                 # @ffi.Native bindings, asset id package:grin/src/ffi/bindings.g.dart
+    │   ├── build-config.json           # Rust 1.94.0, toolchain pins, floors, targets (read by the hook and the flake)
+    │   ├── flake.nix, flake.lock       # Reference builds through native-build-kit; the fork is a flake input (D7)
+    │   ├── nix/build-apple.sh          # Apple wrapper for the kit's build-apple.sh
     │   ├── hook/
-    │   │   └── build.dart              # Single build hook using hooks.user_defines.grin (native_build, test_utils, prebuilt_*)
+    │   │   ├── build.dart              # runNativeBuildHook + cargo mode (test_utils -> --features test-utils)
+    │   │   └── prebuilt_hashes.json    # Pinned native release (none yet)
+    │   ├── rust/                       # The grin-ffi crate, a single-crate Cargo workspace
+    │   │   ├── Cargo.toml, Cargo.lock, rust-toolchain.toml, .cargo/config.toml
+    │   │   ├── build.rs, cbindgen.toml # Header generation
+    │   │   ├── include/grin_ffi.h      # The committed C header (the ABI contract)
+    │   │   ├── src/                    # lib, error, handle, logging, config, lifecycle, address, balance,
+    │   │   │                           # scan, sidecar, slatepack, transaction, proof, test_support
+    │   │   └── tests/                  # header_test, ffi_e2e_test, ffi_tx_test
     │   ├── lib/
-    │   │   ├── grin.dart               # Public barrel export
-    │   │   └── src/
-    │   │       ├── ffi/
-    │   │       │   ├── bindings.g.dart # ffigen @ffi.Native generated bindings
-    │   │       │   └── memory.dart     # Arena helpers, zeroing SecretArena, GrinFfiResult unwrapper
-    │   │       ├── errors/
-    │   │       │   └── grin_exception.dart # Sealed GrinException hierarchy mapped from GrinErrorCode
-    │   │       ├── models/
-    │   │       │   ├── grin_network.dart
-    │   │       │   ├── grin_wallet_config.dart
-    │   │       │   ├── grin_balance.dart
-    │   │       │   ├── grin_slatepack.dart
-    │   │       │   ├── grin_tx_log_entry.dart
-    │   │       │   ├── grin_fee_estimate.dart
-    │   │       │   ├── grin_payment_proof.dart
-    │   │       │   └── grin_wallet_event.dart
-    │   │       └── wallet/
-    │   │           └── grin_wallet_client.dart # High-level GrinWalletClient (this-free Isolate.run + NativeFinalizer + streams)
-    │   └── test/
-    │       ├── mnemonic_address_test.dart
-    │       ├── bounds_and_panic_test.dart
-    │       ├── wallet_lifecycle_test.dart
-    │       └── slatepack_e2e_test.dart # Funded S1->S2->S3, I1->I2->I3, & Mainnet+Testnet concurrency E2E test via test_framework
-    └── grin_flutter/                   # Companion Flutter integration package (`name: grin_flutter`, publish_to: none)
-        ├── pubspec.yaml                # resolution: workspace; depends on flutter, grin, path_provider
-        ├── lib/
-        │   ├── grin_flutter.dart       # Re-exports `package:grin/grin.dart` + GrinFlutter helpers
-        │   └── src/
-        │       ├── default_paths.dart  # Platform wallet directory resolution via path_provider
-        │       └── lifecycle_observer.dart # AppLifecycleListener to cancel active scans on app detach/background
-        ├── test/
-        │   └── grin_flutter_test.dart
-        └── example/
-            ├── pubspec.yaml            # resolution: workspace; publish_to: none
-            └── lib/main.dart           # Minimal Flutter smoke-test app
+    │   │   ├── grin.dart, testing.dart
+    │   │   └── src/{ffi,errors,internal,models,wallet,testing}/
+    │   ├── test/                       # mnemonic_address, bounds_and_panic, wallet_lifecycle, test_chain,
+    │   │                               # slatepack_e2e, models, tx_models, memory, arguments, kit_pin
+    │   └── README.md
+    └── grin_flutter/                   # Flutter glue (name: grin_flutter, publish_to: none)
+        ├── pubspec.yaml
+        ├── lib/grin_flutter.dart, lib/src/{default_paths,lifecycle_observer}.dart
+        ├── test/grin_flutter_test.dart
+        ├── README.md
+        └── example/                    # flutter create app + integration_test/app_test.dart
 ```
 
-The `cypherstack/grin-wallet` fork (`v5.5.1` + submodule `grin` `v5.5.2`) is not part of this tree. It lives in its own repository at `/home/user/src/grin-wallet` (branch `optional-tor-rustls`) and is pulled in by `crates/grin-ffi/Cargo.toml` as a `rev`-pinned git dependency (see 4.1).
+The `cypherstack/grin-wallet` fork (`v5.5.1` + submodule `grin` `v5.5.2`) is not part of this tree. It lives in its own repository at `/home/user/src/grin-wallet` (branch `optional-tor-rustls`, commit `64d361f2`) and is pulled in by `packages/grin/rust/Cargo.toml` as a `rev`-pinned git dependency (see 4.1) and by `packages/grin/flake.nix` as a flake input (D7).
 
 ### 3.1 Why `packages/grin` Owns `hook/build.dart` Instead of `packages/grin_flutter`
 
@@ -261,7 +227,7 @@ pub struct TxSidecarEntry {
    - `grin_wallet_delete` first closes `handle` if non-zero (rejecting a handle whose session `data_dir` differs from `wallet_dir`), then acquires a lease on the directory itself for the duration of `remove_dir_all`. If the directory is still held (a draining orphaned operation), it returns `WalletBusy` and deletes nothing. Holding the lease during deletion means a concurrent `open`/`create` also gets `WalletBusy`, so there is no check-then-delete race.
    - `OPEN_DIRS` and `SESSION_REGISTRY` are never held at the same time, and both are locked with `lock().unwrap_or_else(PoisonError::into_inner)` because `Drop` may run during unwinding.
 4. **Canonicalization**:
-   - Keys are `std::fs::canonicalize`d so `dir`, `dir/`, `dir/./`, and symlinked paths map to one entry. On Windows this yields `\\?\` verbatim paths, which is fine because the key is only compared, never displayed.
+   - Keys are `std::fs::canonicalize`d so `dir`, `dir/`, `dir/./`, and symlinked paths map to one entry. On Windows this yields `\\?\` verbatim paths; the key is used for comparison, and it is also what the `WalletBusy` error's `wallet_dir` detail reports, so a Windows caller may see the verbatim form there.
    - `canonicalize` fails on a path that does not exist yet. `grin_wallet_create` therefore calls `std::fs::create_dir_all(<wallet_dir>/wallet_data)` before canonicalizing and acquiring the lease (`DefaultLCProvider` would create it anyway). `grin_wallet_open` maps a missing directory to its existing not-found error, and `grin_wallet_delete` treats a missing directory as already deleted.
 5. **`GrinErrorCode::WalletBusy`**:
    - A new `GrinErrorCode` variant with a fresh discriminant appended after the existing codes (discriminants are append-only because Dart maps them by value). There is no separate `WalletAlreadyOpen` code: `WalletBusy` covers both "already open and registered by another client" and "closed but still draining", since in both cases the directory is held by a live `WalletSession` and the caller's only safe action is to wait or reuse the existing client. The error JSON carries `{"wallet_dir": "<canonical path>"}`.
@@ -290,7 +256,7 @@ Every FFI function (except the `void` destructors `grin_ffi_result_free`, `grin_
 | 15 | | `grin_wallet_update_network(handle: u64, node_url: *const c_char, api_secret: *const c_char, socks_proxy: *const c_char) -> GrinFfiResult` | Updates the session's `HTTPNodeClient` (including SOCKS5 proxy) without reopening LMDB. |
 | 16 | **Address & Chain** | `grin_wallet_get_address(handle: u64, derivation_index: u32) -> GrinFfiResult` | Returns `{"slatepack_address": "grin1...", "onion_v3_url": "http://...onion", "index": u32}`. |
 | 17 | | `grin_wallet_get_chain_height(handle: u64) -> GrinFfiResult` | Queries node tip height via configured proxy, returns `{"height": u64}`. |
-| 18 | **Sync, Scan & Balances** | `grin_wallet_get_balance(handle: u64, refresh_from_node: bool, min_confirms: u64) -> GrinFfiResult` | Calls `owner::retrieve_summary_info`, returns exact `u64` nanogrin fields (`total`, `spendable`, `awaiting_confirmation`, `awaiting_finalization`, `immature`, `locked`, `reverted`, `last_confirmed_height`). |
+| 18 | **Sync, Scan & Balances** | `grin_wallet_get_balance(handle: u64, refresh_from_node: bool, min_confirms: u64) -> GrinFfiResult` | Calls `owner::retrieve_summary_info`, returns the `WalletInfo` fields as exact `u64` nanogrin under libwallet's own names (`total`, `amount_currently_spendable`, `amount_awaiting_confirmation`, `amount_awaiting_finalization`, `amount_immature`, `amount_locked`, `amount_reverted`, `last_confirmed_height`, `minimum_confirmations`) plus `refreshed_from_node` (docs/ffi-json.md section 8). |
 | 19 | | `grin_wallet_scan(handle: u64, start_height: u64, delete_unconfirmed: bool) -> GrinFfiResult` | Runs chunked UTXO scan (`internal::scan::scan`) updating `ScanProgressState` atomics and checking `cancel_requested` between batches. Non-destructive to `TxLogEntry` history! |
 | 20 | | `grin_wallet_scan_progress(handle: u64) -> GrinFfiResult` | **Lock-free**: reads `ScanProgressState` atomics (`is_scanning`, `scanned_height`, `tip_height`, `progress_pct`). |
 | 21 | | `grin_wallet_scan_cancel(handle: u64) -> GrinFfiResult` | **Lock-free**: sets `scan_state.cancel_requested = true`. |
@@ -377,7 +343,7 @@ A wallet with 0 balance cannot initiate an `S1` send (`init_send_tx` fails with 
 
 ### 7.1 Single Test Harness (`impls::test_framework` Behind `test-utils`)
 - `grin_wallet_impls` already exports `pub mod test_framework;` (`LocalWalletClient`, `WalletProxy`, `award_blocks_to_wallet`) as part of our normal dependency on `grin_wallet_impls`.
-- In `crates/grin-ffi/src/test_support.rs` (compiled under `#[cfg(any(test, feature = "test-utils"))]`), we manage an in-process `WalletProxy<DefaultLCProvider<LocalWalletClient, ExtKeychain>, LocalWalletClient, ExtKeychain>` backed by a real temporary `grin_chain::Chain` (`ChainTypes::AutomatedTesting`, where `COINBASE_MATURITY = 3` blocks).
+- In `packages/grin/rust/src/test_support.rs` (compiled under `#[cfg(feature = "test-utils")]` only; the crate's own unit tests do not need it), we manage an in-process `WalletProxy<DefaultLCProvider<LocalWalletClient, ExtKeychain>, LocalWalletClient, ExtKeychain>` backed by a real temporary `grin_chain::Chain` (`ChainTypes::AutomatedTesting`, where `COINBASE_MATURITY = 3` blocks).
 - No `MockNodeClient` and no `mock://local` magic URL exist in production code. Instead, test wallets connected to the in-process `WalletProxy` are created exclusively via two `#[cfg(feature = "test-utils")]` FFI exports:
   1. `grin_test_create_wallet(chain_dir: *const c_char, wallet_dir: *const c_char, client_id: *const c_char, network: u8, mnemonic: *const c_char, password: *const c_char) -> GrinFfiResult`: Initializes/attaches to the shared `WalletProxy` in `chain_dir`, registers a `LocalWalletClient` for `client_id`, creates/opens the wallet on the requested `network` (acquiring the same `OPEN_DIRS` lease as `grin_wallet_open`, 4.5), and returns `{"handle": u64}`.
   2. `grin_test_mine_blocks(handle: u64, count: u64) -> GrinFfiResult`: Calls `test_framework::award_blocks_to_wallet` to mine `count` real blocks (with Cuckatoo10 PoW and coinbase rewards) directly to `handle`'s wallet on the shared in-process `Chain`.
@@ -1325,3 +1291,15 @@ Each entry records a choice made while building, the evidence behind it, and how
 - The kit's hook resolves the Nix flake from the package root: `flakeReference(packageRoot)` in `dart/native_prebuilt_hook/lib/src/nix_build.dart` L114-121 is what `nix build <flake>#<target>` is run against (L59-64), and `build-config.json`, `hook/prebuilt_hashes.json` and `nix/build-apple.sh` are read relative to it (`hook.dart` L63-65). A flake cannot reference files outside its own directory, and a `path:` input pointing at the repository root would copy every untracked file (including `target/`) into the store. So everything the Nix build reads has to sit under `packages/grin`.
 - Layout: `packages/grin/rust/` is the `grin-ffi` crate and its own single-crate Cargo workspace (`Cargo.toml` with `[package]` and an empty `[workspace]`, `Cargo.lock`, `rust-toolchain.toml`, `.cargo/config.toml`, `build.rs`, `cbindgen.toml`, `include/grin_ffi.h`, `src/`, `tests/`), and `packages/grin/` holds `flake.nix`, `flake.lock`, `nix/build-apple.sh`, `build-config.json` and `hook/`, mirroring `wt/tor` (`rust/` inside the plugin). The crate sits directly in `rust/` rather than in a `rust/grin-ffi/` member because `native_toolchain_rust`'s `RustBuilder` reads `rust-toolchain.toml` from the crate directory it is pointed at. Section 3's tree, which showed `crates/grin-ffi` and a root `Cargo.toml`, is superseded by this; decision 1 (one monorepo with a Cargo workspace and a pub workspace) is unchanged.
 - The pub workspace root (`/home/user/src/grin/pubspec.yaml`) stays at the repository root with `tool/` and `docs/`.
+
+### D7. The grin-wallet fork is a flake input, handed to importCargoLock through a fetchgit overlay
+
+- `importCargoLock` vendors a git dependency with `fetchgit`, a fixed-output derivation that runs inside the sandbox without the user's ssh credentials, so it cannot reach a private ssh remote. The fork is therefore an input of `packages/grin/flake.nix` (`grin-wallet`, `flake = false`, `git+ssh://...?ref=optional-tor-rustls&rev=<rev>&submodules=1`), which Nix fetches at evaluation time with the user's ssh setup and pins by rev and narHash in `flake.lock`. An overlay on the kit's `pkgs` replaces `fetchgit` for that one URL with the input's tree (keeping `fetchgit`'s attributes, since it is an overridable function); `cargoLock.outputHashes` carries the input's narHash under `grin_wallet_impls-5.5.1`, which `importCargoLock` keys by commit.
+- Evaluation fails when the input's rev differs from the rev `rust/Cargo.lock` records for `grin_wallet_impls`, so the vendored tree always matches the lock, and when `build-config.json` and `rust-toolchain.toml` disagree on the Rust version.
+- From a checkout the flake must be referenced as `git+file://<repo>?dir=packages/grin` (a `path:` reference would copy `rust/target` into the store), and until the kit and fork are pushed both inputs are overridden with local `git+file` references (README, `tool/ci.dart --local-inputs`). The kit's hook uses `path:` for a package without a `.git` directory, which is why in-repo builds select `build: cargo` in the workspace pubspec and leave Nix to `tool/ci.dart`.
+
+### D8. Scan cancellation runs the batch loop in grin-ffi
+
+- The first implementation called `owner::scan`, which has no hook between its 10,000-block batches, so a cancel could only stop the next scan from starting. The independent review flagged that `close`, `delete` and the finalizer path then waited for a whole scan (review finding F5).
+- `grin_wallet_libwallet::scan`, `refresh_outputs`, `WalletBackend::batch` and `save_last_scanned_block` are all public in the fork, so `scan.rs` now runs the same steps as `owner::scan` itself: refresh outputs, read the tip, then scan in batches of 10,001 heights, saving the last scanned block after each batch and checking one atomic (running, cancel requested, closed) before the next. A cancel or a close makes the call return `Cancelled` with `{"scanned_height", "tip_height"}`; a batch that has started runs to its end, so a cancel can wait for one batch. A cancel with no scan running is a no-op, and every scan starts with the flag cleared, so the lifecycle observer's cancel on every pause cannot fail the next scan.
+- Dart: `GrinWalletClient.close()` cancels directly, drains the queue, and a scan that was still queued when `close()` ran throws `StateError` instead of starting. Section 4.6 rows 19 to 21 and 7.3 item 4 now describe what is built.
