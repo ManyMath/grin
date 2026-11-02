@@ -1274,10 +1274,13 @@ dependencies = [
  "grin_wallet_libwallet",
  "grin_wallet_util",
  "log",
+ "rand 0.6.5",
  "serde",
  "serde_json",
  "tempfile",
+ "url",
  "uuid 0.8.2",
+ "zeroize",
 ]
 
 [[package]]
