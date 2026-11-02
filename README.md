@@ -9,7 +9,7 @@ Three layers, one repository:
 
 | Layer | Where | What |
 |---|---|---|
-| `grin-ffi` (Rust) | `packages/grin/rust` | a C ABI over a thin fork of `grin-wallet` 5.5.1: 35 functions, every one returns `GrinFfiResult {code, data, error}` and runs inside a panic guard; wallets are u64 handles |
+| `grin-ffi` (Rust) | `packages/grin/rust` | a C ABI over a thin fork of `grin-wallet` 5.5.1: 35 functions, the 32 fallible ones return `GrinFfiResult {code, data, error}` and run inside a panic guard (the three free and finalizer functions return void and catch panics); wallets are u64 handles |
 | `grin` (pure Dart) | `packages/grin` | ffigen bindings, typed models (`BigInt` nanogrin), a sealed `GrinException` hierarchy and `GrinWalletClient`; owns the single native-assets build hook |
 | `grin_flutter` (Flutter) | `packages/grin_flutter` | a default wallet directory, an app lifecycle observer and re-exports; the example app lives in `example/` |
 
@@ -58,7 +58,7 @@ The Rust toolchain is pinned by `packages/grin/rust/rust-toolchain.toml`
 `packages/grin/rust/Cargo.toml` depends on a fork of grin-wallet at
 `ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git`, branch
 `optional-tor-rustls`, pinned to commit
-`64d361f2e49fa6d544cf0236417da48a99444b2f` (also on
+`b5d756bdae51c71b1b2ec06dbf0695b37d50a850` (also on
 `ssh://git@git.manymath.com:2222/sneurlax/grin-wallet.git`). Cargo fetches
 it with the git command line, so a machine that has not fetched it yet needs
 ssh read access to that host. See "Fetching the fork" in

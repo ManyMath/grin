@@ -11,6 +11,7 @@
 //! Sidecar writes are best effort (docs/architecture.md 4.4): a failure is
 //! logged and never fails the call.
 
+use std::collections::HashMap;
 use std::os::raw::c_char;
 
 use grin_core::consensus::{INPUT_WEIGHT, KERNEL_WEIGHT, OUTPUT_WEIGHT};
@@ -105,7 +106,7 @@ fn with_backend<T>(
 }
 
 fn parse_args<T: DeserializeOwned>(ptr: *const c_char, name: &str) -> Result<T, GrinError> {
-    Ok(serde_json::from_str(read_str(ptr, name)?)?)
+    Ok(serde_json::from_str(read_str(&ptr, name)?)?)
 }
 
 /// Adds `{"slate_id"}` to an error raised after the wallet recorded the
@@ -183,7 +184,7 @@ pub(crate) fn tx_selector(
                 .map_err(|_| GrinError::invalid_argument("tx_id is larger than a u32"))?,
         )
     };
-    let slate = read_opt_nonempty(slate_id, "slate_id")?
+    let slate = read_opt_nonempty(&slate_id, "slate_id")?
         .map(|s| {
             Uuid::parse_str(s)
                 .map_err(|_| GrinError::invalid_argument("slate_id is not a valid UUID"))
@@ -448,6 +449,7 @@ struct TxOut {
     creation_ts: String,
     confirmation_ts: Option<String>,
     confirmed: bool,
+    confirmed_height: Option<u64>,
     num_inputs: usize,
     num_outputs: usize,
     amount_credited: u64,
@@ -492,7 +494,40 @@ fn proof_info(p: &StoredProofInfo) -> Result<ProofInfoOut, GrinError> {
     })
 }
 
-fn tx_out(session: &WalletSession, sidecar: &Sidecar, t: TxLogEntry) -> Result<TxOut, GrinError> {
+/// The height each transaction confirmed at, from the wallet's own outputs:
+/// libwallet records a height on every output of ours once it is seen on
+/// chain, and `tx_log_entry` ties the output to its transaction. A send with
+/// no change output leaves no output of ours behind and gets no height.
+fn confirmed_heights(session: &WalletSession) -> Result<HashMap<u32, u64>, GrinError> {
+    let mask = session.mask();
+    let (_, outputs) = owner::retrieve_outputs(
+        session.wallet.clone(),
+        mask.as_ref(),
+        &None,
+        true,
+        false,
+        None,
+    )?;
+    let mut heights = HashMap::new();
+    for m in outputs {
+        let o = m.output;
+        if o.height == 0 {
+            continue;
+        }
+        if let Some(id) = o.tx_log_entry {
+            let h = heights.entry(id).or_insert(0);
+            *h = (*h).max(o.height);
+        }
+    }
+    Ok(heights)
+}
+
+fn tx_out(
+    session: &WalletSession,
+    sidecar: &Sidecar,
+    heights: &HashMap<u32, u64>,
+    t: TxLogEntry,
+) -> Result<TxOut, GrinError> {
     let side = t.tx_slate_id.as_ref().and_then(|id| sidecar.get(id));
     let payment_proof = t.payment_proof.as_ref().map(proof_info).transpose()?;
     let outgoing = matches!(
@@ -522,6 +557,11 @@ fn tx_out(session: &WalletSession, sidecar: &Sidecar, t: TxLogEntry) -> Result<T
         creation_ts: t.creation_ts.to_rfc3339(),
         confirmation_ts: t.confirmation_ts.map(|ts| ts.to_rfc3339()),
         confirmed: t.confirmed,
+        confirmed_height: if t.confirmed {
+            heights.get(&t.id).copied()
+        } else {
+            None
+        },
         num_inputs: t.num_inputs,
         num_outputs: t.num_outputs,
         amount_credited: t.amount_credited,
@@ -554,9 +594,10 @@ pub extern "C" fn grin_txs_get(handle: u64, refresh_from_node: bool) -> GrinFfiR
             None,
         )?;
         let sidecar = Sidecar::load(&session.data_dir);
+        let heights = confirmed_heights(&session)?;
         let txs = txs
             .into_iter()
-            .map(|t| tx_out(&session, &sidecar, t))
+            .map(|t| tx_out(&session, &sidecar, &heights, t))
             .collect::<Result<Vec<_>, _>>()?;
         to_json(&TxsOut {
             refreshed_from_node: refreshed,
@@ -800,9 +841,9 @@ pub unsafe extern "C" fn grin_tx_receive_slatepack(
 ) -> GrinFfiResult {
     ffi_guard! {
         let session = get_session(handle)?;
-        let armored = read_str(armored_s1, "armored_s1")?;
+        let armored = read_str(&armored_s1, "armored_s1")?;
         // Slate v4 has no message field; read only to check the argument.
-        let _ = read_opt_str(message, "message")?;
+        let _ = read_opt_str(&message, "message")?;
         let decoded = decode_with_wallet(&session, armored, ADDRESS_INDEX)?;
         let s1 = &decoded.slate;
         require_state(s1, SlateState::Standard1)?;
@@ -837,7 +878,7 @@ pub unsafe extern "C" fn grin_tx_finalize_slatepack(
 ) -> GrinFfiResult {
     ffi_guard! {
         let session = get_session(handle)?;
-        let armored = read_str(armored_s2, "armored_s2")?;
+        let armored = read_str(&armored_s2, "armored_s2")?;
         let decoded = decode_with_wallet(&session, armored, ADDRESS_INDEX)?;
         require_state(&decoded.slate, SlateState::Standard2)?;
         // This wallet recorded the transaction when it made the S1, so
@@ -940,7 +981,7 @@ pub unsafe extern "C" fn grin_tx_process_invoice(
 ) -> GrinFfiResult {
     ffi_guard! {
         let session = get_session(handle)?;
-        let armored = read_str(armored_i1, "armored_i1")?;
+        let armored = read_str(&armored_i1, "armored_i1")?;
         let args: PayInvoiceArgs = parse_args(args_json, "args_json")?;
         args.check()?;
         let decoded = decode_with_wallet(&session, armored, ADDRESS_INDEX)?;
@@ -1001,7 +1042,7 @@ pub unsafe extern "C" fn grin_tx_finalize_invoice(
 ) -> GrinFfiResult {
     ffi_guard! {
         let session = get_session(handle)?;
-        let armored = read_str(armored_i2, "armored_i2")?;
+        let armored = read_str(&armored_i2, "armored_i2")?;
         let decoded = decode_with_wallet(&session, armored, ADDRESS_INDEX)?;
         require_state(&decoded.slate, SlateState::Invoice2)?;
         // This wallet recorded the invoice when it issued the I1, so every

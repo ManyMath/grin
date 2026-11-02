@@ -434,15 +434,17 @@ pub unsafe extern "C" fn grin_string_free(ptr: *mut c_char) {
 }
 
 /// Reads a required string argument. The C caller guarantees `ptr` is NULL or
-/// a valid NUL-terminated string that stays alive for the call.
-pub(crate) fn read_str<'a>(ptr: *const c_char, name: &str) -> Result<&'a str, GrinError> {
+/// a valid NUL-terminated string that stays alive for the call. The result
+/// borrows the pointer variable, so it cannot outlive the FFI call that
+/// received it.
+pub(crate) fn read_str<'a>(ptr: &'a *const c_char, name: &str) -> Result<&'a str, GrinError> {
     read_opt_str(ptr, name)?
         .ok_or_else(|| GrinError::invalid_argument(format!("{name} must not be NULL")))
 }
 
 /// Reads an optional string argument; NULL becomes `None`.
 pub(crate) fn read_opt_str<'a>(
-    ptr: *const c_char,
+    ptr: &'a *const c_char,
     name: &str,
 ) -> Result<Option<&'a str>, GrinError> {
     if ptr.is_null() {
@@ -450,7 +452,7 @@ pub(crate) fn read_opt_str<'a>(
     }
     // SAFETY: non-NULL pointers must be valid NUL-terminated strings, which is
     // the documented contract of every entry point taking `const char *`.
-    let c = unsafe { CStr::from_ptr(ptr) };
+    let c = unsafe { CStr::from_ptr(*ptr) };
     c.to_str().map(Some).map_err(|_| {
         GrinError::new(
             GrinErrorCode::InvalidUtf8,
@@ -461,7 +463,7 @@ pub(crate) fn read_opt_str<'a>(
 
 /// Reads an optional string argument and treats an empty string like NULL.
 pub(crate) fn read_opt_nonempty<'a>(
-    ptr: *const c_char,
+    ptr: &'a *const c_char,
     name: &str,
 ) -> Result<Option<&'a str>, GrinError> {
     Ok(read_opt_str(ptr, name)?
@@ -647,18 +649,18 @@ mod tests {
     #[test]
     fn read_helpers() {
         assert_eq!(
-            read_str(std::ptr::null(), "x").unwrap_err().code,
+            read_str(&std::ptr::null(), "x").unwrap_err().code,
             GrinErrorCode::InvalidArgument
         );
-        assert!(read_opt_str(std::ptr::null(), "x").unwrap().is_none());
+        assert!(read_opt_str(&std::ptr::null(), "x").unwrap().is_none());
         let bad = CString::new(vec![0xffu8, 0xfe]).unwrap();
         assert_eq!(
-            read_str(bad.as_ptr(), "x").unwrap_err().code,
+            read_str(&bad.as_ptr(), "x").unwrap_err().code,
             GrinErrorCode::InvalidUtf8
         );
         let good = CString::new("hi").unwrap();
-        assert_eq!(read_str(good.as_ptr(), "x").unwrap(), "hi");
+        assert_eq!(read_str(&good.as_ptr(), "x").unwrap(), "hi");
         let empty = CString::new("  ").unwrap();
-        assert!(read_opt_nonempty(empty.as_ptr(), "x").unwrap().is_none());
+        assert!(read_opt_nonempty(&empty.as_ptr(), "x").unwrap().is_none());
     }
 }

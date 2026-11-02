@@ -174,20 +174,29 @@ class GrinWalletClient implements Finalizable {
     GrinNetwork network,
   ) {
     final networkValue = network.value;
-    return Isolate.run(() {
-      return usingSecretArena((arena) {
+    return Isolate.run(() => _validateAddress(address, networkValue));
+  }
+
+  /// [validateAddress] on the calling isolate.
+  ///
+  /// The native check is stateless and takes microseconds, so it can back a
+  /// synchronous validator such as Stack Wallet's
+  /// `CryptoCurrency.validateAddress`. Same results and exceptions as
+  /// [validateAddress].
+  static GrinAddressValidation validateAddressSync(
+    String address,
+    GrinNetwork network,
+  ) => _validateAddress(address, network.value);
+
+  static GrinAddressValidation _validateAddress(String address, int network) =>
+      usingSecretArena((arena) {
         final json = decodeJsonObject(
           unwrapFfiResult(
-            bindings.grin_address_validate(
-              toCString(address, arena),
-              networkValue,
-            ),
+            bindings.grin_address_validate(toCString(address, arena), network),
           ),
         );
         return GrinAddressValidation.fromJson(json);
       });
-    });
-  }
 
   /// Asks a node for its version and chain tip without a wallet.
   ///
@@ -421,9 +430,10 @@ class GrinWalletClient implements Finalizable {
   /// Scans the chain from [startHeight] (0 means from the first block) and
   /// repairs the wallet's outputs. Transaction history is kept.
   ///
-  /// It can take long. Poll [scanProgress] meanwhile. A scan that has
-  /// started cannot be stopped; see [cancelScan]. Emits [GrinScanStarted]
-  /// and [GrinScanFinished]. Throws [ArgumentError] for a negative
+  /// It can take long. Poll [scanProgress] meanwhile. [cancelScan] stops it
+  /// at the end of the batch being scanned, and this call then throws
+  /// [GrinCancelledException]. Emits [GrinScanStarted] and
+  /// [GrinScanFinished]. Throws [ArgumentError] for a negative
   /// [startHeight].
   Future<GrinScanResult> scan({
     int startHeight = 0,

@@ -800,6 +800,23 @@ fn password_errors_are_precise() {
         e.1
     );
     assert_eq!(code_of(change(h, PASSWORD, "x")), LIFECYCLE);
+    // Shape-valid but corrupt: three strings that are not hex, and valid hex
+    // with a nonce too short for the provider, which would otherwise index
+    // past it and panic.
+    for bad in [
+        r#"{"encrypted_seed":"zz","salt":"zz","nonce":"zz"}"#,
+        r#"{"encrypted_seed":"00112233445566778899aabbccddeeff0011223344556677","salt":"0011223344556677","nonce":"00"}"#,
+    ] {
+        std::fs::write(&seed, bad).unwrap();
+        let e = mnemonic(h, PASSWORD).unwrap_err();
+        assert_eq!(e.0, LIFECYCLE, "{}", e.1);
+        assert!(
+            e.1["message"].as_str().unwrap().contains("damaged"),
+            "{}",
+            e.1
+        );
+        assert_eq!(code_of(change(h, PASSWORD, "x")), LIFECYCLE);
+    }
     std::fs::remove_file(&seed).unwrap();
     assert_eq!(code_of(mnemonic(h, PASSWORD)), WALLET_NOT_FOUND);
     assert_eq!(code_of(change(h, PASSWORD, "x")), WALLET_NOT_FOUND);
@@ -846,6 +863,12 @@ fn password_errors_are_precise() {
         INVALID_PASSWORD
     );
     std::fs::write(&seed, b"garbage").unwrap();
+    assert_eq!(code_of(open(&dir, AUTOMATED)), LIFECYCLE);
+    std::fs::write(
+        &seed,
+        r#"{"encrypted_seed":"00112233445566778899aabbccddeeff0011223344556677","salt":"0011223344556677","nonce":"00"}"#,
+    )
+    .unwrap();
     assert_eq!(code_of(open(&dir, AUTOMATED)), LIFECYCLE);
     std::fs::write(&seed, &original).unwrap();
     close(open(&dir, AUTOMATED).unwrap());

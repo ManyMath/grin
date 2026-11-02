@@ -60,7 +60,7 @@ pub unsafe extern "C" fn grin_payment_proof_verify(
 ) -> GrinFfiResult {
     ffi_guard! {
         let session = get_session(handle)?;
-        let mut value: Value = serde_json::from_str(read_str(proof_json, "proof_json")?)?;
+        let mut value: Value = serde_json::from_str(read_str(&proof_json, "proof_json")?)?;
         // Accept the export wrapper `{"proof": {...}}` as well as the bare
         // proof object.
         if let Some(inner) = value.get_mut("proof").filter(|p| p.is_object()) {

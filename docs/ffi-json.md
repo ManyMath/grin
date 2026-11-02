@@ -429,9 +429,6 @@ not be a symlink to a directory with another name (`InvalidArgument`).
   success; it does not affect a scan started later.
 - Returns nothing.
 - Errors: `InvalidHandle`.
-- The doc comment of this function in `include/grin_ffi.h` still describes
-  the earlier behaviour (cancel before start); this section is the
-  contract until the header is regenerated.
 
 ## 9. Transactions and Slatepacks
 
@@ -583,6 +580,7 @@ it with `grin_tx_repost`.
 | `creation_ts` | string | RFC 3339 UTC timestamp. |
 | `confirmation_ts` | string or null | RFC 3339, when this wallet saw it confirmed. |
 | `confirmed` | bool | |
+| `confirmed_height` | u64 or null | The height the transaction confirmed at, from this wallet's own outputs in it (libwallet records a height on each output once it is on chain). Null while unconfirmed, and for a confirmed send that left this wallet no output (a send without change); use `kernel_lookup_min_height` then. |
 | `num_inputs`, `num_outputs` | integer | This wallet's inputs and outputs in the transaction. |
 | `amount_credited`, `amount_debited` | u64 | What came in (including change) and went out. |
 | `fee` | u64 or null | |

@@ -30,6 +30,7 @@ Map<String, Object?> _entryJson() => <String, Object?>{
   'creation_ts': '2026-03-01T12:30:45.123456789Z',
   'confirmation_ts': '2026-03-01T12:45:00Z',
   'confirmed': true,
+  'confirmed_height': 6,
   'num_inputs': 1,
   'num_outputs': 1,
   'amount_credited': 59976500000,
@@ -197,6 +198,7 @@ void main() {
       expect(entry.fee, BigInt.from(23500000));
       expect(entry.ttlCutoffHeight, isNull);
       expect(entry.kernelExcess, _excess);
+      expect(entry.confirmedHeight, 6);
       expect(entry.kernelLookupMinHeight, 4);
       expect(entry.hasStoredTx, isTrue);
       expect(entry.paymentProof?.receiverAddress, _bob);
@@ -219,6 +221,7 @@ void main() {
         ..['fee'] = null
         ..['kernel_excess'] = null
         ..['kernel_lookup_min_height'] = null
+        ..['confirmed_height'] = null
         ..['payment_proof'] = null
         ..['counterparty_address'] = null
         ..['armored_slatepack'] = null

@@ -48,7 +48,6 @@ const READ_SEED_FAILED: &str = "Error opening wallet seed file";
 /// `EncryptedWalletSeed`). Only used to tell a damaged file from a wrong
 /// password.
 #[derive(serde::Deserialize)]
-#[allow(dead_code)]
 struct SeedFileShape {
     encrypted_seed: String,
     salt: String,
@@ -102,8 +101,11 @@ pub(crate) fn open_backend(
     let mask = {
         let lc = wallet.lc_provider()?;
         lc.set_top_level_directory(top)?;
-        if let OpenMode::Create(mnemonic) = mode {
-            lc.create_wallet(None, mnemonic, 32, password.clone(), false)?;
+        match mode {
+            OpenMode::Create(mnemonic) => {
+                lc.create_wallet(None, mnemonic, 32, password.clone(), false)?
+            }
+            OpenMode::Open => check_seed_file(data_dir)?,
         }
         lc.open_wallet(None, password, true, false)
             .map_err(|e| seed_error(e, OPEN_SEED_FAILED, data_dir))?
@@ -156,13 +158,43 @@ fn seed_open_error(data_dir: &Path) -> GrinError {
             GrinErrorCode::Io,
             format!("could not read {SEED_FILE}: {e}"),
         ),
-        Ok(bytes) => match serde_json::from_slice::<SeedFileShape>(&bytes) {
-            Ok(_) => GrinError::new(GrinErrorCode::InvalidPassword, "wrong password"),
-            Err(_) => GrinError::new(
-                GrinErrorCode::Lifecycle,
-                format!("{SEED_FILE} is damaged: it is not a valid seed file"),
-            ),
-        },
+        Ok(bytes) if seed_shape_ok(&bytes) => {
+            GrinError::new(GrinErrorCode::InvalidPassword, "wrong password")
+        }
+        Ok(_) => damaged_seed(),
+    }
+}
+
+fn damaged_seed() -> GrinError {
+    GrinError::new(
+        GrinErrorCode::Lifecycle,
+        format!("{SEED_FILE} is damaged: it is not a valid seed file"),
+    )
+}
+
+/// Whether `bytes` are a seed file libwallet can decrypt: JSON with three hex
+/// strings, a 12-byte nonce, an 8-byte salt and a ciphertext longer than its
+/// 16-byte tag (`EncryptedWalletSeed` in the provider). libwallet's decrypt
+/// indexes the nonce without checking its length, so a file that parses but
+/// holds the wrong sizes must be caught before it is handed to the provider.
+fn seed_shape_ok(bytes: &[u8]) -> bool {
+    let Ok(shape) = serde_json::from_slice::<SeedFileShape>(bytes) else {
+        return false;
+    };
+    let hex = |s: &str| grin_util::from_hex(s).ok();
+    matches!(
+        (hex(&shape.encrypted_seed), hex(&shape.salt), hex(&shape.nonce)),
+        (Some(e), Some(s), Some(n)) if e.len() > 16 && s.len() == 8 && n.len() == 12
+    )
+}
+
+/// Rejects a present but malformed `wallet.seed` with a Lifecycle error
+/// before the provider reads it. A missing or unreadable file is left to the
+/// provider, whose error `seed_open_error` maps.
+fn check_seed_file(data_dir: &Path) -> Result<(), GrinError> {
+    match std::fs::read(data_dir.join(SEED_FILE)) {
+        Ok(bytes) if !seed_shape_ok(&bytes) => Err(damaged_seed()),
+        _ => Ok(()),
     }
 }
 
@@ -260,7 +292,7 @@ pub unsafe extern "C" fn grin_wallet_create(
     password: *const c_char,
 ) -> GrinFfiResult {
     ffi_guard! {
-        let config = WalletConfig::parse(read_str(config_json, "config_json")?)?;
+        let config = WalletConfig::parse(read_str(&config_json, "config_json")?)?;
         global::set_local_chain_type(config.chain_type);
         let mnemonic = read_opt_secret(mnemonic, "mnemonic")?;
         let password = read_secret(password, "password")?;
@@ -336,7 +368,7 @@ pub unsafe extern "C" fn grin_wallet_open(
     password: *const c_char,
 ) -> GrinFfiResult {
     ffi_guard! {
-        let config = WalletConfig::parse(read_str(config_json, "config_json")?)?;
+        let config = WalletConfig::parse(read_str(&config_json, "config_json")?)?;
         global::set_local_chain_type(config.chain_type);
         let password = read_secret(password, "password")?;
 
@@ -411,7 +443,7 @@ pub unsafe extern "C" fn grin_wallet_delete(
     handle: u64,
 ) -> GrinFfiResult {
     ffi_guard! {
-        let wallet_dir = read_str(wallet_dir, "wallet_dir")?;
+        let wallet_dir = read_str(&wallet_dir, "wallet_dir")?;
         if wallet_dir.trim().is_empty() {
             return Err(GrinError::invalid_argument("wallet_dir must not be empty"));
         }
@@ -469,6 +501,7 @@ pub unsafe extern "C" fn grin_wallet_change_password(
         // means exactly that. The provider's change_password reports a
         // failure to write the new seed with the same text as a wrong
         // password, after it has already moved wallet.seed aside.
+        check_seed_file(&session.data_dir)?;
         drop(
             lc.get_mnemonic(None, old.clone())
                 .map_err(|e| seed_error(e, READ_SEED_FAILED, &session.data_dir))?,
@@ -494,6 +527,7 @@ pub unsafe extern "C" fn grin_wallet_get_mnemonic(
         let password = read_secret(password, "password")?;
         let words = {
             let mut w = session.wallet.lock();
+            check_seed_file(&session.data_dir)?;
             w.lc_provider()?
                 .get_mnemonic(None, password)
                 .map_err(|e| seed_error(e, READ_SEED_FAILED, &session.data_dir))?
@@ -516,9 +550,9 @@ pub unsafe extern "C" fn grin_wallet_update_network(
 ) -> GrinFfiResult {
     ffi_guard! {
         let session = get_session(handle)?;
-        let url = read_str(node_url, "node_url")?;
-        let secret = read_opt_nonempty(api_secret, "api_secret")?;
-        let proxy = read_opt_nonempty(socks_proxy, "socks_proxy")?;
+        let url = read_str(&node_url, "node_url")?;
+        let secret = read_opt_nonempty(&api_secret, "api_secret")?;
+        let proxy = read_opt_nonempty(&socks_proxy, "socks_proxy")?;
         let timeout = session.node_settings().timeout;
         let settings = NodeSettings::new(url, secret, proxy, timeout)?;
         let client = settings.http_client()?;
@@ -612,11 +646,34 @@ mod tests {
             seed_error(read_failed(), READ_SEED_FAILED, d).code,
             GrinErrorCode::Lifecycle
         );
+        // The right JSON shape with the wrong sizes is a damaged file, not
+        // a wrong password: the provider would index past the nonce.
         std::fs::write(
             d.join(SEED_FILE),
             br#"{"encrypted_seed": "00", "salt": "00", "nonce": "00"}"#,
         )
         .unwrap();
+        assert_eq!(
+            seed_error(read_failed(), READ_SEED_FAILED, d).code,
+            GrinErrorCode::Lifecycle
+        );
+        assert_eq!(
+            check_seed_file(d).unwrap_err().code,
+            GrinErrorCode::Lifecycle
+        );
+        // A seed file the provider can decrypt (right sizes) that fails to
+        // decrypt is a wrong password.
+        std::fs::write(
+            d.join(SEED_FILE),
+            format!(
+                r#"{{"encrypted_seed": "{}", "salt": "{}", "nonce": "{}"}}"#,
+                "ab".repeat(48),
+                "cd".repeat(8),
+                "ef".repeat(12)
+            ),
+        )
+        .unwrap();
+        assert!(check_seed_file(d).is_ok());
         assert_eq!(
             seed_error(read_failed(), READ_SEED_FAILED, d).code,
             GrinErrorCode::InvalidPassword

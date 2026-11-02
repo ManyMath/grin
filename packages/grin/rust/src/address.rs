@@ -145,7 +145,7 @@ pub unsafe extern "C" fn grin_address_validate(
     ffi_guard! {
         let chain_type = chain_type_from_u8(network)?;
         global::set_local_chain_type(chain_type);
-        let address = read_str(address, "address")?;
+        let address = read_str(&address, "address")?;
         to_json(&parse_address(address)?)
     }
 }

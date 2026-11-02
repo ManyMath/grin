@@ -200,10 +200,10 @@ pub unsafe extern "C" fn grin_slatepack_decode(
     ffi_guard! {
         let decoded = if handle == 0 {
             global::set_local_chain_type(chain_type_from_u8(network)?);
-            decode_plain(read_str(armored_slatepack, "armored_slatepack")?)?
+            decode_plain(read_str(&armored_slatepack, "armored_slatepack")?)?
         } else {
             let session = get_session(handle)?;
-            let armored = read_str(armored_slatepack, "armored_slatepack")?;
+            let armored = read_str(&armored_slatepack, "armored_slatepack")?;
             decode_with_wallet(&session, armored, secret_index)?
         };
         let slate = &decoded.slate;

@@ -456,9 +456,9 @@ pub unsafe extern "C" fn grin_test_create_wallet(
 ) -> GrinFfiResult {
     ffi_guard! {
         let chain_type = chain_type_from_u8(network)?;
-        let chain_dir = read_str(chain_dir, "chain_dir")?;
-        let wallet_dir = read_str(wallet_dir, "wallet_dir")?;
-        let client_id = read_str(client_id, "client_id")?;
+        let chain_dir = read_str(&chain_dir, "chain_dir")?;
+        let wallet_dir = read_str(&wallet_dir, "wallet_dir")?;
+        let client_id = read_str(&client_id, "client_id")?;
         if client_id.is_empty() || client_id == "node" {
             return Err(GrinError::invalid_argument(
                 "client_id must be non-empty and not \"node\"",

@@ -89,6 +89,25 @@ void main() {
       expect(result.url, onionUrl);
     });
 
+    test('validateAddressSync gives the same answer on this isolate', () {
+      final result = GrinWalletClient.validateAddressSync(
+        address,
+        GrinNetwork.automatedTesting,
+      );
+      expect(result.kind, GrinAddressKind.slatepack);
+      expect(result.slatepackAddress, address);
+      expect(result.url, onionUrl);
+      expect(
+        () =>
+            GrinWalletClient.validateAddressSync(address, GrinNetwork.mainnet),
+        throwsA(isA<GrinInvalidAddressException>()),
+      );
+      expect(
+        () => GrinWalletClient.validateAddressSync('nope', GrinNetwork.mainnet),
+        throwsA(isA<GrinInvalidAddressException>()),
+      );
+    });
+
     test('accepts the upper case form', () async {
       final result = await GrinWalletClient.validateAddress(
         address.toUpperCase(),

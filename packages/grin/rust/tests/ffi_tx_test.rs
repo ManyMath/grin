@@ -309,6 +309,10 @@ fn slatepack_s1_s2_s3_with_payment_proof() {
     let a = entry(&at, &slate_id);
     assert_eq!(a["type"], "TxSent");
     assert_eq!(a["confirmed"], true);
+    // The height comes from Alice's change output, which confirmed in the
+    // same block as the transaction.
+    let tip = u(&balance(alice, false)["last_confirmed_height"]);
+    assert!((1..=tip).contains(&u(&a["confirmed_height"])), "{a}");
     assert_eq!(a["slate_state"], "S3");
     assert_eq!(a["kernel_excess"], excess.as_str());
     assert_eq!(u(&a["fee"]), fee);
@@ -332,6 +336,7 @@ fn slatepack_s1_s2_s3_with_payment_proof() {
     let b = entry(&txs(bob, true), &slate_id);
     assert_eq!(b["type"], "TxReceived");
     assert_eq!(b["confirmed"], true);
+    assert_eq!(b["confirmed_height"], a["confirmed_height"], "{b}");
     assert_eq!(b["slate_state"], "S2");
     assert_eq!(u(&b["amount_credited"]), amount);
     assert_eq!(b["kernel_excess"], excess.as_str());
@@ -675,12 +680,17 @@ fn repost_a_finalized_transaction() {
     let e = entry(&txs(alice, false), &slate_id);
     assert_eq!(e["has_stored_tx"], true);
     assert_eq!(e["confirmed"], false);
+    assert!(e["confirmed_height"].is_null(), "{e}");
 
     let v = call!(grin_tx_repost(alice, -1, cs(&slate_id).as_ptr(), false)).unwrap();
     assert_eq!(v, json!({"posted": true}));
     assert_eq!(mine(alice, 1), 7);
     let e = entry(&txs(alice, true), &slate_id);
     assert_eq!(e["confirmed"], true);
+    // The test chain mines a posted transaction into a block at once, so
+    // the repost went into block 6 and the block mined above is 7.
+    assert_eq!(u(&e["confirmed_height"]), 6, "{e}");
+    assert_eq!(u(&entry(&txs(bob, true), &slate_id)["confirmed_height"]), 6);
     assert_eq!(e["kernel_excess"], s3["kernel_excess"]);
     assert_eq!(u(&balance(bob, true)["amount_currently_spendable"]), amount);
 

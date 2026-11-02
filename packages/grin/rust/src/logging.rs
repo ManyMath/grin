@@ -86,7 +86,7 @@ fn init(level: LevelFilter) {
 #[no_mangle]
 pub unsafe extern "C" fn grin_init_logs(log_level: *const c_char) -> GrinFfiResult {
     ffi_guard! {
-        let level = parse_level(read_opt_str(log_level, "log_level")?)?;
+        let level = parse_level(read_opt_str(&log_level, "log_level")?)?;
         init(level);
         Ok(None)
     }

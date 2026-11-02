@@ -57,8 +57,11 @@ Things to know:
   After `await client.close()` the directory is free again.
 - Calls on a closed client throw `StateError`.
 - `scanProgress()` and `cancelScan()` are direct calls that take no wallet
-  lock, so they answer while a scan runs. A scan that has started cannot be
-  interrupted; see the notes in `docs/ffi-json.md`.
+  lock, so they answer while a scan runs. `cancelScan()` stops a running scan
+  at the end of its current batch, and `scan()` then throws
+  `GrinCancelledException`; see the notes in `docs/ffi-json.md`.
+- `validateAddress` has a synchronous twin, `validateAddressSync`, for
+  callers that cannot await (the check is stateless and fast).
 - Restoring from a mnemonic needs a `scan()` to find the wallet's outputs.
 - `initSend` and `processInvoice` lock the wallet's inputs when they return.
   Cancel a transaction that will not be completed with `cancelTransaction`.

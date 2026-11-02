@@ -116,6 +116,7 @@ final class GrinTxLogEntry {
     required this.creationTime,
     required this.confirmationTime,
     required this.confirmed,
+    required this.confirmedHeight,
     required this.numInputs,
     required this.numOutputs,
     required this.amountCredited,
@@ -148,6 +149,10 @@ final class GrinTxLogEntry {
         'confirmation_ts',
       ),
       confirmed: readBool(json['confirmed'], 'confirmed'),
+      confirmedHeight: readOptionalInt(
+        json['confirmed_height'],
+        'confirmed_height',
+      ),
       numInputs: readInt(json['num_inputs'], 'num_inputs'),
       numOutputs: readInt(json['num_outputs'], 'num_outputs'),
       amountCredited: readBigInt(json['amount_credited'], 'amount_credited'),
@@ -204,6 +209,12 @@ final class GrinTxLogEntry {
 
   /// Whether the transaction is confirmed.
   final bool confirmed;
+
+  /// The block height the transaction confirmed at, taken from this wallet's
+  /// own outputs in it. Null while unconfirmed, and for a confirmed send that
+  /// left this wallet no output (no change); fall back to
+  /// [kernelLookupMinHeight] then.
+  final int? confirmedHeight;
 
   /// This wallet's inputs in the transaction.
   final int numInputs;
@@ -266,6 +277,7 @@ final class GrinTxLogEntry {
       other.fee == fee &&
       other.ttlCutoffHeight == ttlCutoffHeight &&
       other.kernelExcess == kernelExcess &&
+      other.confirmedHeight == confirmedHeight &&
       other.kernelLookupMinHeight == kernelLookupMinHeight &&
       other.hasStoredTx == hasStoredTx &&
       other.paymentProof == paymentProof &&
@@ -289,6 +301,7 @@ final class GrinTxLogEntry {
     fee,
     ttlCutoffHeight,
     kernelExcess,
+    confirmedHeight,
     kernelLookupMinHeight,
     hasStoredTx,
     paymentProof,

@@ -98,9 +98,9 @@ pub unsafe extern "C" fn grin_node_test_connection(
     socks_proxy: *const c_char,
 ) -> GrinFfiResult {
     ffi_guard! {
-        let url = read_str(node_url, "node_url")?;
-        let secret = read_opt_nonempty(api_secret, "api_secret")?;
-        let proxy = read_opt_nonempty(socks_proxy, "socks_proxy")?;
+        let url = read_str(&node_url, "node_url")?;
+        let secret = read_opt_nonempty(&api_secret, "api_secret")?;
+        let proxy = read_opt_nonempty(&socks_proxy, "socks_proxy")?;
         let settings = NodeSettings::new(
             url,
             secret,
