@@ -449,6 +449,835 @@ flowchart LR
 3. Run `cargo tree -d`, `cargo test`, `(cd packages/grin && dart test)`, `(cd packages/grin_flutter && flutter test)`, `dart analyze`, `flutter analyze`, and the `tool/ci.dart` `nm` check on `hook/build.dart` output built without `test-utils`.
 4. Add the release-pipeline `nm` gate on the Nix-built artifacts referenced by the prebuilt manifest (zero `grin_test_*` symbols, checked before `manifest.json` and its sha256 values are published).
 
+## 9. Stack Wallet integration design (design only; no stack_wallet code changes)
+
+This section is the Phase 5 target contract that [PLAN] §1 item 5 (lines 24-25) leaves for a later stack_wallet branch. It describes how Stack Wallet would consume `grin_flutter` and `grin`, and it changes nothing in stack_wallet. Every stack_wallet fact below was read from refs already present locally with `git show`, `git diff`, `git log`, and one `git merge-tree --write-tree` whose objects went to a scratch object directory outside the repository. No worktree, branch or stash was touched and nothing was fetched. The settled decisions of [PLAN] §1 to §8 are inputs, with the build-hook correction recorded in [PLAN] D1 (lines 458-463).
+
+### Citation keys
+
+| Key | Checkout | Ref |
+|---|---|---|
+| [SW-main] | /home/user/src/stack_wallet/stack_wallet | `cypherstack/main` at a156253bf (2025-10-24) |
+| [SW-stg] | same repository | local `staging` at 7ce7b34f2 (2026-10-19) |
+| [SW-uni] | same repository | local `refactor/epic-mwc-unify` at 6fadd8c0a (2026-09-07) |
+| [SW-gen] | same repository, working tree | generated, gitignored `pubspec.yaml` (`.gitignore:76`); checkout is on `security/rbf-history-authentication` at b778525f0 |
+| [KIT] | /home/user/src/stack_wallet/wt/native-build-kit/dart/native_prebuilt_hook | 85f7eb097604e5b99db3f90bccbcada3336836b8 (clean HEAD) |
+| [PLAN] | /home/user/src/grin/docs/architecture.md | commit dfb7f04 on main (492 lines; later commits insert sections 9 to 11 above section 12, so numbers above 450 shift). §4.6 rows are cited as `#N` (row N sits on line 275+N) |
+| [GW] | /home/user/src/grin-wallet | fork commit 64d361f2 (grin submodule at v5.5.2, dbaff34f) |
+
+Paths are relative to the checkout named by the key.
+
+### 9.1 Branch baseline
+
+| Ref | Tip | Relationship |
+|---|---|---|
+| `cypherstack/main` | a156253bf | Ancestor of local `staging`: 1170 commits behind it, 0 ahead |
+| `staging` (local) | 7ce7b34f2 | Ancestor of `cypherstack/staging` (d6ca375df, 2026-10-29), which is 34 commits further |
+| `refactor/epic-mwc-unify` | 6fadd8c0a | 989 commits ahead of `cypherstack/main`; 5 ahead of and 186 behind local `staging` (220 behind `cypherstack/staging`) |
+
+`git merge-base staging refactor/epic-mwc-unify` is 9517439be, "Merge pull request #1441 from cypherstack/letsexchange-api-inconsistent-return-data-types-fix" (2026-09-04), which is on staging's first-parent chain. The unify branch is therefore staging as of 2026-09-04 plus five commits by sneurlax dated 2026-09-07: 8e8bc9807 (share slatepack and relay server models), 4fc2c7798 (share the native transaction model), eaba50513 (add `MimblewimbleWallet`), 340400c0a (one slatepack UI for Epic Cash and MWC), 6fadd8c0a (MWC genesis time for creation height).
+
+A trial merge of the unify branch into local `staging`, and into `cypherstack/staging`, conflicts in the same five files: `lib/pages/send_view/confirm_transaction_view.dart`, `lib/pages/send_view/send_view.dart`, `lib/pages_desktop_specific/my_stack_view/wallet_view/sub_widgets/desktop_send.dart`, `lib/wallets/wallet/impl/epiccash_wallet.dart` and `lib/wallets/wallet/impl/mimblewimblecoin_wallet.dart`. Staging's own edits to the two wallet files since the merge base are small (`git diff 9517439 staging`: +17/-9 and +10/-7), a shared `calculateRestoreProgress` helper and an epicbox check fix. The unify branch still carries the always-true test `!receiverAddress.startsWith("http://") || !receiverAddress.startsWith("https://")` ([SW-uni] lib/wallets/wallet/impl/epiccash_wallet.dart:643-644) that staging replaced with `shouldCheckEpicbox` in 598898ae8, so the rebase has to keep staging's version.
+
+`cypherstack/main` is unsuitable. It is 1170 staging commits old. Its `EpiccashWallet` extends `Bip39Wallet` with no slatepack code ([SW-main] lib/wallets/wallet/impl/epiccash_wallet.dart:43; "slatepack" does not occur in that file). Only the MWC slatepack screens exist (4 slatepack files under `lib/`, against 8 on staging). Its base `Wallet` lacks the `cancelSend` hook that staging has ([SW-stg] lib/wallets/wallet/wallet.dart:504-506). Its pubspec template has no `NATIVE_PREBUILTS` block ([SW-main] scripts/app_config/templates/pubspec.template.yaml:27-75 holds every marker, ending at `MWEBD`). The unify template lacks that block too (its markers end with `ISAR` at [SW-uni] scripts/app_config/templates/pubspec.template.yaml:356-372 and `MWEBDEXE` at 421-423); only staging has it ([SW-stg] scripts/app_config/templates/pubspec.template.yaml:367-388).
+
+Recommendation: cut the Grin branch from current staging (local `staging`, or `cypherstack/staging` for the newest tip already present locally), land the five unify commits rebased onto it first as their own PR, then add Grin on top. GrinWallet as designed below does not inherit from `MimblewimbleWallet`, so Grin is not blocked if the unify PR stalls. What Grin gains from unify is the single set of slatepack screens from 340400c0a, which would otherwise be forked a third time.
+
+#### What `MimblewimbleWallet` abstracts
+
+Rows cite [SW-uni] lib/wallets/wallet/intermediate/mimblewimble_wallet.dart unless noted.
+
+| Member | Lines | Use for Grin |
+|---|---|---|
+| `abstract class MimblewimbleWallet extends Bip39Wallet` (raw type, so `cryptoCurrency` is typed `Bip39Currency`) | 29 | Grin wants `Bip39Wallet<Grin>` |
+| `syncMutex`, `timer`, `highestPercent` | 32-35 | `highestPercent` is read by the network settings screen (9.1 list below); the rest is unneeded |
+| `walletInfoDataKey` and `ExtraMimblewimbleWalletInfo` (receiving/change index, `slatesToAddresses`, `slatesToCommits`, `lastScannedBlock`, `restoreHeight`, `creationHeight`) | 37-56; lib/wallets/wallet/supporting/mimblewimble_wallet_info_extension.dart:8-62 | `slatesToCommits` exists to recover commit id and from/to addresses later. Grin gets `kernel_excess` and `counterparty_address` from `GrinTxLogEntry` ([PLAN] 4.4, lines 232-247). Only the restore height is worth keeping, and `WalletInfo.restoreHeight` already holds it |
+| `walletDirName`, `currentWalletDirPath()` = `<app root>/<walletDirName>/<walletId>` | 40-41, 288-294 | Same convention suits Grin |
+| `firstBlockTimestamp`, `calculateRestoreHeightFrom` (61 s per block overestimate) | 43-45, 296-307 | Reusable |
+| `getSyncPercent`, which fires `RefreshPercentChangedEvent` and `BlocksRemainingEvent` | 58-75 | Grin fires the same events from `grin_wallet_scan_progress` (#20) |
+| `cancelPendingTransactionAndPost`, "" on success, else the error text | 83-84 | Kept for UI compatibility |
+| `getRelayConfig`, `updateRelayConfig` | 86-88 | No epicbox/mwcmqs equivalent |
+| `createSlatepack`, `decodeSlatepack`, `receiveSlatepack`, `finalizeSlatepack`, `isSlatepack` | 92-108 | The UI-facing contract; keep |
+| `fullDecodeSlatepack`, `analyzeSlatepack` (count `part_sig` in Dart-parsed slate JSON, fall back to `sta`) | 119-243 | Replaced by the slate state from `grin_slatepack_decode` (#24) |
+| `fetchWalletBalances` returning four `double`s | 247-259 | Conflicts with exact `BigInt` nanogrin ([PLAN] §2 row 6, line 38) |
+| `scanOutputs(startHeight, numberOfBlocks)` driven by a Dart loop of 10000-block chunks that persists `lastScannedBlock` per chunk | 267-271, 326-373 | `grin_wallet_scan` chunks inside Rust with cancellable progress (#19-#21) |
+| `pauseListenerForScan`, `resumeListenerAfterScan` | 273-280 | No listener in v1 ([PLAN] §1 item 4, lines 20-23) |
+| `startSync` with hard-coded `minimumConfirmations: 10` | 309-324 | Unneeded |
+| `putSendToAddresses` | 375-398 | Unneeded (see `slatesToCommits`) |
+| Overrides: `isarTransactionVersion => 2`, address filters, custom `refresh`, `updateBalance` through `Decimal.parse(double.toString())`, `updateUTXOs => false`, constant `fees`, `exit` that cancels the timer | 416-609 | Grin wants the version, the filters and `updateUTXOs => false`; the rest differs |
+
+Decision: `GrinWallet extends Bip39Wallet<Grin> with SlatepackInterface<Grin>`. `SlatepackInterface` is a new mixin in `lib/wallets/wallet/wallet_mixin_interfaces/` (where `spark_interface.dart`, `paynym_interface.dart` and the others live, [SW-stg] lib/wallets/wallet/wallet.dart:60-63; `Bip39Wallet` already mixes in `MnemonicInterface` from there, [SW-stg] lib/wallets/wallet/intermediate/bip39_wallet.dart:6-9). `MimblewimbleWallet` mixes in the same interface. Reasons:
+
+1. Six abstract members of `MimblewimbleWallet` would be stubs or wrong for Grin (the relay pair, the listener pair, chunked `scanOutputs`, `double` balances), and its slate analysis repeats work `grin-ffi` does in Rust.
+2. The UI touches only the slatepack members and `cancelPendingTransactionAndPost` ([SW-uni] lib/pages/finalize_view/finalize_view.dart:124-134, lib/pages/receive_view/receive_view.dart:108, lib/pages/receive_view/sub_widgets/slatepack_import_dialog.dart:63, lib/pages/send_view/confirm_transaction_view.dart:168, lib/pages/send_view/send_view.dart:695, lib/pages_desktop_specific/my_stack_view/wallet_view/sub_widgets/desktop_receive.dart:119 and desktop_send.dart:180, lib/pages/wallet_view/transaction_views/tx_v2/transaction_v2_details_view.dart:1508). Relay calls only occur in coin-specific settings screens that cast to the concrete wallet ([SW-uni] lib/pages/settings_views/wallet_settings_view/wallet_settings_view.dart:647-653, 750, 790; lib/pages/settings_views/wallet_settings_view/epicbox_settings/manage_epicbox_view.dart:64).
+3. Staging's base `Wallet.refresh` is generic (chain height, transactions, UTXOs, balance, progress events; [SW-stg] lib/wallets/wallet/wallet.dart:554-755), so Grin does not need `MimblewimbleWallet.refresh`.
+4. Precedent for a direct subclass over an FFI package: `BitcoinFrostWallet<T extends FrostCurrency> extends Wallet<T>` ([SW-stg] lib/wallets/wallet/impl/bitcoin_frost_wallet.dart:38-41) reaches frostdart only through `frostInterface` from `lib/wl_gen/interfaces/frost_interface.dart` (import at :27, calls at :63-65; direct frostdart imports are commented out at :5-7).
+
+Interface sketch (names proposed; the state enum replaces the string labels the UI matches today):
+
+```dart
+enum SlateState { s1, s2, s3, i1, i2, i3, unknown }
+
+mixin SlatepackInterface<T extends CryptoCurrency> on Wallet<T> {
+  bool isSlatepack(String data);
+  Future<({SlateState state, Amount? amount, Amount? fee, String slateId,
+      String? senderAddress, String? recipientAddress, bool wasEncrypted})>
+      inspectSlatepack(String slatepack);
+  Future<SlatepackResult> createSlatepack({required Amount amount,
+      String? recipientAddress, String? message, bool encrypt = false,
+      int? minimumConfirmations});
+  Future<ReceiveResult> receiveSlatepack(String slatepack);
+  Future<FinalizeResult> finalizeSlatepack(String slatepack);
+  Future<String> cancelPendingTransactionAndPost(String txSlateId);
+
+  bool get supportsInvoices => false; // GrinWallet overrides with true
+  Future<SlatepackResult> issueInvoice({required Amount amount, String? payerAddress}) =>
+      throw UnsupportedError("invoices");
+  Future<SlatepackResult> processInvoice(String i1) => throw UnsupportedError("invoices");
+  Future<FinalizeResult> finalizeInvoice(String i2) => throw UnsupportedError("invoices");
+  Future<String?> pendingSlatepackFor(String txid) async => null;
+}
+```
+
+The result types exist ([SW-uni] lib/models/slatepack_models.dart:1-7, 31-37, 61-68, 94-98). `MimblewimbleWallet` implements `inspectSlatepack` with its current `analyzeSlatepack`. These [SW-uni] sites change from `MimblewimbleWallet` to `SlatepackInterface`: finalize_view.dart:122, receive_view.dart:104, slatepack_import_dialog.dart:58, confirm_transaction_view.dart:154 and 316, send_view.dart:689, lib/pages/wallet_view/wallet_view.dart:1020, transaction_v2_details_view.dart:1483. One more site, lib/pages/settings_views/wallet_settings_view/wallet_network_settings_view/wallet_network_settings_view.dart:357-363, reads `highestPercent`; GrinWallet exposes the same getter and that branch gains a `coin is Grin` case.
+
+### 9.2 Grin coin definition
+
+These refs have no `Coin` enum. `CryptoCurrency.identifier` "should also match the old `Coin` enum name" and keys persistent storage ([SW-stg] lib/wallets/crypto_currency/crypto_currency.dart:46-50). A coin is registered here (all [SW-stg] unless noted):
+
+1. `lib/wallets/crypto_currency/coins/grin.dart`, exported from `lib/wallets/crypto_currency/crypto_currency.dart:5-29`.
+2. `case const (Grin): return GrinWallet(net);` in `Wallet._loadWallet` (lib/wallets/wallet/wallet.dart:355-437; Epic at 382-383).
+3. `Grin(CryptoCurrencyNetwork.main)` and `Grin(CryptoCurrencyNetwork.test)` in the `_supportedCoins` list written by scripts/app_config/configure_stack_wallet.sh:98-136, and `GRIN` in both marker lists of that script (`process_pubspec_deps.dart` at :23-34, `gen_interfaces.dart` at :36-48). The Campfire and Stack Duo scripts leave it out.
+4. A `%%ENABLE_GRIN%%` block in scripts/app_config/templates/pubspec.template.yaml (9.8). `tool/process_pubspec_deps.dart:19-54` uncomments every block whose marker is listed, so one marker can wrap both a `dependencies` block and a `dependency_overrides` block.
+5. `lib/wl_gen/interfaces/libgrin_interface.dart` plus `tool/wl_templates/GRIN_libgrin_interface_impl.template.dart`, modelled on `LibEpicCashInterface` ([SW-uni] lib/wl_gen/interfaces/libepiccash_interface.dart:1-134) and its template ([SW-uni] tool/wl_templates/EPIC_libepiccash_interface_impl.template.dart:1-21, whose `//ON` and `//OFF` sections are selected by tool/gen_interfaces.dart:41-83). Only the template imports `package:grin_flutter`. An OFF build has no `package:grin`, so the interface cannot expose `GrinWalletClient`, `GrinBalance`, `GrinTxLogEntry` or `GrinException`. It declares Stack-side mirrors instead, as `MimblewimbleTransaction` does ([SW-uni] lib/wl_gen/interfaces/mimblewimble_transaction.dart:3-42) and as `BadHttpAddressException` does for errors (libepiccash_interface.dart:134), plus a typed facade `abstract class GrinSession` that mirrors the client one to one. That reads better than Epic's `DynamicObject` wrapper (lib/utilities/dynamic_object.dart:11-25; [SW-uni] EPIC template:183-213).
+6. A `PriceAPI._coinToIdMap` entry (lib/services/price.dart:28-45; Epic at :36). The CoinGecko id `grin` is an assumption.
+7. A `testNodeConnection` case (lib/utilities/test_node_connection.dart:116-170; Epic at :144-146) calling the stateless `grin_node_test_connection` (#7).
+8. A `Wallets.deleteWallet` branch (lib/services/wallets.dart:149-171 covers Epic and MWC).
+9. Coin icon and theme assets (lib/themes/coin_icon_provider.dart:31 for Epic).
+10. An audit of the 108 lines in 24 files on [SW-uni] that test `coin is Epiccash` or `coin is Mimblewimblecoin`. An optional `MimblewimbleCurrency extends Bip39Currency` intermediate would let the shared ones read `coin is MimblewimbleCurrency`, the way `FrostCurrency` ([SW-stg] lib/wallets/crypto_currency/intermediate/frost_currency.dart:6-16) serves [SW-uni] wallet_view.dart:1037.
+
+Field mapping against `Epiccash` ([SW-uni] lib/wallets/crypto_currency/coins/epiccash.dart, same line numbers as [SW-stg]):
+
+| Member | Epiccash (line) | Grin |
+|---|---|---|
+| base class | `Bip39Currency` (12) | `Bip39Currency` (BIP39 mnemonic, [PLAN] #4, #5) |
+| networks | main only, others throw (16-23) | `main` and `test` |
+| `identifier` / `mainNetId` | "epicCash" (14) | "grin"; test "grinTestNet" (the pattern of "bitcoinTestNet", [SW-stg] lib/wallets/crypto_currency/coins/bitcoin.dart:24) |
+| `prettyName`, `ticker` | "Epic Cash", "EPIC" (19-20) | "Grin", "GRIN"; test "tGrin", "tGRIN" |
+| `uriScheme` | "epic" (15) | "grin" |
+| `genesisHash` | "not used in epiccash" (46-49) | "not used in grin" |
+| `minConfirms` | 3 (51-53) | 10 (grin-wallet's default `minimum_confirmations`, [GW] libwallet/src/api_impl/types.rs:119) |
+| `minCoinbaseConfirms` | inherited, equals `minConfirms` (crypto_currency.dart:67) | 1440 (`COINBASE_MATURITY = DAY_HEIGHT`, [GW] grin/core/src/consensus.rs:56-63); synthetic coinbase inputs make `isCoinbase()` true (9.5) |
+| `torSupport` | not overridden, so false (crypto_currency.dart:64), which makes Stack show `TorWarningDialog` when Tor is on ([SW-stg] lib/pages/wallets_view/sub_widgets/wallet_list_item.dart:68-83) | true: node traffic and HTTP send use Stack's SOCKS proxy |
+| `validateAddress` | http(s) URL, else `libEpic.validateSendAddressSync` (55-69) | `libGrin.validateAddressSync(address, network)` over `grin_address_validate` (#6) |
+| `getAddressType` | `mimbleWimble` if valid (170-176) | same |
+| `defaultNode` | `https://epic.stackwallet.com`, port 3413, Tor and clearnet enabled (71-93) | main: a Stack-run host on 3413 (grin-wallet's default `check_node_api_http_addr` is `http://127.0.0.1:3413`, [GW] config/src/types.rs:69); test: 13413 (grin's testnet convention; the host is an open item) |
+| `defaultSeedPhraseLength` / `possibleMnemonicLengths` | 24 / [24, 12] (95-96, 107-108) | 24 / [24, 12] |
+| `fractionDigits` / `satsPerCoin` | 8 / 10^8 (98-99, 113-114) | 9 / 10^9, nanogrin ([PLAN] line 38) |
+| `hasBuySupport`, `hasMnemonicPassphraseSupport` | false, false (101-105) | false, false |
+| `defaultAddressType` | `AddressType.mimbleWimble` (110-111) | same ([SW-stg] lib/models/isar/models/blockchain_data/address.dart:164) |
+| `targetBlockTimeSeconds` | 60 (116-117) | 60 |
+| `defaultDerivePathType` | throws (119-122) | throws |
+| `defaultBlockExplorer` | throws (124-132) | throws in v1; a kernel explorer URL is an open item |
+| helpers | `isSlateJson`, `isEpicboxAddress`, `isHttpAddress`, `getTransactionMethod` (134-168) | `isSlatepack` (armor check), `isHttpAddress`, `getTransactionMethod` returning `slatepack` or the automatic method |
+
+```dart
+class Grin extends Bip39Currency {
+  Grin(super.network) {
+    _idMain = "grin";
+    switch (network) {
+      case CryptoCurrencyNetwork.main:
+        _id = _idMain; _name = "Grin"; _ticker = "GRIN";
+      case CryptoCurrencyNetwork.test:
+        _id = "grinTestNet"; _name = "tGrin"; _ticker = "tGRIN";
+      default:
+        throw Exception("Unsupported network: $network");
+    }
+  }
+  // identifier, mainNetId, prettyName, ticker: late finals as in Epiccash.
+  @override String get uriScheme => "grin";
+  @override String get genesisHash => "not used in grin";
+  @override int get minConfirms => 10;
+  @override int get minCoinbaseConfirms => 1440;
+  @override bool get torSupport => true;
+  @override int get fractionDigits => 9;
+  @override BigInt get satsPerCoin => BigInt.from(1000000000);
+  @override int get targetBlockTimeSeconds => 60;
+  @override int get defaultSeedPhraseLength => 24;
+  @override List<int> get possibleMnemonicLengths => [24, 12];
+  @override bool get hasBuySupport => false;
+  @override bool get hasMnemonicPassphraseSupport => false;
+  @override AddressType get defaultAddressType => AddressType.mimbleWimble;
+
+  /// 0 = Mainnet, 1 = Testnet ([PLAN] 4.2 item 5).
+  int get ffiNetwork => network == CryptoCurrencyNetwork.main ? 0 : 1;
+
+  @override
+  bool validateAddress(String address) =>
+      libGrin.validateAddressSync(address: address, network: ffiNetwork);
+  @override
+  AddressType? getAddressType(String address) =>
+      validateAddress(address) ? AddressType.mimbleWimble : null;
+  @override
+  NodeModel defaultNode({required bool isPrimary}) => /* see table */;
+  // defaultDerivePathType and defaultBlockExplorer throw, as in Epiccash.
+}
+```
+
+`CryptoCurrency.validateAddress` is synchronous ([SW-stg] lib/wallets/crypto_currency/crypto_currency.dart:73), so `package:grin` needs a static synchronous wrapper of `grin_address_validate` that runs on the calling isolate. [PLAN] puts handle-based work in `Isolate.run` (§5.1, lines 322-341) and names no synchronous stateless entry point; this is a requirement on Phase 2 (assumption that it is acceptable, since the call is stateless and short).
+
+Restore height: GrinWallet keeps a `firstBlockTimestamp` as `MimblewimbleWallet` does (mimblewimble_wallet.dart:43-45). The Grin mainnet genesis time is 2019-01-15 16:01:26 UTC, 1547568086 ([GW] grin/core/src/genesis.rs:160). The restore screen needs a Grin branch beside Epic and MWC ([SW-uni] lib/pages/add_wallet_views/restore_wallet_view/restore_wallet_view.dart:225-267) that stores only the height.
+
+### 9.3 GrinWallet mapped onto GrinWalletClient
+
+Calls go through `libGrin` and `GrinSession` (9.2 item 5), which forward one to one. The C functions are fixed by [PLAN] §4.6. Dart names other than `open`, `create`, `delete` (line 359), `close` (349-356), `getBalance` (326), `cancelScan` (370) and `updateNetwork` are proposals. In the table, "base" is [SW-stg] lib/wallets/wallet/wallet.dart, "MW" is [SW-uni] mimblewimble_wallet.dart, "E" and "M" are the [SW-uni] Epic and MWC wallet impls.
+
+Storage and configuration. GrinWallet keeps the seed password under `${walletId}_password`, generated with `generatePassword()` as Epic does (E:543-558), and treats its presence as the provisioned marker as MWC does (M:605-611). The mnemonic stays in the `MnemonicInterface` slot that `Wallet.create` writes (base 208-216); it is generated in Dart by `bip39.generateMnemonic` ([SW-uni] lib/pages/add_wallet_views/new_wallet_recovery_phrase_warning_view/new_wallet_recovery_phrase_warning_view.dart:217-223). Nothing else is persisted: no config JSON (MWC stores one at M:618-621 and M:1037-1041 and patches `wallet_dir` on iOS at M:579-591) and no `.api_secret` file (M:411-420). The wallet directory is recomputed on each open as `StackFileSystem.applicationRootDirectory()/grin/<walletId>` (MW `currentWalletDirPath`, 288-294; the root honours the desktop override, [SW-stg] lib/utilities/stack_file_system.dart:21-36). `GrinFlutter.defaultWalletDirectory` ([PLAN] line 367) is for apps without their own root.
+
+| Wallet or UI method | GrinWalletClient call (C function) | Notes |
+|---|---|---|
+| `init()`, new wallet | `GrinWalletClient.create(config, mnemonic, password)` (`grin_wallet_create`, #8) | `config`: wallet dir, network, node URL, API secret, SOCKS proxy (9.4), min confirms. Restore height = `calculateRestoreHeightFrom(now - 2 days)` as E:577-580. Then `getAddress(0)`, lifecycle observer, Tor subscriptions, `super.init()` (base 802-812) |
+| `init()`, existing wallet | `GrinWalletClient.open(config, password)` (#9) | Awaits any pending close first and reuses a live client (9.7). Epic re-opens on every `init()` (E:597-611) and MWC caches its handle (M:80-109); neither closes on exit. `GrinWalletBusyException` per 9.7 |
+| `exit()` | `client.close()` (#10) | Order in 9.7. Replaces Epic's listener stop (E:1140-1144) and MW's timer cancel (MW 602-609) |
+| `recover(isRescan: false)` | `create`, then `client.scan(startHeight: restoreHeight, deleteUnconfirmed: false)` (#19) polled with `client.scanProgress()` (#20) | Inside `refreshMutex.protect` as E:731. Progress feeds `RefreshPercentChangedEvent` and `BlocksRemainingEvent` as MW 58-75. Then `unawaited(refresh())` |
+| `recover(isRescan: true)` | `client.scan(startHeight: restoreHeight, deleteUnconfirmed: false)` | Keeps tx history (#19). No delete-and-recover with rewritten txids (E:732-836), no `deleteWalletBlockchainData` (M:796-806). `deleteUnconfirmed: true` only behind an explicit "clear pending" option, since it would drop in-flight slatepack transactions (assumption about grin-wallet semantics) |
+| scan cancel | `client.cancelScan()` (#21, lock-free) | Used by the lifecycle observer and on Tor changes (9.4) |
+| `refresh()` | base `refresh()` (554-755), not overridden | Runs the next four rows; periodic timer from `ensurePeriodicRefreshTimer` (599-607) |
+| `updateChainHeight()` | `client.getChainHeight()` (#17) | `info.updateCachedChainHeight` as MW 564-571 |
+| `updateTransactions()` | `client.getTxs(refreshFromNode: true)` (#23) | The one node refresh per cycle. Builds `TransactionV2` (9.5) and caches `armored_slatepack` by txid for `pendingSlatepackFor` |
+| `updateBalance()` | `client.getBalance(refreshFromNode: false)` (#18) | `Amount(rawValue: <BigInt>, fractionDigits: 9)` with no `double`. total = total + awaiting_finalization (as MW presents it, 529-533), spendable = spendable, pendingSpendable = total - spendable, blockedTotal = 0 (MW 539-541). Field semantics follow upstream summary info (assumption) |
+| `updateUTXOs()` | none | Returns false (MW 558-562) |
+| `estimateFeeFor(amount, feeRate)` | `client.estimateFee(amount, minConfirms, false, false)` (#22) | `feeRate` ignored; Grin fees follow transaction weight |
+| `fees` | none | Constant `FeeObject` as MW 582-594 |
+| `prepareSend` | `client.estimateFee(amount, minConfirms, selectionStrategyIsAll: false, amountIncludesFee: amount == spendable)` (#22) | Locks nothing. Insufficient funds arrive typed with required and available (#22). Sets `otherData.transactionMethod` as M:771-785. `amount_includes_fee` replaces the "subtract the fee when sending everything" step (E:704-718) |
+| `cancelSend` | none | `prepareSend` holds no native resource (base hook 504-506) |
+| `confirmSend`, automatic method | `client.sendHttp(args)` (`grin_tx_send_http`, #26) | Recipient is `grin1`/`tgrin1` (onion) or `http(s)://`. Onion needs a proxy (9.4), which Rust also enforces ([PLAN] line 227). Returns `txData.copyWith(txid: slateId)` |
+| `createSlatepack`, Slatepack method (S1) | `client.initSend(args)` (`grin_tx_init_send`, #25) | Locks outputs. With a slatepack `recipientAddress`, encrypts to it and requests a payment proof (args field names are an assumption) |
+| `inspectSlatepack` | `client.decodeSlatepack(armored)` (#24), or the static form with `network` when no wallet is open | State, amount, fee, id, addresses |
+| `receiveSlatepack` (S1 to S2) | `client.receiveSlatepack(s1, message: null)` (#27) | S2 is encrypted back to the sender when S1 named one |
+| `finalizeSlatepack` (S2 to S3) | `client.finalizeSlatepack(s2, broadcast: true, fluff: false)` (#28) | A failed broadcast leaves a finalized transaction to repost |
+| `issueInvoice` (I1) | `client.issueInvoice(args)` (#29) | |
+| `processInvoice` (I1 to I2) | `client.processInvoice(i1, args)` (#30) | Locks the payer's inputs (#30), so the UI confirms amount and fee first |
+| `finalizeInvoice` (I2 to I3) | `client.finalizeInvoice(i2, broadcast: true, fluff: false)` (#31) | |
+| `cancelPendingTransactionAndPost(slateId)` | `client.cancelTx(txId: <cached log id>, slateId)` (#33) | Returns "" on success to keep the UI contract (MW 83-84; [SW-uni] transaction_v2_details_view.dart:1507-1513) |
+| `repostTransaction(txid)` (new) | `client.repost(txId, slateId, fluff: false)` (#32) | For finalized, unconfirmed outgoing transactions |
+| `exportPaymentProof(txid)`, `verifyPaymentProof(json)` (new) | #34, #35 | |
+| `checkSaveInitialReceivingAddress()` and the receive address | `client.getAddress(0)` (#16) | One slatepack address at index 0, as Epic only uses index 0 (E:391-401). GrinWallet is not a `MultiAddressInterface`, and `generateNewAddress` only acts for those ([SW-uni] receive_view.dart:157-160) |
+| `updateNode()` | `client.updateNetwork(nodeUrl, apiSecret, socksProxy)` (#15) | Also on Tor events (9.4); LMDB stays open |
+| `pingCheck()` | static `GrinWalletClient.testConnection(nodeUrl, apiSecret, socksProxy)` (#7) | Stateless, so it never waits behind a scan |
+| `getMnemonic()` | `MnemonicInterface` (secure storage) | `grin_wallet_get_mnemonic` (#14) only matters for a "verify seed" feature |
+| delete via `Wallets.deleteWallet` | `GrinWalletClient.delete(walletDir)` (#12) | Runs after the awaited `exit()` ([SW-stg] lib/services/wallets.dart:117-119) |
+
+GrinWallet opens inside `init()`, as Epic and MWC do, instead of implementing `ExternalWallet.open()` ([SW-stg] lib/wallets/wallet/intermediate/external_wallet.dart:6-12, called for `ExternalWallet` only at lib/widgets/wallet_card.dart:165-168). That split exists "to prevent db lock collision errors"; the `OPEN_DIRS` guard turns such a collision into a typed error, and 9.7 keeps GrinWallet from causing one.
+
+### 9.4 Tor proxy wiring through the event bus
+
+Event classes ([SW-stg]):
+
+- `TorConnectionStatusChangedEvent { TorConnectionStatus newStatus; String message; }` with `enum TorConnectionStatus { disconnected, connecting, connected }` (lib/services/event_bus/events/global/tor_connection_status_changed_event.dart:12-22). It is fired by the Tor service implementation's `_updateStatusAndFireEvent` (tool/wl_templates/TOR_tor_service_impl.template.dart:127-135), from `start()` (connecting, then connected or disconnected, :69-104) and `disable()` (disconnected, :108-125). No class is named `TorConnectionChangedEvent`.
+- `TorPreferenceChangedEvent { TorStatus status; String? message; }` with `enum TorStatus { enabled, disabled }` (lib/services/event_bus/events/global/tor_status_changed_event.dart:13-26), fired by the `Prefs.useTor` setter (lib/utilities/prefs.dart:1135-1150).
+
+`TorService` ([SW-stg] lib/services/tor_service.dart:10-37) offers `sharedInstance`, `status`, `getProxyInfo()` returning `({InternetAddress host, int port})` and throwing when not connected (the implementation returns loopback IPv4 and the Tor port, TOR template:44-50), `start()` and `disable()`. The killswitch is `prefs.torKillSwitch` (lib/utilities/prefs.dart:554).
+
+Existing patterns ([SW-stg]). `LibMoneroWallet` subscribes to both events in its constructor (lib/wallets/wallet/intermediate/lib_monero_wallet.dart:55-89), holds a mutex while Tor is connecting (59-78), calls `updateNode()` on a preference change (81-85), and derives the proxy as `AppConfig.hasFeature(AppFeature.tor) && prefs.useTor && !node.forceNoTor ? TorService.sharedInstance.getProxyInfo() : null` (516-519), passed as `"host:port"` (532-536). It never cancels the subscriptions (fields at 1626-1627; `exit()` at 733-742 leaves them). `ElectrumXClient` implements the killswitch: Tor wanted but not connected falls back to clearnet unless the killswitch is set, in which case it throws (lib/electrumx_rpc/electrumx_client.dart:228-248). Neither legacy Mimblewimble wallet passes a proxy; Epic only throws `NodeTorMismatchConfigException` on a node and Tor mismatch ([SW-uni] epiccash_wallet.dart:1146-1168).
+
+GrinWallet:
+
+```dart
+// Proxy string for grin-ffi, null for clearnet, or a throw when Tor is
+// required and unavailable.
+String? _socksProxy(NodeModel node) {
+  if (!AppConfig.hasFeature(AppFeature.tor) || !prefs.useTor || node.forceNoTor) {
+    return null;
+  }
+  final tor = TorService.sharedInstance;
+  if (tor.status != TorConnectionStatus.connected) {
+    if (prefs.torKillSwitch) throw GrinTorRequiredException();
+    return null; // node traffic may fall back, as ElectrumXClient does
+  }
+  final p = tor.getProxyInfo();
+  return "${p.host.address}:${p.port}"; // grin-ffi adds socks5h itself
+}
+```
+
+- The proxy string is `host:port` with an IPv4 literal host (a `socks5h://` or `socks5://` prefix is accepted and ignored); host names and IPv6 are rejected, and grin-ffi always connects with `socks5h`, so onion and DNS resolution stay inside Tor (docs/ffi-json.md, config_json table).
+- The proxy goes into the create/open config ([PLAN] #8, #9; `config.rs` carries it, line 68), so the first node call is already proxied.
+- Subscriptions are made in `init()` after the client opens and cancelled in `exit()`, unlike `LibMoneroWallet`, because Wallet objects outlive closed wallets.
+- `TorPreferenceChangedEvent`, and `TorConnectionStatusChangedEvent` with `connected` or `disconnected`, run `_applyNetwork()`: the Epic-style mismatch guard, then `client.cancelScan()` (lock-free, #21) so the update need not wait behind a whole scan, then `client.updateNetwork(...)` (#15), then `unawaited(refresh())`. `connecting` takes a mutex, as LibMoneroWallet does (59-78), that `confirmSend`, `createSlatepack` and `processInvoice` wait on. The Tor port is re-read on every `connected`, since a restart can change it.
+- Killswitch on and Tor down: GrinWallet does not call `updateNetwork` with a null proxy. The session keeps the old proxy, whose port is closed, so node calls fail instead of leaking, and refresh reports `unableToSync` through base refresh's error path (base 569-591).
+- Sends: with `useTor` on, `confirmSend` refuses whenever `_socksProxy` is null, for every recipient type, because a clearnet `http(s)://` send would show the user's IP to the recipient. Onion recipients always need a proxy, also enforced in Rust ([PLAN] line 227).
+
+Tor toggled mid-send. Handle-based calls are serialized in the client's op queue ([PLAN] lines 324-341), so `updateNetwork` runs after an in-flight `grin_tx_send_http`, and that send keeps the proxy it read when it started ([PLAN] 4.3, lines 224-227). `updateNetwork` is a queued operation in `GrinWalletClient`; only `scanProgress()` and `cancelScan()` bypass the queue (#20, #21). If Tor stops during the send, the SOCKS connection drops:
+
+- Before S2 returns: per the [PLAN] 4.3 order (line 228) outputs are locked only after `send_tx` returns, so nothing is locked (assumption about grin-wallet's `init_send_tx`). The UI reports the network error.
+- During `post_tx`: the transaction is finalized and its inputs locked. GrinWallet reports "finalized, not broadcast" and the details screen offers Repost (#32) once a connection is back.
+- Tor turned on while a clearnet `http(s)://` send is in flight: the send completes on clearnet, because it began before the change. The UI copy says so.
+
+### 9.5 TransactionV2 construction
+
+[PLAN] names `GrinTxLogEntry` (line 100) and fixes only the joined fields (`kernel_excess`, `payment_proof`, `armored_slatepack`, `counterparty_address`; 4.4, lines 232-247). The rest of the field list below mirrors upstream `TxLogEntry` and is an assumption. `TransactionV2`'s fields are at [SW-stg] lib/models/isar/models/blockchain_data/v2/transaction_v2.dart:15-58, unique on `(txid, walletId)` (22-23). Bare `transaction_v2.dart` line numbers in this subsection are [SW-stg] and identical on [SW-uni]; "E" and "M" are the [SW-uni] Epic and MWC wallet impls.
+
+| GrinTxLogEntry field (assumed) | TransactionV2 | Notes |
+|---|---|---|
+| `tx_slate_id` | `txid` (else `"grin-log-<id>"`), `otherData.slateId` | Stable from S1 to confirmation and across non-destructive rescans, so rows upsert by txid via `mainDB.updateOrPutTransactionV2s` (base 536-541). That retires Epic's `_fuzzyEquals` dedupe (E:483-520, E:1028-1092) and MWC's delete-all (M:1014-1019). Local notes already key on `slateId ?? txid` ([SW-uni] transaction_v2_details_view.dart:936-939) |
+| `kernel_excess` | `hash` (else txid), `otherData.kernelExcess` | Hex; later an explorer link |
+| `tx_type` | `type`, `otherData.grinTxType` | `TxReceived`, `ConfirmedCoinbase`, `TxReceivedCancelled` to incoming; `TxSent`, `TxSentCancelled` to outgoing; `TxReverted` by the sign of credited minus debited; `sentToSelf` when the counterparty is the wallet's own address. `subType` = `none` as E:1024 |
+| `confirmed`, a confirmed height, `kernel_lookup_min_height` | `height` | Confirmed: the confirmed height, else `kernel_lookup_min_height`, else 1. Unconfirmed: null. Epic uses `kernelLookupMinHeight ?? 1` (E:1019), a lookup lower bound that overstates confirmations under the non-Monero formula `currentChainHeight - (height - 1)` (transaction_v2.dart:118-123). `GrinTxLogEntry` should carry a confirmed height derived from the transaction's output heights (a request on Phase 2) |
+| `creation_ts` | `timestamp` (seconds) | As E:1017-1018 |
+| `amount_debited` | one `InputV2`, `walletOwns: true`, addresses `[own address]` | `coinbase` set for `ConfirmedCoinbase`, so `isCoinbase()` (transaction_v2.dart:375-376) applies `minCoinbaseConfirms` |
+| `amount_credited` | one owned `OutputV2`, addresses `[own address]` | Receipt or change |
+| debited - credited - fee (outgoing only) | one unowned `OutputV2`, addresses `[counterparty]` | Received = credited and sent = debited - credited, so `getAmountSentFromThisWallet(subtractFee: true)` is the amount sent (transaction_v2.dart:183-214), and the details list built from outputs ([SW-uni] transaction_v2_details_view.dart:252-262) shows the recipient with its real amount next to the change. Epic puts the counterparty on its only output and MWC on its only input (E:957-974 against M:918-935), so both list change against the recipient's address |
+| `fee` | `otherData.overrideFee` (`Amount.toJsonString()`) | As E:1006-1009; 0 for incoming |
+| `counterparty_address` | `otherData.counterpartyAddress` and the address lists above | From `payment_proof`, else the sidecar ([PLAN] line 247) |
+| `payment_proof` | `otherData.hasPaymentProof` | Enables "Export payment proof" |
+| `armored_slatepack` | `otherData.pendingSlateState` (S1, S2, I1 or I2) | The armored text stays in the sidecar and in GrinWallet's per-refresh cache. Storing 1-2 KB per row would cost a JSON decode on every getter call, since `_getFromOtherData` decodes per access (transaction_v2.dart:367-373) |
+| `ttl_cutoff_height` | `otherData.ttlCutoffHeight` | Expiry hint for pending slatepacks |
+| cancelled types, `reverted_after` | `otherData.isCancelled` (existing key), `otherData.isReverted` | |
+| participant messages | none | Slate v4 has none (assumption), so `numberOfMessages` and `onChainNote` stay unset |
+
+`otherData.isGrinTransaction = true` is a new `TxV2OdKeys.isGrinTransaction` beside the Epic and MWC flags (transaction_v2.dart:405-424).
+
+Fast path. `_isMonero()` (transaction_v2.dart:241-244) changes two things: amounts come from `moneroAmount` (156-170, 183-193), and confirmations drop the `- 1` (118-123). Grin needs neither, because the synthetic inputs and outputs make the generic sums right and Grin heights follow the Bitcoin-style count. Grin does need its own `statusLabel` branch, since the Epic and MWC branches (269-339) key off `numberOfMessages`, which Grin lacks:
+
+| Condition, checked in order | Label |
+|---|---|
+| incoming and `slateId == null` | "Restored Funds" (as Epic, 269-272) |
+| `isCancelled` / `isReverted` | "Cancelled" / "Reverted" |
+| confirmed | "Received" / "Sent (confirmed)" |
+| outgoing, pending S1 | "Sending (waiting for response)" |
+| incoming, pending S2 | "Receiving (waiting for sender to finalize)" |
+| incoming, pending I1 | "Invoice issued (waiting for payer)" |
+| outgoing, pending I2 | "Paying invoice (waiting for invoicer)" |
+| kernel excess set, unconfirmed | "Sending" / "Receiving" plus `prettyConfirms()` |
+
+Caching the decoded `otherData` would help every coin but is out of scope here.
+
+### 9.6 Slatepack and invoice UI flows
+
+Screen paths are [SW-uni].
+
+Receive, Slatepack only ([PLAN] §1 item 4):
+
+1. The receive screen (`lib/pages/receive_view/receive_view.dart`; desktop `lib/pages_desktop_specific/my_stack_view/wallet_view/sub_widgets/desktop_receive.dart`) shows the `grin1` address, with copy that says it lets a sender encrypt a Slatepack and request a payment proof, and that automatic Tor receive is not available in this version. Without that text senders will pick the automatic method and fail, since nothing listens.
+2. "Import Slatepack" (shown for Mimblewimble coins at receive_view.dart:763-766) opens `SlatepackEntryDialog`, which pastes or scans a QR code (lib/pages/receive_view/sub_widgets/slatepack_entry_dialog.dart:43-63).
+3. `inspectSlatepack` replaces `fullDecodeSlatepack` (receive_view.dart:106-112) and routes on the state. S1 opens `SlatepackImportDialog`, which shows the amount (today parsed from slate JSON at slatepack_import_dialog.dart:116-126) and on accept calls `receiveSlatepack`; S2 appears in `SlatepackResponseDialog` (slatepack_import_dialog.dart:270, opened at receive_view.dart:142-151) for the user to return to the sender. I1 goes to the pay-invoice flow, S2 and I2 go to finalize, S3 and I3 report "already finalized". The string test `slatepackType.contains("S1")` (slatepack_import_dialog.dart:61) becomes a switch on `SlateState`.
+
+Send:
+
+1. `SlatepackMethodToggle` (lib/widgets/slatepack_method_toggle.dart:23-61, "Automatic" or "Slatepack", state in `pSelectedSlatepackMethod`) picks the method. For Grin, "Automatic" means Tor/HTTP and needs a `grin1` address or an `http(s)://` URL; `MimblewimbleTransactionMethod.relay` is documented as the relay server (lib/utilities/enums/mimblewimble_transaction_method.dart:6-7), so either the comment widens or an `http` value is added.
+2. Automatic: send view, `prepareSend`, `ConfirmTransactionView`, `confirmSend`, `sendHttp`. The confirm screen checks Tor before calling (9.4).
+3. Slatepack: today `createSlatepack` runs from `ConfirmTransactionView._handleSlatepackCreation` (confirm_transaction_view.dart:152-237, chosen when `otherData.transactionMethod == 'slatepack'` at 316-329) and also straight from the mobile send view, skipping the confirm screen (send_view.dart:684-751; desktop desktop_send.dart:180). For Grin both paths go through the confirm screen, because `initSend` locks outputs (#25) and the user should see the fee first. S1 appears in `SlatepackDialog` (lib/pages/send_view/sub_widgets/slatepack_dialog.dart). If the user typed a `grin1` address, S1 is encrypted to it and asks for a payment proof.
+4. Finalize: the "Finalize" nav item shown for `MimblewimbleWallet` (wallet_view.dart:1020-1036) opens `FinalizeView` (lib/pages/finalize_view/finalize_view.dart:117-141), which rejects anything but S2 after Dart-side analysis (129-132). For Grin it accepts S2 (`finalizeSlatepack`) and I2 (`finalizeInvoice`), and broadcasts.
+
+Invoice, Grin only (`supportsInvoices`):
+
+1. I1 on the invoicer: a "Request with invoice" action on the receive screen takes an amount and an optional payer `grin1` for encryption, calls `issueInvoice`, and shows I1 in `SlatepackDialog`.
+2. I2 on the payer: importing I1 (the receive screen import, or a "Pay invoice" entry on the send screen) shows the amount and an `estimateFee` result; on confirm, `processInvoice` locks inputs (#30) and shows I2.
+3. I3 on the invoicer: `FinalizeView` given I2 calls `finalizeInvoice(broadcast: true)` (#31).
+
+Showing a pending slatepack again. `transaction_v2_details_view.dart` gains a "Show Slatepack" action on Grin rows that have `pendingSlateState`. The text comes from `pendingSlatepackFor(txid)`, served from the last `getTxs` result (the sidecar's `armored_slatepack`, [PLAN] lines 236-238 and #23) or from `getTxs(refreshFromNode: false)` on a miss, and opens in `SlatepackDialog`. The existing cancel button for unconfirmed, uncancelled Mimblewimble transactions (transaction_v2_details_view.dart:1450-1530, calling `cancelPendingTransactionAndPost` at 1483-1508) maps to `grin_tx_cancel`. New actions: Repost (finalized, unconfirmed, kernel excess set) and Export payment proof (confirmed outgoing with `hasPaymentProof`). The slate id row (1391-1430) and the local note (908-960) work once their `coin is Epiccash || coin is Mimblewimblecoin` guards include Grin; the on-chain note row (866-900) does not apply.
+
+Copy, QR, share. `SlatepackDialog` already copies (slatepack_dialog.dart:38-48) and renders the whole slatepack as a QR code (153-160); share is a stub that says "Share functionality coming soon" (50-57). `share_plus` ^12.0.2 and `file_picker` ^10.3.3 are already dependencies ([SW-stg] scripts/app_config/templates/pubspec.template.yaml:187, 192), so share can send the text or a file and import can read a file. Armored slatepacks are long (not measured here; roughly 1-2 KB encrypted is an assumption), which makes a single QR code dense, so copy and share stay primary and the QR code secondary. Slatepacks carry no key material, but an unencrypted one shows the amount to anything that reads the clipboard; the dialog states whether the slatepack is encrypted (`wasEncrypted` is already in `SlatepackResult`, slatepack_models.dart:1-7).
+
+### 9.7 Lifecycle
+
+Stack facts ([SW-stg]). One `Wallet` per wallet id lives in `Wallets._wallets` (lib/services/wallets.dart:117). Opening a wallet calls `init()` on that same instance every time (lib/widgets/wallet_card.dart:163-175; also lib/pages/wallets_view/sub_widgets/favorite_card.dart:146-151, wallet_list_item.dart:121-126, lib/pages_desktop_specific/my_stack_view/coin_wallets_table.dart:104-109), inside `showLoading` without `onException`, which logs the error and drops it (lib/utilities/show_loading.dart:62-86). Leaving the wallet view calls `exit()` without awaiting it when sync is "current wallet only" or the wallet is not in the startup list (lib/pages/wallet_view/wallet_view.dart:294-312; desktop lib/pages_desktop_specific/my_stack_view/wallet_view/desktop_wallet_view.dart:111, 119). Base `exit()` only cancels timers (lib/wallets/wallet/wallet.dart:757-800). The app's lifecycle handler does nothing for wallets on `paused` or `detached` (lib/main.dart:600-663).
+
+GrinWallet:
+
+1. `init()`: (a) await `_closing` if an earlier `exit()` is still running; (b) if `_session` is open, refresh the cached address, run `super.init()` and return; (c) build the config (9.3); (d) `create` or `open`; (e) attach a `GrinLifecycleObserver` ([PLAN] lines 369-370); (f) subscribe to the two Tor events; (g) `getAddress(0)`; (h) `super.init()`.
+2. Background and foreground: the observer cancels a running scan on `paused` or `detached` (mobile only). The next periodic refresh (150 s, base 599-607) or the next `init()` restarts an unfinished restore scan. Whether `grin_wallet_scan` persists its progress per batch is open; if it does not, GrinWallet stores `scanned_height` from `scanProgress` in `WalletInfo.otherData` and resumes from there.
+3. `exit()`: (a) cancel the Tor subscriptions; (b) dispose the observer; (c) set `_closing = _session.close()` and await it; (d) drop the address and slatepack caches; (e) `super.exit()`. `close()` rejects new calls, cancels a scan, drains the queue, detaches the finalizer and calls `grin_wallet_close` ([PLAN] lines 349-356), so `OPEN_DIRS` is clear when it returns and an immediate reopen cannot see `WalletBusy` (line 356).
+4. A call that arrives after `exit()` began (a refresh timer that already fired, a late UI action) gets the client's `StateError`. GrinWallet reports "wallet is closed" and does not reopen on its own.
+
+What `WalletBusy` means to the app. The canonical wallet directory is held by a live `WalletSession` ([PLAN] 4.5 item 5, lines 266-268). Inside Stack a wallet id maps to one instance and `init()` awaits that instance's own close, so the remaining causes are a client dropped without `close()` whose orphaned operation is still draining ([PLAN] lines 286, 342-348) or another process using the same directory. Handling follows [PLAN] §5 item 5 (lines 357-359):
+
+- No retry loop. `init()` catches the Stack-side `GrinWalletBusyException`, leaves `_session` null, fires `NodeConnectionStatusChangedEvent(disconnected)` and `WalletSyncStatusChangedEvent(unableToSync)`, and every action then throws a readable "this wallet is still closing; reopen it in a moment" error, which the slatepack and send dialogs already display (for example receive_view.dart:114-123 on [SW-uni]).
+- Because `showLoading` drops `init()` errors on the open path, the open handlers should pass `onException` for `SlatepackInterface` wallets, or the wallet view should show a banner from the sync status.
+- Delete: `Wallets.deleteWallet` awaits `exit()` and then runs the coin branch (wallets.dart:117-119, 149-171). If `GrinWalletClient.delete` returns busy, the files stay, the error is shown and the user can retry by hand. Dart never removes the directory itself.
+
+Ordering guarantees GrinWallet relies on ([PLAN] #10, #11 at lines 285-286, and 342-356): close and the finalizer only cancel scans and unregister the session; LMDB closes in `Drop` when the last `Arc` goes; the directory lease is released after the backend closes; `close()` is idempotent and returns the same pending future on a second call.
+
+### 9.8 pubspec consumption
+
+Stack Wallet's precedent for two packages from one git repository is `coinlib_flutter` in `dependencies` with `coinlib` pinned in `dependency_overrides` at the same url and ref, under the comment "coinlib_flutter requires this" ([SW-stg] scripts/app_config/templates/pubspec.template.yaml:224-228 and 323-328). The optional ISAR source build overrides three packages from one repository the same way (349-365). `grin_flutter` depends on `grin` ([PLAN] line 112). An override replaces every constraint on `grin`, so it works whatever form `grin_flutter`'s pubspec uses for that dependency (not checked in this task). Template additions, written in the template's commented form; the `dependencies` block sits next to the EPIC and MWC blocks ([SW-stg] pubspec.template.yaml:53-65):
+
+```yaml
+dependencies:
+  # ...
+# %%ENABLE_GRIN%%
+#  grin_flutter:
+#    git:
+#      url: https://github.com/cypherstack/grin.git
+#      path: packages/grin_flutter
+#      ref: <commit>
+# %%END_ENABLE_GRIN%%
+
+dependency_overrides:
+  # ...
+  # grin_flutter requires this; keep url and ref identical to grin_flutter's
+# %%ENABLE_GRIN%%
+#  grin:
+#    git:
+#      url: https://github.com/cypherstack/grin.git
+#      path: packages/grin
+#      ref: <commit>
+# %%END_ENABLE_GRIN%%
+
+# added inside the existing block at pubspec.template.yaml:373-388
+# %%ENABLE_NATIVE_PREBUILTS%%
+#hooks:
+#  user_defines:
+#    tor_ffi_plugin:
+#      ...unchanged...
+#    grin:
+#      build: prebuilt   # or source, dev, cargo; unset lets the hook pick
+# %%END_ENABLE_NATIVE_PREBUILTS%%
+```
+
+Generated result with both markers enabled:
+
+```yaml
+dependencies:
+  grin_flutter:
+    git:
+      url: https://github.com/cypherstack/grin.git
+      path: packages/grin_flutter
+      ref: <commit>
+dependency_overrides:
+  grin:
+    git:
+      url: https://github.com/cypherstack/grin.git
+      path: packages/grin
+      ref: <commit>
+hooks:
+  user_defines:
+    grin:
+      build: prebuilt   # or source, dev, cargo; unset lets the hook pick
+```
+
+Notes:
+
+- The user-define key is `grin`, the package that owns `hook/build.dart` ([PLAN] §3.1, lines 127-130). The kit reads `input.userDefines[spec.userDefineKey]` with `userDefineKey` defaulting to `build` ([KIT] lib/src/hook.dart:60, 204; documented at :28-35) and accepts `prebuilt`, `source`, `dev`, `cargo` ([KIT] lib/src/build_mode.dart:22-30; README.md:8-24).
+- Pins come from `packages/grin/hook/prebuilt_hashes.json` at the git ref ([KIT] lib/src/prebuilt_hashes.dart:43; loaded at lib/src/hook.dart:184-190), so Stack's pubspec carries no manifest URL or sha256. The `tor_ffi_plugin`, `flutter_libepiccash` and `flutter_libmwc` entries in the same block still use the older `native_build` and `prebuilt_manifest_*` keys ([SW-stg] pubspec.template.yaml:374-387; generated at [SW-gen] pubspec.yaml:374-388). The two schemes coexist because each hook reads only its own package's keys.
+- With `build` unset the kit picks `prebuilt` when the hashes cover the target, else `dev` (Nix) or `cargo` ([KIT] README.md:26-37); a Windows host without a release falls back to `cargo` (README.md:68-74). The NATIVE_PREBUILTS block is enabled only by `scripts/build_app.sh -d` ([SW-stg] scripts/build_app.sh:38, 112), so local builds run with `build` unset. A developer who wants `cargo` adds it to the generated, gitignored `pubspec.yaml` by hand.
+- `test_utils` stays unset in Stack ([PLAN] line 390). Only the `cargo` mode of the `grin` hook reads it ([PLAN] D1, lines 458-463), so Stack never links `grin_test_*`.
+- The template already notes that entries for packages outside the dependency graph are ignored ([SW-stg] pubspec.template.yaml:369-370), which covers app configs that leave `GRIN` off.
+
+### 9.9 Breaking changes versus the legacy plugin APIs
+
+Legacy call sites are in [SW-uni] lib/wallets/wallet/impl/epiccash_wallet.dart (E) and lib/wallets/wallet/impl/mimblewimblecoin_wallet.dart (M), against [SW-uni] lib/wl_gen/interfaces/libepiccash_interface.dart (LE) and libmwc_interface.dart (LM). MW is [SW-uni] mimblewimble_wallet.dart.
+
+| # | Legacy | Where | GrinWalletClient |
+|---|---|---|---|
+| 1 | The wallet handle is a `DynamicObject` around a Dart `EpicWallet` (Epic) or a `String` marked "Process-scoped Rust pointer" (MWC); [PLAN] documents the raw pointer and plaintext key behind it (§2 row 1, line 33) | E:43; M:42-43; LE:14-34; LM:13-20; EPIC template:183-213 | `GrinWalletClient` (Finalizable) holding a u64 registry handle; no secret enters Dart ([PLAN] lines 33, 342-348) |
+| 2 | Config is a JSON string built per call, with `"chain": "mainnet"` hard-coded and `api_listen_*` fields | E:252-278 (268); M:422-442 (438) | Typed config with an explicit network; testnet works |
+| 3 | MWC persists the config JSON in secure storage and rewrites `wallet_dir` on iOS | M:579-591, 618-621, 1037-1041, 1077-1088 | Nothing persisted; directory recomputed per open |
+| 4 | Node API secret written to `<wallet_dir>/.api_secret` | M:411-420 | `api_secret` argument to open, `updateNetwork` and `testConnection` (#7, #15) |
+| 5 | Balances are four `double`s, converted with `Decimal.parse(double.toString())` | LE:92-104; LM:120-132; MW:247-259, 529-546 | `BigInt` nanogrin fields (#18) |
+| 6 | Amounts and fees as strings through `int.parse`; the fee goes through `Decimal.parse(...).toBigInt().toInt()` and silently becomes 0 on failure | E:947-949, 294-302; M:908-910, 456-464 | `BigInt` fields; the estimate returns `fee`, `net_amount`, `inputs_count` (#22) |
+| 7 | Errors as strings: `cancelPendingTransactionAndPost` returns `e.toString()`, slatepack results carry `error: e.toString()`, and the UI string-matches "insufficient funds" and "wallet not open" | MW:83-84; E:86-89, 151-154; M:122-125, 192-195; [SW-uni] confirm_transaction_view.dart:216-220 | Sealed `GrinException` hierarchy, with typed insufficient funds (required, available) and `GrinWalletBusyException` ([PLAN] line 36, #22, lines 357-359) |
+| 8 | A `BadEpicHttpAddressException` mapping that cannot fire: the template returns the `Future` from inside `try` without `await` | EPIC template:263-282 | Typed errors thrown from the awaited isolate call |
+| 9 | Transaction type is an opaque `Enum` tested through `txTypeIsReceived` and friends | LE:10-12; LM:9-11; E:935-937, 1003-1005 | Typed transaction type in `GrinTxLogEntry` |
+| 10 | Relay listeners: epicbox start, stop and health check per wallet; MWC's `stopMwcMqsListener()` takes no wallet, so it is process-global | LE:76-80; E:444-478, 1140-1144; LM:104-109; M:297-318, 555-576 | None in v1, and no callbacks from Rust ([PLAN] §1 item 4) |
+| 11 | Addresses depend on relay config (`getAddressInfo(epicboxConfig)`, mwcmqs address) | E:403-408; M:516-540 | Slatepack address from a derivation index (#16) |
+| 12 | Slates inspected in Dart (`part_sig` counting, `sta` fallback); Epic exchanges bare slate JSON | MW:159-243; E:119-174, 228-240; M:325-332 | `grin_slatepack_decode` returns state, amounts, id and addresses (#24) |
+| 13 | Slate-to-commit bookkeeping (`slatesToCommits`) in `WalletInfo.otherData` to recover commit id and addresses | MW:375-398; E:679-685, 931-945 | `kernel_excess` and `counterparty_address` in `GrinTxLogEntry` ([PLAN] 4.4) |
+| 14 | No close on `exit()` (Epic stops its listener, MWC only cancels a timer); Epic re-opens on every `init()`; close happens only before recover or delete | E:1140-1144, 597-611, 817-821, 860-864, 1184; MW:602-609; M:80-109 | Ordered, idempotent `close()`; `WalletBusy` instead of a silent double open ([PLAN] 4.5, 5.1) |
+| 15 | Rescan deletes and recovers the wallet and rewrites txids with a rescan counter (Epic), or wipes Isar data (MWC) | E:732-836; M:796-806 | Non-destructive `grin_wallet_scan` with cancel and progress (#19-#21) |
+| 16 | Dart-side chunked scan loop with a persisted `lastScannedBlock`; the plugin polls worker progress | MW:326-373; [PLAN] §2 row 8 (line 40) | Lock-free `grin_wallet_scan_progress` during the scan (#20) |
+| 17 | Process-global chain type in Rust | [PLAN] §2 row 2 (line 34); config `chain` at E:268, M:438 | Per-thread chain type and `network: u8` on stateless calls ([PLAN] 4.2) |
+| 18 | No SOCKS proxy; Tor handled only by a mismatch exception; `torSupport` false | E:1146-1168; [SW-stg] crypto_currency.dart:64 | Proxy at open and through `updateNetwork`; `torSupport => true` |
+| 19 | Synchronous address validation in the coin class | [SW-uni] epiccash.dart:68; mimblewimblecoin.dart:56 | `grin_address_validate(address, network)` (#6) behind a synchronous wrapper (9.2) |
+| 20 | "Send everything" computed by subtracting the fee estimate from the amount | E:704-718; M:750-769 | `amount_includes_fee` (#22) |
+
+Kept as is on purpose: the generated per-wallet password in secure storage (E:543-558), the mnemonic in `MnemonicInterface`, `TransactionV2` with synthetic inputs and outputs, and the slatepack result models.
+
+### 9.10 Assumptions and open items
+
+1. Dart method names on `GrinWalletClient` beyond those [PLAN] names (9.3).
+2. A synchronous `grin_address_validate` wrapper in `package:grin` (9.2).
+3. `GrinTxLogEntry` fields beyond [PLAN] 4.4, plus a new confirmed-height field (9.5).
+4. Testnet node port 13413 and the absence of participant messages in slate v4 (the other Grin constants in 9.2 are now cited from the fork).
+5. A Stack-run default node, and the CoinGecko id `grin`.
+6. (resolved: the proxy string is `host:port`, see 9.4.)
+7. A failure before `tx_lock_outputs` locks nothing; `refresh_from_node: true` runs grin-wallet's incremental update, so no Dart scan loop is needed for routine sync.
+8. Whether `grin_wallet_scan` persists progress per batch (9.7).
+9. The contents of `GrinWalletEvent` ([PLAN] lines 103, 323 name it without fields).
+10. Armored slatepack sizes for QR codes.
+11. How `grin_flutter`'s pubspec declares `grin` (the override covers any form).
+
+### Sources read
+
+- [PLAN] /home/user/src/grin/docs/architecture.md at commit dfb7f04, whole file; [GW] consensus.rs, genesis.rs, libwallet api_impl/types.rs, config/src/types.rs for the constants in 9.2; /home/user/src/grin/docs/ffi-json.md for the proxy format.
+- [KIT] README.md; lib/src/hook.dart (1-200, user-define reads); lib/src/build_mode.dart; lib/src/prebuilt_hashes.dart and lib/src/build_settings.dart (default paths).
+- [SW-uni] lib/wallets/wallet/intermediate/mimblewimble_wallet.dart; lib/wallets/wallet/supporting/mimblewimble_wallet_info_extension.dart; lib/wallets/wallet/impl/epiccash_wallet.dart; lib/wallets/wallet/impl/mimblewimblecoin_wallet.dart; lib/wallets/crypto_currency/coins/epiccash.dart; lib/wallets/crypto_currency/coins/mimblewimblecoin.dart; lib/wallets/wallet/wallet.dart (diff against staging); lib/wallets/isar/models/wallet_info.dart (WalletInfoKeys); lib/wl_gen/interfaces/libepiccash_interface.dart; lib/wl_gen/interfaces/libmwc_interface.dart; lib/wl_gen/interfaces/mimblewimble_transaction.dart; tool/wl_templates/EPIC_libepiccash_interface_impl.template.dart; tool/wl_templates/MWC_libmwc_interface_impl.template.dart; lib/models/slatepack_models.dart; lib/utilities/slatepack_terms.dart; lib/utilities/enums/mimblewimble_transaction_method.dart; lib/widgets/slatepack_method_toggle.dart; lib/pages/receive_view/receive_view.dart; lib/pages/receive_view/sub_widgets/slatepack_entry_dialog.dart; lib/pages/receive_view/sub_widgets/slatepack_import_dialog.dart; lib/pages/send_view/send_view.dart; lib/pages/send_view/confirm_transaction_view.dart; lib/pages/send_view/sub_widgets/slatepack_dialog.dart; lib/pages/finalize_view/finalize_view.dart; lib/pages/epic_finalize_view/epic_finalize_view.dart; lib/pages/wallet_view/wallet_view.dart; lib/pages/wallet_view/transaction_views/tx_v2/transaction_v2_details_view.dart; lib/pages/settings_views/wallet_settings_view/wallet_settings_view.dart; lib/pages/settings_views/wallet_settings_view/wallet_network_settings_view/wallet_network_settings_view.dart; lib/pages/add_wallet_views/new_wallet_recovery_phrase_warning_view/new_wallet_recovery_phrase_warning_view.dart; lib/pages/add_wallet_views/restore_wallet_view/restore_wallet_view.dart; lib/services/wallets.dart; lib/pages_desktop_specific/my_stack_view/wallet_view/sub_widgets/desktop_receive.dart and desktop_send.dart (grep); lib/pages/settings_views/wallet_settings_view/epicbox_settings/manage_epicbox_view.dart (grep); lib/pages/wallet_view/transaction_views/all_transactions_view.dart (grep); scripts/app_config/templates/pubspec.template.yaml; `git diff --name-status 9517439 refactor/epic-mwc-unify`; `git grep` over lib/ for Mimblewimble predicates and slatepack files.
+- [SW-stg] lib/wallets/wallet/wallet.dart; lib/wallets/wallet/intermediate/bip39_wallet.dart; lib/wallets/wallet/intermediate/external_wallet.dart; lib/wallets/wallet/intermediate/cryptonote_wallet.dart; lib/wallets/wallet/intermediate/lib_monero_wallet.dart; lib/wallets/wallet/impl/bitcoin_frost_wallet.dart; lib/wallets/wallet/impl/stellar_wallet.dart; lib/wallets/wallet/impl/epiccash_wallet.dart and mimblewimblecoin_wallet.dart (exit, diff against 9517439); lib/wallets/crypto_currency/crypto_currency.dart; lib/wallets/crypto_currency/coins/epiccash.dart, mimblewimblecoin.dart, bitcoin.dart, bitcoin_frost.dart; lib/wallets/crypto_currency/intermediate/bip39_currency.dart and frost_currency.dart; lib/wallets/isar/models/wallet_info.dart; lib/models/isar/models/blockchain_data/v2/transaction_v2.dart; lib/models/isar/models/blockchain_data/address.dart; lib/models/node_model.dart; lib/services/tor_service.dart; lib/services/event_bus/events/global/tor_connection_status_changed_event.dart; lib/services/event_bus/events/global/tor_status_changed_event.dart; tool/wl_templates/TOR_tor_service_impl.template.dart; tool/wl_templates/FROST_frost_interface_impl.template.dart; lib/wl_gen/interfaces/frost_interface.dart; lib/electrumx_rpc/electrumx_client.dart; lib/utilities/prefs.dart; lib/utilities/tor_plain_net_option_enum.dart; lib/utilities/dynamic_object.dart; lib/utilities/stack_file_system.dart; lib/utilities/show_loading.dart; lib/utilities/test_node_connection.dart; lib/services/price.dart; lib/services/wallets.dart; lib/widgets/wallet_card.dart; lib/pages/wallet_view/wallet_view.dart; lib/pages/wallets_view/sub_widgets/wallet_list_item.dart; lib/pages/wallets_view/sub_widgets/favorite_card.dart, lib/pages_desktop_specific/my_stack_view/coin_wallets_table.dart, lib/pages_desktop_specific/my_stack_view/wallet_view/desktop_wallet_view.dart and lib/themes/coin_icon_provider.dart (grep); lib/main.dart; lib/app_config.dart; scripts/app_config/templates/pubspec.template.yaml; scripts/app_config/configure_stack_wallet.sh; tool/process_pubspec_deps.dart; tool/gen_interfaces.dart; scripts/build_app.sh (grep); `git grep` for exit callers, `cancelSend`, Tor listeners, killswitch, `torSupport`.
+- [SW-main] lib/wallets/wallet/impl/epiccash_wallet.dart; lib/wallets/wallet/impl/mimblewimblecoin_wallet.dart; lib/models/isar/models/blockchain_data/v2/transaction_v2.dart (diff against unify); lib/wallets/wallet/wallet.dart (`cancelSend` check); scripts/app_config/templates/pubspec.template.yaml; `git ls-tree` for slatepack files and lib/wl_gen.
+- [SW-gen] pubspec.yaml lines 1-80 and 360-400 (generated working-tree file, read only).
+- Ref metadata: `git rev-parse`, `git merge-base`, `git rev-list --count`, `git log` for cypherstack/main, staging, cypherstack/staging, refactor/epic-mwc-unify; `git merge-tree --write-tree` of unify into staging and into cypherstack/staging with a scratch object directory.
+
+---
+
+## 10. Epic/MWC migration foundation
+
+This section decides how the grin monorepo becomes a foundation that Epic Cash and MWC can move onto later, with each coin isolated. It takes the settled decisions as given: one monorepo per coin with a Rust FFI crate, a pure Dart package that owns the single build hook, and a Flutter companion package ([PLAN] lines 7-19, 46-123); the C ABI conventions of `GrinFfiResult`, `ffi_guard!`, u64 handles, per-thread chain type and drop-based close with `OPEN_DIRS`/`DirLease` ([PLAN] lines 199-268, 270-312); and the native-build-kit hook at 85f7eb09 with the `build` user-define and a committed `hook/prebuilt_hashes.json` ([PLAN] line 18).
+
+The plan records the kit contract at [PLAN] line 18, section 3.1 (lines 135-142) and decision D1 (lines 458-463). Only the tree comment at [PLAN] line 86 still names the pre-kit keys `native_build`/`prebuilt_*`, which the kit ports reject ([EP-kit] hook/build.dart:132-147). Every [PLAN] line number below is against commit dfb7f04 of that file.
+
+### Citation keys
+
+Every `path:line` below is prefixed with one of these keys. Git refs were read with `git show`/`git diff`/`git log` only; no worktree was changed.
+
+| Key | Checkout | Ref |
+|---|---|---|
+| [PLAN] | /home/user/src/grin/docs/architecture.md | commit dfb7f04 on main (the 492-line version this section was written against; later commits add sections 9 to 11 above section 12, so numbers above 450 shift) |
+| [EP] | /home/user/src/stack_wallet/wt/flutter_libepiccash (also present in flutter_libepiccash-claude-main) | d5cfb763fa62928a6e6265e1f4412738772151eb, the Stack Wallet pin, tag native-0.3.0-1 |
+| [EP-kit] | /home/user/src/stack_wallet/wt/flutter_libepiccash working tree | feat/native-build-kit at 67df07760ba10005c87bffcf34fa55f3319c8c1f (clean) |
+| [EP-main] | /home/user/src/grin/.research/flutter_libepiccash | origin/main at 3fb216a49d07a90dcacf97ba02d36ccd7e46a831 |
+| [MW] | /home/user/src/stack_wallet/wt/flutter_libmwc | d8c5d5488cb00e21d0dc04ad306a65e2d54c4d3c, the Stack Wallet pin, tag native-0.1.7 |
+| [MW-kit] | /home/user/src/stack_wallet/wt/flutter_libmwc working tree | feat/native-build-kit at 0fe2b1c4e50fc327b80bcba327a56e813d494847 (clean) |
+| [MW-main] | /home/user/src/grin/.research/flutter_libmwc | origin/main at 8ce99d6e73d399189f7750a316d1631802b2593a |
+| [EW] | ~/.cargo/git/checkouts/epic-wallet-8d7c6395dfbec4ef/56eabdd (cypherstack/epic-wallet) | 56eabddd34acba6ef3f4f360909242ed96f4e7ae, the rev locked in [EP] rust/Cargo.lock:1488-1490 |
+| [EW-fix] | /home/user/src/stack_wallet/epic_wallet/epic-wallet | fix-listener-cancellation at 0cc9b2c7ca1e83c20881bcf325557450b30696b1 (equals local ref cypherstack/fix-listener-cancellation) |
+| [EN] | ~/.cargo/git/checkouts/epic-283b1aeb3816429f/c592407 (cypherstack/epic, branch fix/randomx-v0.2.0-api) | c592407af7000c0105cf83a0bc7ec7849b9356f4, locked in [EP] rust/Cargo.lock:1269-1271 |
+| [MWW] | ~/.cargo/git/checkouts/mwc-wallet-75eeacad364e57a8/651603d (cypherstack/mwc-wallet, branch silent) | 651603d4647fa46c9bf22f067afa0a0150e0048f, locked in [MW] rust/Cargo.lock:3888-3890 |
+| [MN] | ~/.cargo/git/checkouts/mwc-node-3b54ed9982831964/0dae1d5 (cypherstack/mwc-node tag 5.3.7) | 0dae1d5a4a1a8665bad432f774ca0f0f5277ec7e, locked in [MW] rust/Cargo.lock:3653-3655 |
+| [ESECP] | ~/.cargo/git/checkouts/rust-secp256k1-zkp-a579ae94bd3f266d/e5ee752 (EpicCash/rust-secp256k1-zkp) | e5ee7524f144b9d5fbc6c8a11c0f4967d474ec40 |
+| [MSECP] | ~/.cargo/git/checkouts/rust-secp256k1-zkp-d7bf542edf5c80dc/d922c6f (mwcproject/rust-secp256k1-zkp tag 0.7.16) | d922c6fd88ac9af865b216ca7e7f2a97fe8d421d |
+| [GSECP] | ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/grin_secp256k1zkp-0.8.0 | crates.io 0.8.0 |
+| [KIT] | /home/user/src/stack_wallet/wt/native-build-kit | feat/native-build-kit at 85f7eb097604e5b99db3f90bccbcada3336836b8 |
+| [TOR], [FROST] | /home/user/src/stack_wallet/wt/tor, /home/user/src/stack_wallet/wt/frostdart-kit | feat/native-build-kit at d8c0fd61b0d838dea9212a1fdb591d1565e1b3ba and 580f1ed595f69fb36e7836dbd07636c45ce57776 |
+| [SW] | /home/user/src/stack_wallet/stack_wallet | security/rbf-history-authentication at b778525f0007268093e062be1a9075fbb3ef22f3 |
+| [BUILT] | /home/user/src/stack_wallet/stack_wallet-pr1479-eth/build/native_assets/linux | build output of a worktree (bdee51e811be2f9b6afe52f2ec5aa8723e2c5055) whose pubspec.yaml:54-64 pins the same d5cfb763 and d8c5d548 |
+
+### 10.1 Per-coin layout vs a shared core
+
+#### 10.1.1 Which grin pieces are coin-neutral
+
+Against the file list in [PLAN] lines 58-122:
+
+| Plan file | Coin-neutral part | Coin-specific part | Reason |
+|---|---|---|---|
+| crates/grin-ffi/src/error.rs ([PLAN] line 65) | `ffi_guard!` (catch_unwind, panic payload to message); the `{code, data, error}` result shape; CString ownership and free helpers; JSON error-body builder | `GrinErrorCode` variants and discriminants; the C type name `GrinFfiResult` and the exported `grin_ffi_result_free`/`grin_string_free` | cbindgen writes the type name into each coin's header and ffigen binds it per package, so each coin needs its own prefixed type and free symbols |
+| handle.rs ([PLAN] lines 66, 249-268) | u64 registry (AtomicU64 from 1, `Mutex<HashMap<u64, Arc<S>>>`, clone-out then unlock, `PoisonError::into_inner`); `OPEN_DIRS` + `DirLease` with canonicalization | `WalletSession` contents; the `set_local_chain_type` call in `get_session` ([PLAN] line 214) | chain-type storage differs per fork (10.1.2) |
+| logging.rs (line 67) | a `Once`-guarded init over the `log` crate | the backend | [PLAN] does not name the backend; treated as coin-side until written (assumption) |
+| config.rs, lifecycle.rs, address.rs, balance.rs, slatepack.rs, transaction.rs, proof.rs, test_support.rs (lines 68-77) | none | all | each wraps its own wallet family's API |
+| scan.rs (line 72) | the `ScanProgressState` atomics and cancel flag | the scanner | |
+| sidecar.rs (line 73) | atomic tmp + `sync_all` + rename JSON file with best-effort writes ([PLAN] lines 244-246) | `TxSidecarEntry` schema and path | |
+| build.rs, cbindgen.toml, tests/header_test.rs | the header-test template | prefixes, header names | |
+| packages/grin/lib/src/ffi/memory.dart (line 92) | zeroing `SecretArena`, `usingSecretArena`, the unwrap algorithm | the ffigen-generated `GrinFfiResult` struct and the `grin_ffi_result_free` binding | ffigen emits the struct type into each package's bindings |
+| errors/grin_exception.dart (line 94) | a non-sealed base class (code, message, details) | the sealed hierarchy | Dart only allows subtypes of a sealed class in the same library, so a shared sealed root cannot be extended by coin packages |
+| models/*.dart (lines 95-103) | none | all | units differ: nanogrin 1e9 ([PLAN] line 38), `EPIC_BASE = 100_000_000` ([EN] core/src/consensus.rs:31), `MWC_BASE = 1_000_000_000` ([MN] core/src/consensus.rs:30) |
+| wallet/grin_wallet_client.dart (line 105) | the serialized op queue and the ordered close algorithm ([PLAN] lines 349-356); the handle-as-finalizer-token technique ([PLAN] line 343) | the method surface and bindings | |
+| bindings.g.dart, ffigen.yaml, hook/build.dart | none | all | asset id rule (below) |
+| grin_flutter default_paths.dart, lifecycle_observer.dart | generic logic | the client type | small enough to copy (assumption: sizes not yet known) |
+| tool/ci.dart | the runner | crate names in the `cargo tree -d` gate ([PLAN] line 197), symbol prefix in the `nm` gate | |
+
+The neutral set is roughly four Rust files' worth of mechanism (guard, result plumbing, registry, dir lease, plus two small helpers) and three small Dart helpers. Everything that touches a wallet crate is coin-specific.
+
+#### 10.1.2 Facts that constrain the choice
+
+1. The three families diverge below the API level. Chain type: [MN] core/src/global.rs:199-232 has grin's thread-local `CHAIN_TYPE` with `set_local_chain_type`, so MWC can follow [PLAN] 4.2 as written. [EN] core/src/global.rs:159-161 has only a process-global `RwLock<ChainTypes>` defaulting to Mainnet, set by `set_mining_mode` (:340-343). In [EW] only the CLI binary calls it outside test helpers ([EW] src/bin/epic-wallet.rs:163, src/cmd/wallet_args.rs:1292), and the plugin never does (grep of [EP] rust/src), so every Epic wallet in Stack Wallet runs on the Mainnet global and the parsed chain only reaches the config struct ([EP] rust/src/config.rs:35-47). Storage: Epic's `LMDBBackend` opens SQLite ([EW] impls/src/backends/lmdb.rs:128, impls/src/backends/db.rs:24,38-40). So the registry's "enter" hook and the dir lease's justification are per coin, while their mechanism is shared.
+2. Crate names. The node crates differ (`grin_core`, `epic_core`, `mwc_core`), so they could coexist in one graph. The secp crates are the trap:
+
+   | Coin | Package | Source | `[lib] name` | C archive and symbols |
+   |---|---|---|---|---|
+   | Epic | `grin_secp256k1zkp` 0.8.0 | git EpicCash/rust-secp256k1-zkp ([EP] rust/Cargo.lock:1945-1947) | `secp256k1zkp` ([ESECP] Cargo.toml:20-22) | `libsecp256k1.a` ([ESECP] build.rs:50), unprefixed `secp256k1_*` ([ESECP] src/ffi.rs:157) |
+   | MWC | `mwc_secp256k1zkp` 0.7.16 | git mwcproject tag 0.7.16 ([MW] rust/Cargo.lock:3757-3759) | `secp256k1zkp` ([MSECP] Cargo.toml:20-22) | same ([MSECP] build.rs:50, src/ffi.rs:154) |
+   | Grin | `grin_secp256k1zkp` 0.8.0 | crates.io (/home/user/src/grin/Cargo.lock:1428-1430, `source = "registry+https://github.com/rust-lang/crates.io-index"`) | `secp256k1zkp` ([GSECP] Cargo.toml:48) | same ([GSECP] build.rs:49, src/ffi.rs:145) |
+
+   Epic's fork keeps the package name `grin_secp256k1zkp`. None of the three declares `links`. In one Cargo graph, Grin and Epic would resolve two packages with the same name from different sources, both compiling unprefixed `secp256k1_*` C symbols into one binary. That is a duplicate-symbol link failure at best and silent first-definition-wins at worst. The epic monorepo's duplicate gate therefore has to check `epic_*` and `grin_secp256k1zkp` (expecting exactly the EpicCash source), the MWC one `mwc_*` and `mwc_secp256k1zkp`.
+3. Linking. Each coin ships its own cdylib, and the kit only ships dynamic libraries: `DynamicLoadingBundled()` for every target ([KIT] dart/native_prebuilt_hook/lib/src/hook.dart:192-197), refusal of static link requests in prebuilt/source/dev modes (hook.dart:308-320, dart/native_prebuilt_hook/README.md:58-66), and dynamic-only outputs in the plugin flakes ([MW-kit] flake.nix:38-46; [KIT] README.md:378-381). The pinned Epic hook already bundled a dylib on iOS ([EP] hook/build.dart:126-129, 283-296). The shipped Linux libraries keep their C internals local: `nm -D` on [BUILT] libepic_cash_wallet.so and libmwc_wallet.so shows 0 exported `secp256k1_*`, `mdb_*` or `sqlite3_*` symbols, while the full symbol tables contain 140/143 local `secp256k1_*` and 270 local `sqlite3_*`. Collisions between C internals only matter if someone static-links two coins (iOS static frameworks, or the `staticlib` crate type in [PLAN] line 60). Rust `#[no_mangle]` symbols from dependencies are exported, though: libmwc_wallet.so exports `rustsecp256k1_v0_2_0_*` and `rustsecp256k1_v0_4_1_*`, and libepic_cash_wallet.so exports unprefixed `wallet_init`, `get_mnemonic`, `listener_spawn`, `listener_poll` and friends (from `export_task!`, [EP] rust/src/listener.rs:65-74). Rule for any shared code: it exports no `#[no_mangle]` symbol; each coin writes its own prefixed exports as thin shims (10.1.5).
+4. Native asset ids. A hook can only emit a `CodeAsset` for its own package ([KIT] hook.dart:294-301 uses `package: input.packageName`; [PLAN] lines 127-130). [BUILT] native_assets.json maps `package:flutter_libepiccash/src/epic_cash_wallet_bindings.g.dart` and `package:flutter_libmwc/mwc.dart` to separate libraries. Every kit plugin's hook is one spec naming its own package ([TOR] hook/build.dart:8-28, [FROST] hook/build.dart:14-27, [MW-kit] hook/build.dart:10-29). A shared Dart package cannot hold `@Native` bindings for any coin and must stay pure Dart.
+5. Resolution scope differs by language. Rust: each coin repo builds its own cdylib against its own committed Cargo.lock (`lockFile`, `--locked`, [KIT] README.md:88), so two coins can sit on different revs of a shared crate in the same app. Dart: pub resolves one version of each package for the whole app. If `grin`, `epic` and `mwc` each depended on a shared Dart package by git ref, Stack Wallet's pubspec would have to agree on one ref for all three, and a breaking change would force lockstep releases of every coin package before Stack Wallet could bump any of them.
+6. Publishing. Everything is `publish_to: none` ([PLAN] line 9; [EP-kit] pubspec.yaml:7; [MW-kit] pubspec.yaml:5). Git dependencies work now; a shared Dart package would join native_prebuilt_hook on the list of things to publish before any coin package goes to pub.dev ([PLAN] line 17).
+
+#### 10.1.3 Options
+
+| Criterion | (A) copy per coin | (B) shared Rust crate + shared Dart package |
+|---|---|---|
+| Isolation at runtime | full | full (separate dylibs, statics per dylib, no exported shared symbols) |
+| Release coupling | none | Rust: none (per-repo Cargo.lock). Dart: one ref per app (fact 5) |
+| Fixes to subtle code (panic guard, close/drop ordering, canonicalized lease, poison handling) | applied three times | applied once |
+| Generic API quality | n/a | designed against one consumer if extracted now; Epic's global chain type and MWC's listener singleton would reshape it |
+| Cargo unification and duplicate crates | none | none, provided the core depends on nothing but std and serde_json; one coin dependency would reintroduce fact 2 |
+| Dart sharing value | n/a | small: sealed roots cannot be shared, the result struct is per package, models are per coin |
+| Repos to maintain | three | four |
+
+#### 10.1.4 Recommendation
+
+Defer extraction. v1 is grin only in layout (A), with the coin-neutral Rust and Dart code kept in marked directories under rules that make extraction mechanical. At the start of the Epic port (the moment a second consumer exists), extract the Rust core into its own git crate, and keep the Dart helpers as per-coin copies.
+
+Justification: the Rust core holds the code where bugs are expensive and identical across coins, it can be generic over a session trait without touching any wallet crate, and Cargo lets each coin pin its own rev, so sharing it costs no runtime or release coupling. The Dart helpers are a few small files, Dart's sealed-class rule and ffigen's per-package struct types shrink what can be shared, and pub's single-version resolution would tie the coins' release cadence together inside Stack Wallet, which is the coupling the "each coin isolated" requirement exists to avoid. Extracting now would freeze a generic API designed against one consumer; Epic needs a network-conflict guard in the registry hook (fact 1) and both Epic and MWC need listener scaffolding (10.3), so the second consumer should shape it.
+
+#### 10.1.5 What v1 does
+
+The grin tree in [PLAN] section 3 gains two marked directories. Names are proposals.
+
+```text
+crates/grin-ffi/src/ffi_core/      # coin-neutral, extracted later as the shared Rust crate
+├── mod.rs
+├── result.rs        # trait FfiResultRepr (from_parts); ok/err builders; free_result(), free_string() as plain Rust fns
+├── guard.rs         # ffi_guard!; trait FfiError { code, message, details, panic(), busy(dir), invalid_handle(h) }
+├── registry.rs      # Registry<S: Session>; Session::enter() (grin: set_local_chain_type), Session::request_cancel()
+├── dir_lease.rs     # OPEN_DIRS + DirLease; acquire() returns E::busy(dir)
+├── progress.rs      # ProgressState atomics + cancel flag (from scan.rs)
+└── atomic_json.rs   # AtomicJsonFile<T>: tmp, sync_all, rename, best-effort (from sidecar.rs)
+
+packages/grin/lib/src/ffi/core/    # coin-neutral, stays a per-coin copy
+├── secret_arena.dart     # zeroing allocator, usingSecretArena
+├── unwrap.dart           # unwrapResultParts(code, data, error, free: () => ..., mapError: ...)
+├── op_queue.dart         # serialized op queue + drain used by close()
+└── ffi_exception_base.dart  # abstract base class extended by the sealed GrinException
+```
+
+Anything cbindgen must see stays written out in the coin crate: the three-field `#[repr(C)] pub struct GrinFfiResult` and every `extern "C"` function, including `grin_ffi_result_free`/`grin_string_free` as two-line shims over `free_result()`/`free_string()`. cbindgen parses source without expanding `macro_rules!` unless `[parse.expand]` is configured, which needs a nightly rustc, so macro-generated ABI items would vanish from grin_ffi.h. `ffi_guard!` is fine because it only appears inside function bodies.
+
+The coin side keeps the plan's files: error.rs holds `GrinErrorCode`, `impl FfiError`, the struct and its `impl FfiResultRepr`; handle.rs holds `WalletSession`, `impl Session`, and `static SESSIONS: Registry<WalletSession>`; sidecar.rs holds `TxSidecarEntry` on `AtomicJsonFile`; memory.dart wraps `unwrapResultParts` around the generated struct and `bindings.grin_ffi_result_free`. The 35-function ABI and every name in it are unchanged.
+
+Rules, enforced by a `tool/ci.dart` check:
+
+- `src/ffi_core/` contains no `grin_`, no `crate::` path (only `super::`/`self::`), no `#[no_mangle]`, no `extern "C"`, no `#[repr(C)]`. Macros refer to `$crate::ffi_core::` so extraction is a single path rewrite.
+- Unit tests for `ffi_core` sit in the same files under `#[cfg(test)]`, so they move with it. The `WalletBusy` end-to-end tests ([PLAN] lines 409-412) stay in grin.
+- `ffi_core` uses only std and serde_json. It must never gain a wallet or node crate dependency (fact 2).
+- `lib/src/ffi/core/` imports only `dart:` libraries, `package:ffi`, and its own siblings; never `bindings.g.dart`.
+
+#### 10.1.6 Extraction steps (first task of the Epic port)
+
+1. Split history: `git filter-repo --path crates/grin-ffi/src/ffi_core` into a new repository holding one crate (name placeholder `mw-ffi-core`, `publish = false`).
+2. In grin: delete `src/ffi_core/`, add the crate as a git dependency pinned by `rev`, rewrite `crate::ffi_core::` and `$crate::ffi_core::` to the crate name, and run the unchanged tests, the `cargo tree -d` gate and the `nm` gate. The export list must not change, since the core exports nothing.
+3. epic-ffi and mwc-ffi depend on the same crate at whatever rev each needs.
+4. Copy `packages/grin/lib/src/ffi/core/` into each coin's Dart package. Revisit a shared Dart package only if those files stop changing.
+
+### 10.2 Legacy comparison
+
+#### 10.2.1 Refs compared
+
+| | flutter_libepiccash | flutter_libmwc |
+|---|---|---|
+| Stack Wallet pin ([SW] pubspec.yaml:53-65) | d5cfb763 (2026-10-19, tag native-0.3.0-1; prebuilt manifest native-0.3.0-1 at [SW] pubspec.yaml:380-383) | d8c5d548 (2026-10-19, tag native-0.1.7; manifest at [SW] pubspec.yaml:384-387) |
+| Local origin/main and origin/HEAD in the wt repos | equal to the pin | equal to the pin |
+| wt feat/native-build-kit tip | 67df0776 (2026-10-21) | 0fe2b1c4 (2026-10-21) |
+| cypherstack refs present locally | gitea/feat/native-build-kit = manymath/feat/native-build-kit = 67df0776 (gitea is git.cypherstack.com) | gitea/feat/native-build-kit = manymath/feat/native-build-kit = 0fe2b1c4 |
+| GitHub default branch (.research clone, 2026-11-01) | main = 3fb216a4 (2026-10-30, tag native-ccc49989ad00) | main = 8ce99d6e (2026-10-30, tag native-41ce961e0a4b) |
+| GitHub tags | v0.1.0-v0.1.6, native-0.0.1, native-0.2.0, native-0.3.0, native-0.3.0-1, native-ccc49989ad00 | flutter_libepiccash, v0.1.0-v0.1.6, native-0.1.0, native-0.1.0-1, native-0.1.0-2, native-0.1.7, native-41ce961e0a4b |
+| `rev-list --left-right --count pin...wt` (wt repo) | 2 / 3, merge-base 920ac94c (native-0.3.0) | 3 / 3, merge-base eec0f5ae |
+| `rev-list --left-right --count pin...origin/main` (clone) | 0 / 12 | 0 / 10 |
+| wt tip vs GitHub main (different repos; counted from the shared merge-base) | wt 3 ahead of 920ac94c, main 14 ahead | wt 3 ahead of eec0f5ae, main 13 ahead |
+
+How they diverge:
+
+- Pin-only commits, absent from the wt branches: the Rust 1.99.1 pin "so Apple dylibs load on iOS 27 and macOS 27" (a940489 and merge d5cfb76 for Epic; 4959e9a, 987805e and the CI fix d8c5d54 for MWC). The wt branches pin 1.89.0 ([EP-kit] rust/rust-toolchain.toml:2) and 1.90.0 ([MW-kit] rust/rust-toolchain.toml:2).
+- wt-only commits move the build onto native-build-kit 85f7eb09. They change no Rust source, Dart `lib/`, or Cargo.lock: `git diff --stat pin feat/native-build-kit -- rust/src lib rust/Cargo.lock` is empty for both. The Cargo.toml changes are a target-scoped vendored OpenSSL and an explicit release profile. Neither branch has a native release yet: both `hook/prebuilt_hashes.json` files have `"nativeVersion": null` and no files.
+- GitHub main went a third way. Both repos merged a "dnix" build on 2026-10-30: pubspec depends on `cypherstack/dnix` at e91763ef, and the hook is three lines ([EP-main] hook/build.dart:1-3). Rust changes are limited to Cargo.toml target gating of OpenSSL (Linux and Android only) and, for Epic, 8 lines of Cargo.lock. The pin, the kit port and the dnix port therefore carry the same Rust and Dart code with three different build systems. The migration starts from that common code; reconciling kit vs dnix is outside this section.
+- Consumer side: Stack Wallet still passes the pre-kit user-defines `native_build`, `prebuilt_manifest_url` and `prebuilt_manifest_sha256` for both plugins ([SW] pubspec.yaml:375-387). The kit ports reject those keys ([EP-kit] hook/build.dart:132-147), so moving Stack Wallet to the kit branches also means switching it to `build:`.
+- Non-canonical evidence worktrees (flutter_libepiccash-claude at ceb97388, -claude-main at 51e00f62, flutter_libmwc-codex at 8acf950b, -claude and -kimi at 360a31fa, -antigravity at 1da3c7fc, the -repro checkouts on feat/stagex) have origin or manymath remotes only; none has cypherstack refs.
+
+#### 10.2.2 Current architecture: Epic ([EP])
+
+- Rust crate: `epic-cash-wallet`, lib `epic_cash_wallet`, crate-type staticlib + cdylib ([EP] rust/Cargo.toml:2, 63-65). Files: lib.rs (1318 lines), ffi.rs (1239), wallet.rs (858), mnemonic.rs (212), listener.rs (74), config.rs (67). Depends on epic node crates from EpicCash master patched to cypherstack's fix/randomx-v0.2.0-api branch, and on cypherstack/epic-wallet with no rev in Cargo.toml (rust/Cargo.toml:32-41, 73-76), so the lock is the only pin (56eabddd). Also tokio 0.2, three websocket crates, `ffi_helpers` and an unconditional vendored OpenSSL (rust/Cargo.toml:24, 45-50).
+- FFI style: every export returns `*const c_char` text with errors as `"Error ..."` strings; header [EP] rust/include/epic_cash_wallet.h:9-76. Names are unprefixed (`wallet_init`, `get_mnemonic`, `_listener_cancel`). The wallet handle is a JSON tuple of a `Box::into_raw` pointer and the plaintext keychain mask ([EP] rust/src/ffi.rs:196-198). ffi.rs has no `catch_unwind` (grep count 0), so with the pinned 1.99.1 toolchain a panic aborts the process, which the crate's own tests acknowledge ([EP] rust/src/lib.rs:1113-1114). A free function exists ([EP] rust/src/ffi.rs:52-53).
+- Dart: ffigen `ffi-native` bindings ([EP] ffigen.yaml:36) that rename `_listener_*` ([EP] ffigen.yaml:33-35). Two parallel APIs: static `LibEpiccash` with a per-wallet `ListenerManager` map ([EP] lib/lib.dart:24-47, 679-711), and an `EpicWallet` class with one long-lived worker isolate per wallet ([EP] lib/epic_wallet.dart:13-18; lib/src/epic_worker.dart:35-37).
+- Hook at the pin: native_toolchain_rust plus a hand-written prebuilt manifest path ([EP] hook/build.dart:7, 17), `DynamicLoadingBundled` on every OS including iOS ([EP] hook/build.dart:126-129, 283-296). At [EP-kit]: `NativeLibrarySpec`s for the library and, on Android, `libc++_shared.so` because RandomX links the shared C++ runtime ([EP-kit] hook/build.dart:31-61, 73-109).
+
+#### 10.2.3 Current architecture: MWC ([MW])
+
+- Rust crate: `mwc-wallet`, lib `mwc_wallet`, staticlib + cdylib ([MW] rust/Cargo.toml:2, 58-60). Files: lib.rs (2577 lines), slatepack.rs (304), strings.rs (33). Depends on cypherstack/mwc-node tag 5.3.7 and cypherstack/mwc-wallet branch `silent` (rust/Cargo.toml:29-38), with seven `[patch]` sections redirecting mwcproject forks of libp2p, ethereum, bch and zcash crates (rust/Cargo.toml:62-91).
+- FFI style: `mwc_`-prefixed exports returning C strings, mostly via `CString` + `mem::forget` + `as_ptr` (for example [MW] rust/src/lib.rs:2066-2069). The only free function covers the open-wallet result ([MW] rust/src/strings.rs:4-15). Handle is the same pointer-plus-mask JSON ([MW] rust/src/lib.rs:365-367). One `catch_unwind`, in scan ([MW] rust/src/lib.rs:530). A panic hook writes to `$HOME/.stackwallet/flutter_libmwc-panic.log` ([MW] rust/src/lib.rs:112-125). Chain type is set both globally and thread-locally on open ([MW] rust/src/lib.rs:1376-1380).
+- Dart: hand-written `@Native` declarations whose default asset id is the library URI `package:flutter_libmwc/mwc.dart` ([MW] lib/mwc.dart:1-60, 191-210), called through Flutter `compute()` per operation ([MW] lib/lib.dart:59-80), and one process-wide listener pointer ([MW] lib/lib.dart:21-23).
+- Hook at the pin: prebuilt-or-RustBuilder with asset name `mwc.dart` ([MW] hook/build.dart:9-12, 68-72). At [MW-kit]: one `runNativeBuildHook` spec plus a cargo-mode callback ([MW-kit] hook/build.dart:10-29).
+
+#### 10.2.4 Wallet crates and their local checkouts
+
+Neither wallet family is checked out at its locked rev under /home/user/src/stack_wallet (`find -maxdepth 3` for `name = "epic_wallet_impls"|"mwc_wallet_impls"|"grin_wallet_impls"` found nothing). The exact locked revs are in the cargo git cache ([EW], [MWW], [EN], [MN]). One deeper checkout exists: [EW-fix] at /home/user/src/stack_wallet/epic_wallet/epic-wallet (found at depth 4, inside a stack_wallet clone), branch fix-listener-cancellation. It is 5 behind and 55 ahead of 56eabddd and contains Epicbox listener cancellation work (fc6a9710 "Support cancelling listener via AtomicBool"; 45a38005 "release listener locks before error cleanup"). /home/user/src/stack_wallet/cypherstack-mwc-node (58dc0301) and mwcproject-mwc-node (4e712689) are node repos at other revs and were not used.
+
+### 10.3 Where the Epicbox and MWCMQS listeners go
+
+#### 10.3.1 How the legacy plugins do it
+
+Epic:
+- `rust_epicbox_listener_start` builds a `Listener` task from the wallet JSON and config and spawns it with `ffi_helpers::export_task!` ([EP] rust/src/ffi.rs:943-961; rust/src/listener.rs:13-18, 65-74). `ffi_helpers` 0.3.0 (locked at [EP] rust/Cargo.lock:1642-1643) runs the task on a detached `thread::spawn`, and cancel and `Drop` only set a flag (~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ffi_helpers-0.3.0/src/task.rs:376, 421, 430-432).
+- The task checks the cancel token once, before connecting ([EP] rust/src/listener.rs:36), then blocks in `EpicboxListenChannel::listen` with `is_node_synced = true` and `TorConfig::default()` ([EP] rust/src/listener.rs:41-50). At [EW] the subscriber loop blocks in `client.sender.lock().read()` with no cancel check and holds the socket mutex while blocked ([EW] impls/src/adapters/epicbox.rs:752-760). `_listener_cancel` therefore cannot stop a connected listener ([EP] rust/src/ffi.rs:967-987). The detached thread keeps using the wallet it reached through the raw pointer ([EP] rust/src/listener.rs:26-33), and nothing ties that pointer's lifetime to the thread.
+- Incoming slates never reach Dart. `EpicboxController::process_incoming_slate` runs `foreign::receive_tx` for new slates and `owner::finalize_tx` + `post_tx` for returning ones, under the wallet lock ([EW] impls/src/adapters/epicbox.rs:502-560). It then polls the mempool for up to 240 one-second attempts on the listener thread ([EW] :565-570). Stack Wallet learns of results through its 150-second refresh timer ([SW] lib/wallets/wallet/impl/epiccash_wallet.dart:1289) and restarts a dead listener after scans ([SW] epiccash_wallet.dart:733-756).
+- [EW-fix] adds a `stopping: Arc<AtomicBool>` parameter to `listen` ([EW-fix] impls/src/adapters/epicbox.rs:229-237), a 1-second read timeout on `Plain` and `NativeTls` streams that errors for any other TLS backend (:84-100), and `WouldBlock`/`TimedOut` handling that loops back to the stop check (:1250-1262, 1216-1222). It still connects directly with `tungstenite::connect` (:282, 652) and still runs the mempool wait (:958).
+
+MWC:
+- `mwc_rust_mwcmqs_listener_start` spawns an `export_task!` task ([MW] rust/src/lib.rs:2030-2050) that forces Mainnet for its thread whatever the wallet's network ([MW] rust/src/lib.rs:1985-1989) and calls `controller::init_start_mwcmqs_listener(..., true)` ([MW] rust/src/lib.rs:1998-2003). The final `true` is `wait_for_thread`, so the task spawns the `mwcmqs-broker` thread and joins it ([MWW] controller/src/controller.rs:682-698, 768-784).
+- The broker is a process-global singleton (`MWCMQS_BROKER`, [MWW] impls/src/adapters/mwcmq.rs:53-70); a second start fails ([MWW] controller.rs:713-717). The loop is HTTPS long-polling with a 120-second timeout that checks a `running` flag between polls ([MWW] mwcmq.rs:781-786). `stop()` posts a wake-up message to its own address with a 60-second timeout, then resets the global ([MWW] mwcmq.rs:321-342). `mwc_listener_cancel` stops whatever subscriber is global, regardless of handle ([MW] rust/src/lib.rs:2052-2070).
+- Slates are handled inside the wallet controller (`on_slate` -> `process_incoming_slate`, [MWW] controller.rs:424-436, 609-636). Dart holds one pointer for the process ([MW] lib/lib.dart:21-23, 691-707), and the start binding leaks its two argument strings ([MW] lib/mwc.dart:197-202).
+
+#### 10.3.2 Placement
+
+The listener lives in each coin's ffi crate (`crates/epic-ffi/src/listener.rs`, `crates/mwc-ffi/src/listener.rs`), as a background thread owned by the wallet session and addressed by the wallet handle. Grin v1 gets no listener ([PLAN] lines 20-23), but the coin-neutral scaffolding (state atomic, cancel flag, bounded event queue, drain to JSON) goes into the shared Rust core at extraction time, since Epic and MWC both need it. Grin's future v2 onion listener can reuse it.
+
+C ABI, same shape for both coins (shown for Epic):
+
+| Function | Behaviour |
+|---|---|
+| `epic_listener_start(handle: u64, config_json: *const c_char) -> EpicFfiResult` | Validates config (`{"domain","port","insecure"}` for Epicbox, `{"domain","port"}` for MWCMQS), spawns the thread, returns `{"state":"starting"}` immediately. Errors: invalid handle, `ListenerAlreadyRunning`, and for MWC `ListenerBusy` with `{"owner_handle": u64}` while another session owns the singleton. |
+| `epic_listener_poll(handle: u64, max_events: u32) -> EpicFfiResult` | Drains up to `max_events` from the queue: `{"state":"connected","events":[...],"dropped":0,"reconnects":2,"last_error":null}`. Locks only the in-memory queue, never the wallet. |
+| `epic_listener_stop(handle: u64) -> EpicFfiResult` | Sets the cancel flag and runs the coin's waker, returns `{"state":"stopping"}` or `{"state":"stopped"}` without blocking. |
+
+All three run inside `ffi_guard!` and return the coin's result type, matching [PLAN] line 272.
+
+Events carry ids and amounts, never slate bodies or keys: `{"seq":41,"kind":"slate_received","slate_id":"<uuid>","counterparty":"<address>","amount":100000000}`. Kinds: `connecting`, `connected`, `disconnected` (with reason), `slate_received` (we signed and replied), `slate_finalized` (with `posted: bool`), `error` (code and message), `stopped`. The queue is bounded (proposed 256) with drop-oldest and a `dropped` counter, so a Dart side that stops polling cannot grow Rust memory.
+
+#### 10.3.3 Rust threading model
+
+- `start` clones `Arc<Session>` through the registry, which runs `Session::enter()`, and moves it into a named thread `epic-listener-<handle>`. The thread sets its chain type first: MWC calls `set_local_chain_type(session.chain_type)`, fixing the forced-Mainnet bug. Epic has only the process-global chain type, so until the Epic node fork gains a thread-local one (10.4), epic-ffi sets it with `set_mining_mode` when the first session opens, returns a `NetworkConflict` error from open/create for a different network while any session is live, and the listener thread asserts that the global matches its session.
+- Loop: while not cancelled, connect (through SOCKS if configured), run the subscriber with the cancel flag and an event sink, push `disconnected` on return, and back off 1 s doubling to 60 s in 250 ms slices that check the flag. On exit set `stopped`, push the event, drop the `Arc`.
+- Cancel sources: `*_listener_stop`; `*_wallet_close` and `*_wallet_close_finalizer`, through a `Session::request_cancel()` hook that the registry calls on removal next to the existing scan cancel ([PLAN] lines 253, 346).
+- The thread's `Arc` keeps the backend open, so the session's `DirLease` stays held and `open`/`create`/`delete` on that directory return `WalletBusy` until the thread exits ([PLAN] lines 257-261). That is the intended guard. `impl Drop for Session` may run on the listener thread and must never join it.
+- The listener processes slates under the wallet mutex ([EW] epicbox.rs:514, 536; [MWW] controller.rs:431-433), so Dart operations wait behind it inside Rust. Neither side holds the registry or `OPEN_DIRS` locks while doing so, so there is no deadlock.
+- Epic: start from [EW-fix]'s stop flag and read timeout. The fork must also add a `Rustls` arm to the read-timeout helper if 10.4's rustls switch lands, make `subscribe`/`start` accept an event sink (today `EpicboxSubscriber::start` is private and takes a concrete `EpicboxController`, [EW] epicbox.rs:671), and pass the stop flag into the mempool wait or skip that wait in FFI mode, otherwise a close can stay `WalletBusy` for up to 4 minutes.
+- MWC needs no fork for events. `MWCMQPublisher::new` takes `Box<dyn SubscriptionHandler + Send>` ([MWW] mwcmq.rs:208-214; trait at impls/src/adapters/types.rs:54-61), so mwc-ffi can reimplement the roughly 80 lines of `start_mwcmqs_listener` ([MWW] controller.rs:701-786) with a handler that forwards to the wallet's `Controller` (public: controller.rs:353, 381, 420; `SubscriptionHandler` impl at :598) and pushes events. The one private piece, `controller_derive_address_key` (controller.rs:337-350), is a four-line wrapper over the public `proofaddress::payment_proof_address_secret` ([MWW] libwallet/src/proof/proofaddress.rs:206). It keeps `init_mwcmqs_access_data` so MWCMQS sends still find the broker, and enforces one owning handle with a static `Mutex<Option<u64>>`. Because `stop()` can take 60 s, the MWC waker runs it on a short-lived helper thread so `mwc_listener_stop` returns at once.
+
+#### 10.3.4 Dart surface
+
+Consistent with [PLAN] 5.1, there are no callbacks into Dart:
+
+- `startListener(config)` and `stopListener()` call start/stop directly on the client's isolate, like `scan_cancel` in [PLAN] line 352, because neither blocks. `startListener` begins a `Timer.periodic` that calls `*_listener_poll(handle, 64)` directly: 1 s while starting or reconnecting, 3 s while connected (initial values, to tune).
+- Polled events go out as listener subtypes on the client's existing broadcast stream ([PLAN] lines 103, 323). On `slate_received` or `slate_finalized` the app refreshes transactions through the normal queued call, replacing the 150-second wait.
+- `close()` keeps the plan's order ([PLAN] lines 349-356) with two additions. Step 2 also calls `*_listener_stop`. After the queue drains, the client polls until `stopped` for a bounded time (proposed 10 s). On timeout it proceeds, and a reopen then reports `WalletBusy`, the designed failure mode ([PLAN] lines 357-359).
+- `updateNetwork(...)` with a running listener stops it, awaits `stopped`, and restarts it so the new proxy applies.
+
+#### 10.3.5 Tor and SOCKS
+
+- Source: Stack Wallet's tor_ffi_plugin SOCKS port, `socks5h://127.0.0.1:<port>` ([PLAN] line 23). Epicbox and MWCMQS are outbound client connections, so an arti client with only `onion-service-client` is enough ([PLAN] line 21); no hidden service is involved.
+- Plumbing: the session's `socks_proxy`, set at create/open and by `*_wallet_update_network` (the analogues of [PLAN] functions 7 and 15, lines 282 and 290), is read at every (re)connect. When a proxy is configured the listener never falls back to a direct connection, matching [PLAN] line 227.
+- Epicbox: today `tungstenite::connect(url)` opens a direct `TcpStream` ([EW] epicbox.rs:174; [EW-fix] :282). The fork adds `connect_epicbox(url, socks)`: TCP to the proxy, a SOCKS5 CONNECT with a domain-name address so DNS resolves through Tor, then `tungstenite::client_tls_with_config` over that stream, then the read-timeout helper on the inner `TcpStream`. The Epic lock has no synchronous SOCKS crate (grep of [EP] rust/Cargo.lock). Options are `socks` 0.3, already in MWC's graph ([MW] rust/Cargo.lock:5928, via tor-stream and mwc_p2p), or a 40-line handshake. Do not reuse [EW] impls/src/client_utils/socksv5.rs: it is not in `client_utils/mod.rs` and uses tokio 0.1-era APIs.
+- MWCMQS: the five `reqwest::blocking::Client::builder()` calls build without a proxy ([MWW] mwcmq.rs:322, 485, 582, 702, 786), although reqwest 0.10's `socks` feature is already on ([MWW] impls/Cargo.toml:26; tokio-socks 0.3.0 under reqwest 0.10.10 at [MW] rust/Cargo.lock:6475). The fork stores `Option<SocketAddr>` in the broker and adds `.proxy(Proxy::all("socks5h://..."))` at each site.
+- Today Stack Wallet only checks that the Tor setting and node preference agree for Epic ([SW] epiccash_wallet.dart:1652-1672). Neither legacy listener routes through Tor.
+
+### 10.4 tor/rustls gating in the epic and mwc wallet crates
+
+#### 10.4.1 What the locked crates pull
+
+| | Epic ([EW] 56eabddd, [EN] c592407a) | MWC ([MWW] 651603d4, [MN] 0dae1d5a) |
+|---|---|---|
+| arti / tor-* crates | none: 0 packages named `arti*` or `tor-*` in [EP] rust/Cargo.lock (657 packages) | none; only `tor-stream` 0.2.0, a SOCKS wrapper (deps `lazy_static`, `socks`) used by `mwc_p2p` ([MW] rust/Cargo.lock:6661-6668) |
+| `[features]` in impls | none ([EW] impls/Cargo.toml:1-53) | none ([MWW] impls/Cargo.toml:1-49) |
+| Tor code | external process spawned from `<exe dir>/tor/tor` ([EW] impls/src/tor/process.rs:64, 164-167); process-global `TOR_MANAGER` ([EW] impls/src/tor/tor_manager.rs:13) read by `Client::new` for its SOCKS address ([EW] impls/src/client_utils/client.rs:59-72) | external `tor` process ([MWW] impls/src/tor/process.rs:67, 179); `HttpDataSender` owns a `TorProcess` ([MWW] impls/src/adapters/http.rs:47-116); tor imports in the controller ([MWW] controller/src/controller.rs:50-58) |
+| reqwest | 0.12 with `rustls-tls`, `socks`, `blocking` and default features ([EW] impls/Cargo.toml:46); resolved 0.12.28 depends on both native-tls/hyper-tls and rustls/webpki-roots ([EP] rust/Cargo.lock:4205-4248) | 0.10 with `rustls-tls`, `socks`, `blocking` and defaults ([MWW] impls/Cargo.toml:26); 0.10.10 depends on both hyper-tls/native-tls and rustls 0.18 on ring 0.16 ([MW] rust/Cargo.lock:5110-5147); the node API crate adds rustls 0.17 on ring 0.16 |
+| Other TLS | tungstenite `native-tls` ([EW] impls/Cargo.toml:44, libwallet/Cargo.toml:35, controller/Cargo.toml:35); direct `rustls` 0.23 and `hyper-rustls` 0.27 with default features ([EW] impls/Cargo.toml:32-33) and in the node API crate, plus `hyper-tls` 0.6 ([EN] api/Cargo.toml:35-38). The lock resolves `aws-lc-rs`/`aws-lc-sys` under rustls 0.23.35 ([EP] rust/Cargo.lock:212, 222), and [EP-kit] flake.nix:65-68 builds aws-lc-sys from source | `native-tls` as a direct libwallet dependency ([MWW] libwallet/Cargo.toml:42), used by the atomic-swap code ([MWW] libwallet/src/swap/bitcoin/rpc.rs:16) |
+| OpenSSL | vendored for native-tls (unconditional at [EP] rust/Cargo.toml:24; non-Windows at [EP-kit]; Linux and Android at [EP-main]) | vendored on non-Windows ([MW] rust/Cargo.toml:55-56) |
+
+#### 10.4.2 Do they need the same gating?
+
+- `tor`: the grin fork gates `tor` to drop arti and roughly 20 tor-only crates ([PLAN] lines 14, 156-181). Neither Epic nor MWC links arti, so that reason does not apply. Both should still gate their tor modules, for a different reason: the code assumes a desktop process model (spawning an executable next to `current_exe`) and a process-global proxy, which conflicts with a per-session SOCKS proxy and cannot work in the iOS sandbox. The deps to gate are few (`sysinfo`, `timer`: [EW] impls/Cargo.toml:41-42, [MWW] impls/Cargo.toml:36-37), so the diff is smaller than grin's.
+- `rustls`: Epic needs it more than grin did. It compiles three TLS stacks today (OpenSSL through native-tls, ring through reqwest's rustls, aws-lc through rustls/hyper-rustls defaults), including a C build of aws-lc-sys. MWC's rustls is ring 0.16 with no aws-lc. Its native-tls comes from reqwest defaults, the swap code, and the legacy plugin's own reqwest 0.11 ([MW] rust/Cargo.toml:23, gone in a new mwc-ffi). A `rustls` feature plus a `swap` gate would let MWC drop vendored OpenSSL on Linux and Android. That is lower priority than Epic, and the larger MWC win is gating `swap`, which pulls the ethereum, zcash and bch forks patched at [MW] rust/Cargo.toml:65-82.
+
+#### 10.4.3 Equivalent fork diffs
+
+Epic, cypherstack/epic-wallet (best based on [EW-fix]):
+
+1. impls/Cargo.toml: `[features] default = ["tor", "native-tls"]`; `tor = ["dep:sysinfo", "dep:timer"]`; `native-tls = ["reqwest/default-tls", "tungstenite/native-tls"]`; `rustls = ["reqwest/rustls-tls-webpki-roots", "tungstenite/rustls-tls-webpki-roots"]`; reqwest `default-features = false`. Drop the direct `hyper-rustls`, `hyper-timeout` and `rustls` dependencies, which nothing in impls/src uses (grep).
+2. libwallet/Cargo.toml:35 and controller/Cargo.toml:35: the same tungstenite feature passthrough. epic-ffi should avoid `epic_wallet_controller`, as grin-ffi avoids its controller ([PLAN] line 196).
+3. impls/src/lib.rs:45: `#[cfg(feature = "tor")] pub mod tor;`. Move `complete_tor_address` (a string helper at impls/src/tor/config.rs:290) out of the gated module for impls/src/adapters/mod.rs:32.
+4. impls/src/client_utils/client.rs:59-72, 83: the `TOR_MANAGER` lookup under `cfg(feature = "tor")`, a public `Client::with_socks_proxy(SocketAddr)`, TLS backend chosen per feature. Proxy-aware constructors in impls/src/node_clients/http.rs:62-63, 177 and impls/src/adapters/http.rs:116.
+5. impls/src/adapters/epicbox.rs: the 10.3.3 and 10.3.5 changes (SOCKS connect, event sink, `Rustls` read-timeout arm, cancellable mempool wait).
+6. cypherstack/epic node fork: api/Cargo.toml:35-38 with `rustls`/`hyper-rustls` at `default-features = false` on ring and `hyper-tls` behind a feature; core/src/global.rs: thread-local chain type on [MN]'s pattern (global.rs:199-232).
+
+MWC, cypherstack/mwc-wallet branch silent:
+
+1. impls/Cargo.toml: `default = ["tor", "native-tls"]`; `tor = ["dep:sysinfo", "dep:timer"]`; `native-tls = ["reqwest/default-tls"]`; reqwest `default-features = false` at :26.
+2. impls/src/lib.rs:48 gated `pub mod tor;`. Split `HttpDataSender` ([MWW] impls/src/adapters/http.rs:22-37, 47-116) into an ungated SOCKS sender and a `cfg(feature = "tor")` wrapper that owns the `TorProcess`, the same shape as grin's `HttpSlateSender`/`TorSlateSender` split ([PLAN] lines 12, 185-187). impls/src/adapters/mod.rs:29 loses its tor import.
+3. impls/src/adapters/mwcmq.rs: the proxy at the five builder sites; optionally replace the `MWCMQS_BROKER` singleton (:53-70) with per-wallet state, which would lift the one-listener-per-process limit.
+4. impls/src/node_clients/http.rs:105-109: a proxy-aware constructor. `Client::with_socks_proxy` already exists ([MWW] impls/src/client_utils/client.rs:52), but `client_utils` is private (impls/src/lib.rs:43).
+5. libwallet/Cargo.toml:42 and the swap dependencies behind a `swap` feature (libwallet/src/swap/*). A larger follow-up that is independent of tor and rustls.
+
+#### 10.4.4 Verified and not verified
+
+- Verified from the locked sources and lockfiles: no arti in either family, the TLS crates present and who depends on them, the tor module contents, the absence of `[features]` tables, and that aws-lc-sys is actually compiled for Epic (the [EP-kit] flake configures its build).
+- Not verified: which optional features Cargo activates for each dependency (a lockfile records packages, not features), except where build configuration shows it; whether the proposed feature sets compile (no build was attempted); the current tips of cypherstack/epic-wallet, cypherstack/epic and cypherstack/mwc-wallet beyond the locked revs and [EW-fix] (no network access to those repos was used); the tungstenite rustls stream accessor for the read-timeout arm; symbol visibility on Apple, Android and Windows builds (the `nm` evidence is Linux x86_64 only); and the provenance of the [BUILT] libraries beyond their worktree's pins and prebuilt user-defines (no hashes compared).
+
+### Sources read
+
+- /home/user/src/grin/docs/architecture.md at commit dfb7f04 (492 lines, sections 1 to 8 and 12)
+- https://github.com/cypherstack/flutter_libepiccash.git cloned to /home/user/src/grin/.research/flutter_libepiccash: default branch main at 3fb216a49d07a90dcacf97ba02d36ccd7e46a831; read `git log`, tags, `git diff d5cfb763 origin/main`, origin/main:pubspec.yaml, origin/main:hook/build.dart, origin/main:rust/Cargo.toml
+- https://github.com/cypherstack/flutter_libmwc.git cloned to /home/user/src/grin/.research/flutter_libmwc: default branch main at 8ce99d6e73d399189f7750a316d1631802b2593a; same set of reads
+- /home/user/src/stack_wallet/wt/flutter_libepiccash at d5cfb763fa62928a6e6265e1f4412738772151eb: rust/Cargo.toml, rust/Cargo.lock, rust/src/{lib,ffi,listener,config}.rs (wallet.rs grep only), rust/include/epic_cash_wallet.h, ffigen.yaml, pubspec.yaml, hook/build.dart, lib/{lib,epic_cash,epic_wallet}.dart, lib/src/{epic_worker,epic_task,epic_cash_wallet_bindings.g}.dart, `git ls-tree`
+- /home/user/src/stack_wallet/wt/flutter_libepiccash feat/native-build-kit at 67df07760ba10005c87bffcf34fa55f3319c8c1f: pubspec.yaml, hook/build.dart, hook/prebuilt_hashes.json, flake.nix, rust/rust-toolchain.toml, `git diff --stat` against the pin, refs gitea/ and manymath/feat/native-build-kit, origin/*, tags
+- /home/user/src/stack_wallet/wt/flutter_libmwc at d8c5d5488cb00e21d0dc04ad306a65e2d54c4d3c: rust/Cargo.toml, rust/Cargo.lock, rust/src/{lib,strings}.rs, pubspec.yaml, hook/build.dart, lib/{lib,mwc}.dart, `git ls-tree`
+- /home/user/src/stack_wallet/wt/flutter_libmwc feat/native-build-kit at 0fe2b1c4e50fc327b80bcba327a56e813d494847: pubspec.yaml, hook/build.dart, hook/prebuilt_hashes.json, flake.nix, rust/rust-toolchain.toml, `git diff` against the pin, refs
+- /home/user/src/stack_wallet/flutter_libepiccash-claude-main (51e00f62, refs only), flutter_libepiccash-claude (ceb97388), flutter_libepiccash-repro (4bc3358), flutter_libmwc-{antigravity,claude,codex,codex-legacy,codex-retest,kimi,repro,reproducible-native-prebuilts} (branch, HEAD and remote refs only)
+- /home/user/src/stack_wallet/flutter_libepiccash-claude-review.md, flutter_libmwc-codex-review.md (grep for listener, chain type, linking)
+- /home/user/src/stack_wallet/wt/native-build-kit at 85f7eb097604e5b99db3f90bccbcada3336836b8: README.md, dart/native_prebuilt_hook/README.md, dart/native_prebuilt_hook/lib/src/hook.dart
+- /home/user/src/stack_wallet/wt/tor at d8c0fd61b0d838dea9212a1fdb591d1565e1b3ba: hook/build.dart, hook/prebuilt_hashes.json, build-config.json
+- /home/user/src/stack_wallet/wt/frostdart-kit at 580f1ed595f69fb36e7836dbd07636c45ce57776: hook/build.dart, pubspec.yaml
+- /home/user/src/stack_wallet/stack_wallet at b778525f0007268093e062be1a9075fbb3ef22f3: pubspec.yaml:45-70, 375-388; lib/wallets/wallet/impl/epiccash_wallet.dart:725-756, 1289, 1648-1672; lib/wallets/wallet/impl/mimblewimblecoin_wallet.dart:352-375, 808-820, 1227
+- /home/user/src/stack_wallet/stack_wallet-pr1479-eth at bdee51e811be2f9b6afe52f2ec5aa8723e2c5055: pubspec.yaml:53-64, 380-387; build/native_assets/linux/{libepic_cash_wallet.so, libmwc_wallet.so, native_assets.json} via `nm` / `nm -D`
+- ~/.cargo/git/checkouts/epic-wallet-8d7c6395dfbec4ef/56eabdd: impls/Cargo.toml, impls/src/lib.rs, impls/src/adapters/{epicbox,http,mod}.rs, impls/src/client_utils/{client,mod,socksv5}.rs, impls/src/tor/{process,tor_manager,config}.rs, impls/src/backends/{mod,lmdb,db}.rs, impls/src/node_clients/http.rs, libwallet/Cargo.toml, controller/Cargo.toml; grep only: src/bin/epic-wallet.rs, src/cmd/wallet_args.rs, api/src/{owner_rpc,foreign_rpc}.rs for `set_mining_mode`
+- /home/user/src/stack_wallet/epic_wallet/epic-wallet fix-listener-cancellation at 0cc9b2c7ca1e83c20881bcf325557450b30696b1 (also ref cypherstack/fix-listener-cancellation): impls/src/adapters/epicbox.rs, `git log`, `git diff --stat` against 56eabddd
+- ~/.cargo/git/checkouts/epic-283b1aeb3816429f/c592407: core/src/global.rs, core/src/consensus.rs, api/Cargo.toml
+- ~/.cargo/git/checkouts/mwc-wallet-75eeacad364e57a8/651603d: impls/Cargo.toml, impls/src/lib.rs, impls/src/adapters/{mwcmq,http,mod,types}.rs, impls/src/client_utils/{client,mod}.rs, impls/src/tor/process.rs, impls/src/node_clients/http.rs, controller/src/controller.rs, libwallet/Cargo.toml, libwallet/src/swap/bitcoin/rpc.rs, libwallet/src/proof/proofaddress.rs
+- ~/.cargo/git/checkouts/mwc-node-3b54ed9982831964/0dae1d5: core/src/global.rs, core/src/consensus.rs
+- ~/.cargo/git/checkouts/rust-secp256k1-zkp-a579ae94bd3f266d/e5ee752 and rust-secp256k1-zkp-d7bf542edf5c80dc/d922c6f: Cargo.toml, build.rs, src/ffi.rs
+- ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/grin_secp256k1zkp-0.8.0: Cargo.toml, build.rs, src/ffi.rs; ffi_helpers-0.3.0/src/task.rs
+- /home/user/src/stack_wallet/cypherstack-mwc-node (58dc0301), mwcproject-mwc-node (4e712689), mwcproject-rust-libp2p (9b7d8016): HEAD and remote only
+
+---
+
+## 11. Research provenance
+
+Every repository, ref and checkout this plan and its implementation rely on, as of 2026-11-01. Paths are on the build machine. Nothing was fetched from git.cypherstack.com; the cypherstack refs listed are remote-tracking refs that were already present locally.
+
+### 11.1 Repositories this project changes
+
+| Repository | Location | Ref | Role |
+|---|---|---|---|
+| grin monorepo | /home/user/src/grin | branch `main` (docs), branch `grin-v1` (implementation); remote `cypherstack` = ssh://git@git.cypherstack.com:222/sneurlax/grin.git, never pushed | this repository |
+| grin-wallet fork | /home/user/src/grin-wallet | branch `optional-tor-rustls`, commit `64d361f2e49fa6d544cf0236417da48a99444b2f`, one commit on top of upstream `v5.5.1` (`f097811ee953fc81be4e70435d6ef845b6b2e8c9`); submodule `grin` at `v5.5.2` (`dbaff34f7751ee23316fbbfe5806b47c546776ca`, https://github.com/mimblewimble/grin); remotes `cypherstack` (ssh, never pushed) and `origin` = https://github.com/mimblewimble/grin-wallet.git | the wallet library grin-ffi wraps (sections 4.1, D2) |
+
+### 11.2 Build tooling
+
+| Item | Location | Ref or version | Used for |
+|---|---|---|---|
+| native-build-kit | /home/user/src/stack_wallet/wt/native-build-kit | branch `feat/native-build-kit` at `85f7eb097604e5b99db3f90bccbcada3336836b8` (HEAD of that checkout); pinned by `packages/grin/pubspec.yaml` and `packages/grin/flake.lock` (narHash `sha256-PbHR2lx+BZ6Zr04H6AbpY0lWdPFoKn44x4gHYSmua5c=`) | `native_prebuilt_hook` (the build hook), `lib.mkCargoLibrary` (the Nix reference build), D1, D6 |
+| kit flake inputs | from the kit's flake.lock | nixpkgs `09063bd1f2b36fd9fd793c36dfade7bd40a93dfc`, rust-overlay `5424e1e6dda30b0626935d2a03a6526db4858d60`, zig-overlay `808bad711d9ffe83fe4f92411c43471c839b1658`, systems `da67096a3b9bf56a91d16901293e51ba5b49a27e`, flake-compat `0f9255e01c2351cc7d116c072cb317785dd33b33` | followed by `packages/grin/flake.nix` |
+| tor plugin, kit port | /home/user/src/stack_wallet/wt/tor | `feat/native-build-kit` at `d8c0fd61b0d838dea9212a1fdb591d1565e1b3ba` | model for `hook/build.dart`, `pubspec.yaml`, `flake.nix`, `build-config.json`, `nix/build-apple.sh`, `test/kit_pin_test.dart` (section 3.1, D1, D6) |
+| frostdart, kit port | /home/user/src/stack_wallet/wt/frostdart-kit | `feat/native-build-kit` at `580f1ed595f69fb36e7836dbd07636c45ce57776` | model for the cargo-mode callback (NDK API-level clang, Linux cc/ar) and the README's "Native library" section |
+| tor plugin as shipped | /home/user/src/stack_wallet/tor (checkout at `e36c899`) | Stack Wallet pins `e30ed0d386a40ee4a999aeaf57aafd32921d601e`; `rust/Cargo.toml` L18 there: `arti-client 0.47.0`, features `static` and `onion-service-client` | the v1 transport decision (section 1 item 4) |
+| native_toolchain_rust | ~/.pub-cache/hosted/pub.dev/native_toolchain_rust-1.0.6 | 1.0.6 (1.0.7 needs code_assets ^2, which the kit excludes) | `RustBuilder` in the cargo mode |
+| reqwest | ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/reqwest-0.13.4 | 0.13.4 | the TLS feature analysis in section 1 item 2 and 4.1 |
+| Toolchains on the build machine | | Rust 1.94.0 (rustup; `rust-toolchain.toml`), cargo-ndk 4.1.2, cbindgen 0.29.2, Dart 3.13.2, Flutter 3.47.2, Android NDK 28.2.13676358 (also 26.3, 27.0, 28.0, 28.1, 29.0 installed), Determinate Nix 3.17.0 (Nix 2.33.3), llvm-nm, gcc and clang, xvfb-run | gates in sections 7 and 8 |
+
+### 11.3 Stack Wallet refs read for section 9
+
+All in /home/user/src/stack_wallet/stack_wallet (a checkout on `security/rbf-history-authentication` at `b778525f0007268093e062be1a9075fbb3ef22f3`, read only; other refs read with `git show`):
+
+| Ref | Commit | Why |
+|---|---|---|
+| `cypherstack/main` | `a156253bf3494e094efffd332ee53ee65489157e` (2025-10-24) | the brief's "main"; 1170 commits behind staging, no Epic slatepack code |
+| local `staging` | `7ce7b34f2` (2026-10-19) | the recommended baseline (9.1) |
+| `cypherstack/staging` | `d6ca375df` (2026-10-29) | newest staging tip present locally |
+| `refactor/epic-mwc-unify` | `6fadd8c0a` (2026-09-07), merge base with staging `9517439be` | `MimblewimbleWallet` and the shared slatepack UI |
+| generated working-tree `pubspec.yaml` | gitignored, from `scripts/app_config/templates/pubspec.template.yaml` | the `hooks.user_defines` block (L374-388) and the legacy plugin pins (L53-71) |
+
+### 11.4 Legacy plugins and wallet crates read for sections 2 and 10
+
+| Item | Location | Ref |
+|---|---|---|
+| flutter_libepiccash, Stack Wallet pin | /home/user/src/stack_wallet/wt/flutter_libepiccash (also flutter_libepiccash-claude-main) | `d5cfb763fa62928a6e6265e1f4412738772151eb`, tag `native-0.3.0-1` |
+| flutter_libepiccash, kit port | /home/user/src/stack_wallet/wt/flutter_libepiccash working tree | `feat/native-build-kit` at `67df07760ba10005c87bffcf34fa55f3319c8c1f` |
+| flutter_libepiccash, GitHub | /home/user/src/grin/.research/flutter_libepiccash (clone of https://github.com/cypherstack/flutter_libepiccash.git, gitignored) | `main` at `3fb216a49d07a90dcacf97ba02d36ccd7e46a831` (2026-10-30) |
+| flutter_libmwc, Stack Wallet pin | /home/user/src/stack_wallet/wt/flutter_libmwc | `d8c5d5488cb00e21d0dc04ad306a65e2d54c4d3c`, tag `native-0.1.7` |
+| flutter_libmwc, kit port | /home/user/src/stack_wallet/wt/flutter_libmwc working tree | `feat/native-build-kit` at `0fe2b1c4e50fc327b80bcba327a56e813d494847` |
+| flutter_libmwc, GitHub | /home/user/src/grin/.research/flutter_libmwc (clone of https://github.com/cypherstack/flutter_libmwc.git) | `main` at `8ce99d6e73d399189f7750a316d1631802b2593a` (2026-10-30) |
+| review worktrees (evidence only, not canonical) | /home/user/src/stack_wallet/flutter_libepiccash-claude (`ceb9738`, `native-assets-review`), flutter_libmwc-codex (`8acf950`, `sneurlax/native-assets`), flutter_libepiccash/flutter_libepiccash (`43ff116`, `main`) | section 2 evidence links |
+| cypherstack/epic-wallet | ~/.cargo/git/checkouts/epic-wallet-8d7c6395dfbec4ef/56eabdd; branch `fix-listener-cancellation` at /home/user/src/stack_wallet/epic_wallet/epic-wallet (`0cc9b2c7`) | `56eabddd34acba6ef3f4f360909242ed96f4e7ae`, the rev locked by the Epic plugin |
+| cypherstack/epic (node) | ~/.cargo/git/checkouts/epic-283b1aeb3816429f/c592407 | `c592407af7000c0105cf83a0bc7ec7849b9356f4`, branch `fix/randomx-v0.2.0-api` |
+| cypherstack/mwc-wallet | ~/.cargo/git/checkouts/mwc-wallet-75eeacad364e57a8/651603d | `651603d4647fa46c9bf22f067afa0a0150e0048f`, branch `silent` |
+| cypherstack/mwc-node | ~/.cargo/git/checkouts/mwc-node-3b54ed9982831964/0dae1d5 | `0dae1d5a4a1a8665bad432f774ca0f0f5277ec7e`, tag `5.3.7` |
+| secp256k1-zkp forks | ~/.cargo/git/checkouts/rust-secp256k1-zkp-a579ae94bd3f266d/e5ee752 (EpicCash, package name `grin_secp256k1zkp` 0.8.0), rust-secp256k1-zkp-d7bf542edf5c80dc/d922c6f (mwcproject, `mwc_secp256k1zkp` 0.7.16); grin uses crates.io `grin_secp256k1zkp` 0.8.0 | the duplicate-crate analysis in 10.1.2 |
+
+### 11.5 Documents
+
+- The implementation plan this file grew from: /home/user/.gemini/antigravity-cli/brain/dd32207c-5b42-482e-9559-f3754168ced0/implementation_plan.md (three review rounds; imported as commit `dfb7f04`).
+- The hand-off brief: /home/user/src/grin-handoff.md.
+- docs/ffi-json.md in this repository: the JSON contract between grin-ffi and package:grin.
+
 ---
 
 ## 12. Decisions made during implementation
@@ -490,3 +1319,9 @@ Each entry records a choice made while building, the evidence behind it, and how
 ### D5. Fork test runtime flavor
 
 - The `HttpSlateSender` unit tests in the fork run under `#[tokio::test(flavor = "multi_thread", worker_threads = 2)]`. The default current-thread test runtime deadlocks: the test body calls the synchronous `SlateSender::send_tx`, which detects an active runtime and blocks the test thread on a helper thread (`client.rs` L292-311), while the mock server task needs that same test thread to make progress.
+
+### D6. The Cargo workspace lives at `packages/grin/rust`, not at the repository root
+
+- The kit's hook resolves the Nix flake from the package root: `flakeReference(packageRoot)` in `dart/native_prebuilt_hook/lib/src/nix_build.dart` L114-121 is what `nix build <flake>#<target>` is run against (L59-64), and `build-config.json`, `hook/prebuilt_hashes.json` and `nix/build-apple.sh` are read relative to it (`hook.dart` L63-65). A flake cannot reference files outside its own directory, and a `path:` input pointing at the repository root would copy every untracked file (including `target/`) into the store. So everything the Nix build reads has to sit under `packages/grin`.
+- Layout: `packages/grin/rust/` is the Cargo workspace root (`Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `.cargo/config.toml`, `grin-ffi/`), and `packages/grin/` holds `flake.nix`, `flake.lock`, `nix/build-apple.sh`, `build-config.json` and `hook/`, mirroring `wt/tor` (`rust/` inside the plugin). Section 3's tree, which showed `crates/grin-ffi` and a root `Cargo.toml`, is superseded by this; decision 1 (one monorepo with a Cargo workspace and a pub workspace) is unchanged.
+- The pub workspace root (`/home/user/src/grin/pubspec.yaml`) stays at the repository root with `tool/` and `docs/`.
