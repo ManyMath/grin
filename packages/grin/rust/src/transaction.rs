@@ -1,0 +1,996 @@
+//! Transaction entry points: fee estimate, history, the S1/S2/S3 and
+//! I1/I2/I3 Slatepack flows, the synchronous HTTP send, repost and cancel.
+//!
+//! Locking: libwallet's `&mut WalletBackend` functions run with the wallet
+//! mutex held (`with_backend`). Functions that take the wallet `Arc`
+//! (`create_slatepack_message`, `retrieve_txs`, `cancel_tx`, ...) lock it
+//! themselves, and network calls (`post_tx`, the HTTP send) run with it
+//! released. `post_tx` must not hold it: the test chain mines a posted
+//! transaction at once and locks the posting wallet to pay it the coinbase.
+//!
+//! Sidecar writes are best effort (docs/architecture.md 4.4): a failure is
+//! logged and never fails the call.
+
+use std::os::raw::c_char;
+
+use grin_core::consensus::{INPUT_WEIGHT, KERNEL_WEIGHT, OUTPUT_WEIGHT};
+use grin_core::core::Weighting;
+use grin_core::global;
+use grin_keychain::ExtKeychain;
+use grin_util::secp::key::SecretKey;
+use grin_util::ToHex;
+use grin_wallet_impls::{HttpSlateSender, SlateSender};
+use grin_wallet_libwallet::api_impl::{foreign, owner};
+use grin_wallet_libwallet::{
+    Error as LibwalletError, InitTxArgs, IssueInvoiceTxArgs, Slate, SlateState, SlatepackAddress,
+    StoredProofInfo, TxLogEntry, TxLogEntryType, WalletBackend,
+};
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+use crate::address::parse_address;
+use crate::config::FfiNodeClient;
+use crate::error::{
+    read_opt_nonempty, read_opt_str, read_str, to_json, GrinError, GrinErrorCode, GrinFfiResult,
+};
+use crate::handle::{get_session, WalletSession};
+use crate::sidecar::{Sidecar, TxSidecarEntry};
+use crate::slatepack::{
+    address_string, decode_with_wallet, kernel_excess_hex, parse_slatepack_address, require_state,
+    slate_fee, state_name,
+};
+
+type Backend = WalletBackend<FfiNodeClient, ExtKeychain>;
+
+/// Address index used for our own slatepack address, payment proofs and
+/// decryption. libwallet only uses index 0 for payment proofs.
+const ADDRESS_INDEX: u32 = 0;
+
+/// libwallet's default when the caller gives no `min_confirms`.
+const DEFAULT_MIN_CONFIRMS: u64 = 10;
+
+/// Directory libwallet keeps transactions in, inside `wallet_data`
+/// (`TX_SAVE_DIR` in libwallet's private backend module). Locking outputs
+/// already writes the unsigned transaction there; finalizing overwrites it.
+const STORED_TX_DIR: &str = "saved_txs";
+
+fn default_min_confirms() -> u64 {
+    DEFAULT_MIN_CONFIRMS
+}
+
+/// Runs `f` with the wallet mutex held and the keychain mask at hand.
+fn with_backend<T>(
+    session: &WalletSession,
+    f: impl FnOnce(&mut Backend, Option<&SecretKey>) -> Result<T, GrinError>,
+) -> Result<T, GrinError> {
+    let mask = session.mask();
+    let mut w = session.wallet.lock();
+    let backend = w.lc_provider()?.wallet_inst()?;
+    f(backend, mask.as_ref())
+}
+
+fn parse_args<T: DeserializeOwned>(ptr: *const c_char, name: &str) -> Result<T, GrinError> {
+    Ok(serde_json::from_str(read_str(ptr, name)?)?)
+}
+
+/// Adds `{"slate_id"}` to an error raised after the wallet recorded the
+/// transaction, so the caller can still cancel or repost it.
+fn with_slate_id(mut e: GrinError, slate_id: &Uuid) -> GrinError {
+    if e.details.is_none() {
+        e.details = Some(serde_json::json!({ "slate_id": slate_id.to_string() }));
+    }
+    e
+}
+
+/// Best-effort sidecar update.
+fn remember(
+    session: &WalletSession,
+    slate_id: Uuid,
+    armored: Option<String>,
+    counterparty: Option<String>,
+) {
+    let entry = TxSidecarEntry {
+        armored_slatepack: armored,
+        counterparty_address: counterparty,
+    };
+    if let Err(e) = Sidecar::upsert(&session.data_dir, slate_id, entry) {
+        log::warn!("Sidecar write failed: {e}");
+    }
+}
+
+/// Amount a log entry moved, the way libwallet computes it for payment
+/// proofs: received amount, or sent amount without the fee.
+fn logged_amount(entry: &TxLogEntry) -> u64 {
+    if entry.amount_credited >= entry.amount_debited {
+        entry.amount_credited - entry.amount_debited
+    } else {
+        let fee = entry.fee.map(|f| f.fee()).unwrap_or(0);
+        (entry.amount_debited - entry.amount_credited).saturating_sub(fee)
+    }
+}
+
+/// Amount of this wallet's log entry for `slate_id`, 0 if there is none.
+fn amount_for_slate(w: &mut Backend, slate_id: &Uuid) -> Result<u64, GrinError> {
+    Ok(w.tx_log_iter()?
+        .filter_map(Result::ok)
+        .find(|t| t.tx_slate_id.as_ref() == Some(slate_id))
+        .map(|t| logged_amount(&t))
+        .unwrap_or(0))
+}
+
+/// Broadcasts a finalized slate through the wallet's node client, with the
+/// wallet mutex released.
+fn post_slate(session: &WalletSession, slate: &Slate, fluff: bool) -> Result<(), GrinError> {
+    let tx = slate.tx_or_err()?;
+    let client = session.node_client()?;
+    owner::post_tx(&client, tx, fluff).map_err(|e| {
+        with_slate_id(
+            GrinError::new(
+                GrinErrorCode::Node,
+                format!("the transaction is finalized but could not be broadcast: {e}"),
+            ),
+            &slate.id,
+        )
+    })
+}
+
+/// Reads `tx_id` (negative means absent) and `slate_id` (NULL or empty
+/// means absent). At least one must be given.
+pub(crate) fn tx_selector(
+    tx_id: i64,
+    slate_id: *const c_char,
+) -> Result<(Option<u32>, Option<Uuid>), GrinError> {
+    let id = if tx_id < 0 {
+        None
+    } else {
+        Some(
+            u32::try_from(tx_id)
+                .map_err(|_| GrinError::invalid_argument("tx_id is larger than a u32"))?,
+        )
+    };
+    let slate = read_opt_nonempty(slate_id, "slate_id")?
+        .map(|s| {
+            Uuid::parse_str(s)
+                .map_err(|_| GrinError::invalid_argument("slate_id is not a valid UUID"))
+        })
+        .transpose()?;
+    if id.is_none() && slate.is_none() {
+        return Err(GrinError::invalid_argument(
+            "give a tx_id of 0 or more, or a slate_id",
+        ));
+    }
+    Ok((id, slate))
+}
+
+/// A Slatepack this wallet produced (S1, S2, I1 or I2).
+#[derive(Serialize)]
+struct SlatepackOut {
+    slate_id: String,
+    state: &'static str,
+    armored_slatepack: String,
+    amount: u64,
+    fee: u64,
+    sender: Option<String>,
+    recipients: Vec<String>,
+    is_encrypted: bool,
+}
+
+/// Armors `slate` with our address as sender, encrypted to `recipients`
+/// when there are any. `amount` and `fee` describe the transaction; slates
+/// on the return journey carry 0 for both, so the caller passes them.
+fn pack_out(
+    session: &WalletSession,
+    slate: &Slate,
+    amount: u64,
+    fee: u64,
+    recipients: Vec<SlatepackAddress>,
+) -> Result<SlatepackOut, GrinError> {
+    let mask = session.mask();
+    let sender =
+        owner::get_slatepack_address(session.wallet.clone(), mask.as_ref(), ADDRESS_INDEX)?;
+    let armored = owner::create_slatepack_message(
+        session.wallet.clone(),
+        mask.as_ref(),
+        slate,
+        Some(ADDRESS_INDEX),
+        recipients.clone(),
+    )?;
+    Ok(SlatepackOut {
+        slate_id: slate.id.to_string(),
+        state: state_name(&slate.state),
+        armored_slatepack: armored,
+        amount,
+        fee,
+        sender: Some(address_string(&sender)?),
+        recipients: recipients
+            .iter()
+            .map(address_string)
+            .collect::<Result<_, _>>()?,
+        is_encrypted: !recipients.is_empty(),
+    })
+}
+
+/// Result of finalizing (S3 or I3).
+#[derive(Serialize)]
+struct FinalizedOut {
+    slate_id: String,
+    state: &'static str,
+    amount: u64,
+    fee: u64,
+    kernel_excess: Option<String>,
+    posted: bool,
+    armored_slatepack: String,
+}
+
+/// Armors the finalized slate (plain, no sender), records it in the sidecar
+/// and broadcasts it when asked.
+fn finish_finalized(
+    session: &WalletSession,
+    slate: &Slate,
+    amount: u64,
+    counterparty: Option<String>,
+    broadcast: bool,
+    fluff: bool,
+) -> Result<FinalizedOut, GrinError> {
+    let mask = session.mask();
+    let armored =
+        owner::create_slatepack_message(session.wallet.clone(), mask.as_ref(), slate, None, vec![])
+            .map_err(|e| with_slate_id(e.into(), &slate.id))?;
+    remember(session, slate.id, Some(armored.clone()), counterparty);
+    if broadcast {
+        post_slate(session, slate, fluff)?;
+    }
+    Ok(FinalizedOut {
+        slate_id: slate.id.to_string(),
+        state: state_name(&slate.state),
+        amount,
+        fee: slate_fee(slate),
+        kernel_excess: kernel_excess_hex(slate),
+        posted: broadcast,
+        armored_slatepack: armored,
+    })
+}
+
+#[derive(Serialize)]
+struct EstimateOut {
+    fee: u64,
+    /// Net amount the recipient gets.
+    amount: u64,
+    /// Same as `amount`; the name the header comment uses.
+    net_amount: u64,
+    /// `amount` plus `fee`.
+    total: u64,
+    inputs_count: u32,
+    change_outputs: u32,
+}
+
+/// libwallet's fee is `(inputs * INPUT_WEIGHT + outputs * OUTPUT_WEIGHT +
+/// KERNEL_WEIGHT) * accept_fee_base` (grin_core `libtx::tx_fee`), so with
+/// the output count known the input count follows from the fee. Must run on
+/// the thread that computed the fee, which picked the same fee base.
+fn inputs_from_fee(fee: u64, outputs: u64) -> Option<u32> {
+    let base = global::get_accept_fee_base();
+    if base == 0 || !fee.is_multiple_of(base) {
+        return None;
+    }
+    let rest = (fee / base).checked_sub(outputs.checked_mul(OUTPUT_WEIGHT)? + KERNEL_WEIGHT)?;
+    if !rest.is_multiple_of(INPUT_WEIGHT) {
+        return None;
+    }
+    u32::try_from(rest / INPUT_WEIGHT).ok()
+}
+
+/// Returns `{"fee", "net_amount", "inputs_count"}` or InsufficientFunds.
+#[no_mangle]
+pub extern "C" fn grin_tx_estimate_fee(
+    handle: u64,
+    amount: u64,
+    min_confirms: u64,
+    selection_strategy_is_all: bool,
+    amount_includes_fee: bool,
+) -> GrinFfiResult {
+    ffi_guard! {
+        let session = get_session(handle)?;
+        if amount == 0 {
+            return Err(GrinError::invalid_argument("amount must be greater than zero"));
+        }
+        let args = InitTxArgs {
+            amount,
+            amount_includes_fee: Some(amount_includes_fee),
+            minimum_confirmations: min_confirms,
+            selection_strategy_is_use_all: selection_strategy_is_all,
+            estimate_only: Some(true),
+            ..Default::default()
+        };
+        let num_change_outputs = args.num_change_outputs;
+        let slate = with_backend(&session, |w, mask| {
+            Ok(owner::init_send_tx(w, mask, args, false)?)
+        })?;
+        // With estimate_only libwallet adds no inputs to the slate and
+        // reports the value of the selected inputs as `amount`.
+        let fee = slate.fee_fields.fee();
+        let inputs_value = slate.amount;
+        let (net, total) = if amount_includes_fee {
+            let net = amount.checked_sub(fee).ok_or_else(|| {
+                GrinError::new(GrinErrorCode::Transaction, "amount is too small to include the fee")
+            })?;
+            (net, amount)
+        } else {
+            let total = amount
+                .checked_add(fee)
+                .ok_or_else(|| GrinError::invalid_argument("amount plus fee overflows"))?;
+            (amount, total)
+        };
+        let change_outputs = if inputs_value == total { 0 } else { num_change_outputs };
+        let inputs_count = inputs_from_fee(fee, 1 + u64::from(change_outputs)).ok_or_else(|| {
+            GrinError::internal("the fee does not match libwallet's fee formula")
+        })?;
+        to_json(&EstimateOut {
+            fee,
+            amount: net,
+            net_amount: net,
+            total,
+            inputs_count,
+            change_outputs,
+        })
+    }
+}
+
+#[derive(Serialize)]
+struct ProofInfoOut {
+    receiver_address: String,
+    sender_address: String,
+    receiver_signature_present: bool,
+    sender_signature_present: bool,
+}
+
+#[derive(Serialize)]
+struct TxOut {
+    id: u32,
+    slate_id: Option<String>,
+    slate_state: Option<&'static str>,
+    #[serde(rename = "type")]
+    tx_type: &'static str,
+    creation_ts: String,
+    confirmation_ts: Option<String>,
+    confirmed: bool,
+    num_inputs: usize,
+    num_outputs: usize,
+    amount_credited: u64,
+    amount_debited: u64,
+    fee: Option<u64>,
+    ttl_cutoff_height: Option<u64>,
+    kernel_excess: Option<String>,
+    kernel_lookup_min_height: Option<u64>,
+    has_stored_tx: bool,
+    payment_proof: Option<ProofInfoOut>,
+    counterparty_address: Option<String>,
+    armored_slatepack: Option<String>,
+    reverted_after_secs: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct TxsOut {
+    refreshed_from_node: bool,
+    txs: Vec<TxOut>,
+}
+
+fn tx_type_name(t: &TxLogEntryType) -> &'static str {
+    match t {
+        TxLogEntryType::ConfirmedCoinbase => "ConfirmedCoinbase",
+        TxLogEntryType::TxReceived => "TxReceived",
+        TxLogEntryType::TxSent => "TxSent",
+        TxLogEntryType::TxReceivedCancelled => "TxReceivedCancelled",
+        TxLogEntryType::TxSentCancelled => "TxSentCancelled",
+        TxLogEntryType::TxReverted => "TxReverted",
+    }
+}
+
+/// Builds the proof summary. The public keys become slatepack addresses
+/// with the HRP of the thread's chain type, which `get_session` set to the
+/// wallet's.
+fn proof_info(p: &StoredProofInfo) -> Result<ProofInfoOut, GrinError> {
+    Ok(ProofInfoOut {
+        receiver_address: address_string(&SlatepackAddress::new(&p.receiver_address))?,
+        sender_address: address_string(&SlatepackAddress::new(&p.sender_address))?,
+        receiver_signature_present: p.receiver_signature.is_some(),
+        sender_signature_present: p.sender_signature.is_some(),
+    })
+}
+
+fn tx_out(session: &WalletSession, sidecar: &Sidecar, t: TxLogEntry) -> Result<TxOut, GrinError> {
+    let side = t.tx_slate_id.as_ref().and_then(|id| sidecar.get(id));
+    let payment_proof = t.payment_proof.as_ref().map(proof_info).transpose()?;
+    let outgoing = matches!(
+        t.tx_type,
+        TxLogEntryType::TxSent | TxLogEntryType::TxSentCancelled
+    );
+    let counterparty_address = match &payment_proof {
+        Some(p) if outgoing => Some(p.receiver_address.clone()),
+        Some(p) => Some(p.sender_address.clone()),
+        None => side.and_then(|s| s.counterparty_address.clone()),
+    };
+    // The file exists from the moment outputs are locked, but only a
+    // finalized transaction can be reposted.
+    let finalized = matches!(
+        t.tx_slate_state,
+        Some(SlateState::Standard3 | SlateState::Invoice3)
+    );
+    let has_stored_tx = finalized
+        && t.stored_tx
+            .as_deref()
+            .is_some_and(|f| session.data_dir.join(STORED_TX_DIR).join(f).is_file());
+    Ok(TxOut {
+        id: t.id,
+        slate_id: t.tx_slate_id.map(|u| u.to_string()),
+        slate_state: t.tx_slate_state.as_ref().map(state_name),
+        tx_type: tx_type_name(&t.tx_type),
+        creation_ts: t.creation_ts.to_rfc3339(),
+        confirmation_ts: t.confirmation_ts.map(|ts| ts.to_rfc3339()),
+        confirmed: t.confirmed,
+        num_inputs: t.num_inputs,
+        num_outputs: t.num_outputs,
+        amount_credited: t.amount_credited,
+        amount_debited: t.amount_debited,
+        fee: t.fee.map(|f| f.fee()),
+        ttl_cutoff_height: t.ttl_cutoff_height,
+        kernel_excess: t.kernel_excess.map(|c| c.0.to_hex()),
+        kernel_lookup_min_height: t.kernel_lookup_min_height,
+        has_stored_tx,
+        payment_proof,
+        counterparty_address,
+        armored_slatepack: side.and_then(|s| s.armored_slatepack.clone()),
+        reverted_after_secs: t.reverted_after.map(|d| d.as_secs()),
+    })
+}
+
+/// Lists transactions joined with the sidecar metadata.
+#[no_mangle]
+pub extern "C" fn grin_txs_get(handle: u64, refresh_from_node: bool) -> GrinFfiResult {
+    ffi_guard! {
+        let session = get_session(handle)?;
+        let mask = session.mask();
+        let (refreshed, txs) = owner::retrieve_txs(
+            session.wallet.clone(),
+            mask.as_ref(),
+            &None,
+            refresh_from_node,
+            None,
+            None,
+            None,
+        )?;
+        let sidecar = Sidecar::load(&session.data_dir);
+        let txs = txs
+            .into_iter()
+            .map(|t| tx_out(&session, &sidecar, t))
+            .collect::<Result<Vec<_>, _>>()?;
+        to_json(&TxsOut {
+            refreshed_from_node: refreshed,
+            txs,
+        })
+    }
+}
+
+/// `args_json` of `grin_tx_init_send`. Unknown keys (including the v3-era
+/// `message`) are ignored.
+#[derive(Deserialize)]
+struct SendArgs {
+    amount: u64,
+    #[serde(default = "default_min_confirms")]
+    min_confirms: u64,
+    #[serde(default)]
+    selection_strategy_is_all: Option<bool>,
+    #[serde(default)]
+    amount_includes_fee: Option<bool>,
+    #[serde(default)]
+    recipient_address: Option<String>,
+    #[serde(default)]
+    ttl_blocks: Option<u64>,
+    #[serde(default)]
+    late_lock: Option<bool>,
+}
+
+impl SendArgs {
+    fn late_lock(&self) -> bool {
+        self.late_lock.unwrap_or(false)
+    }
+
+    /// The recipient's slatepack address, if given and not empty.
+    fn recipient(&self) -> Result<Option<SlatepackAddress>, GrinError> {
+        self.recipient_address
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(parse_slatepack_address)
+            .transpose()
+    }
+
+    fn init_tx_args(
+        &self,
+        proof_address: Option<SlatepackAddress>,
+    ) -> Result<InitTxArgs, GrinError> {
+        if self.amount == 0 {
+            return Err(GrinError::invalid_argument(
+                "amount must be greater than zero",
+            ));
+        }
+        if self.ttl_blocks == Some(0) {
+            return Err(GrinError::invalid_argument(
+                "ttl_blocks must be greater than zero",
+            ));
+        }
+        Ok(InitTxArgs {
+            amount: self.amount,
+            amount_includes_fee: Some(self.amount_includes_fee.unwrap_or(false)),
+            minimum_confirmations: self.min_confirms,
+            selection_strategy_is_use_all: self.selection_strategy_is_all.unwrap_or(false),
+            ttl_blocks: self.ttl_blocks,
+            payment_proof_recipient_address: proof_address,
+            late_lock: Some(self.late_lock()),
+            ..Default::default()
+        })
+    }
+}
+
+/// Builds and locks an S1 and returns it as a Slatepack.
+#[no_mangle]
+pub extern "C" fn grin_tx_init_send(handle: u64, args_json: *const c_char) -> GrinFfiResult {
+    ffi_guard! {
+        let session = get_session(handle)?;
+        let args: SendArgs = parse_args(args_json, "args_json")?;
+        let recipient = args.recipient()?;
+        let tx_args = args.init_tx_args(recipient.clone())?;
+        let late_lock = args.late_lock();
+        let slate = with_backend(&session, |w, mask| {
+            let slate = owner::init_send_tx(w, mask, tx_args, false)?;
+            // With late locking libwallet selects and locks inputs at
+            // finalization instead.
+            if !late_lock {
+                owner::tx_lock_outputs(w, mask, &slate)?;
+            }
+            Ok(slate)
+        })?;
+        let counterparty = recipient.as_ref().map(address_string).transpose()?;
+        let out = pack_out(
+            &session,
+            &slate,
+            slate.amount,
+            slate_fee(&slate),
+            recipient.into_iter().collect(),
+        )
+        .map_err(|e| with_slate_id(e, &slate.id))?;
+        remember(&session, slate.id, Some(out.armored_slatepack.clone()), counterparty);
+        to_json(&out)
+    }
+}
+
+/// `args_json` of `grin_tx_send_http`.
+#[derive(Deserialize)]
+struct SendHttpArgs {
+    #[serde(flatten)]
+    send: SendArgs,
+    recipient_url_or_address: String,
+    #[serde(default)]
+    fluff: Option<bool>,
+    #[serde(default)]
+    post: Option<bool>,
+}
+
+#[derive(Serialize)]
+struct SendHttpOut {
+    slate_id: String,
+    state: &'static str,
+    amount: u64,
+    fee: u64,
+    kernel_excess: Option<String>,
+    posted: bool,
+}
+
+/// Synchronous send to a slatepack address (over Tor) or an http(s) URL.
+#[no_mangle]
+pub extern "C" fn grin_tx_send_http(handle: u64, args_json: *const c_char) -> GrinFfiResult {
+    ffi_guard! {
+        let session = get_session(handle)?;
+        let args: SendHttpArgs = parse_args(args_json, "args_json")?;
+        let target = parse_address(&args.recipient_url_or_address)?;
+        let (proxy, timeout) = {
+            let node = session.node_settings();
+            (node.socks_proxy, node.timeout)
+        };
+        // Slatepack and onion targets both resolve to a .onion URL, which
+        // only a Tor SOCKS proxy can reach.
+        if target.kind != "http" && proxy.is_none() {
+            return Err(GrinError::invalid_argument(
+                "sending to a slatepack or onion address needs a SOCKS proxy (Tor) in the wallet's network settings",
+            ));
+        }
+        let explicit = args.send.recipient()?;
+        let proof_address = if target.kind == "slatepack" {
+            let addr = parse_slatepack_address(target.slatepack_address.as_deref().unwrap_or_default())?;
+            if explicit.as_ref().is_some_and(|e| e.pub_key != addr.pub_key) {
+                return Err(GrinError::invalid_argument(
+                    "recipient_address differs from the slatepack address being sent to",
+                ));
+            }
+            Some(addr)
+        } else {
+            explicit
+        };
+        let counterparty = match &target.slatepack_address {
+            Some(a) if target.kind == "slatepack" => a.clone(),
+            _ => target.url.clone(),
+        };
+        let mut sender = match proxy {
+            Some(p) => HttpSlateSender::with_socks_proxy(&target.url, p, timeout),
+            None => HttpSlateSender::new(&target.url, timeout),
+        }
+        .map_err(|e| GrinError::new(GrinErrorCode::InvalidAddress, e.to_string()))?;
+        let tx_args = args.send.init_tx_args(proof_address)?;
+        let late_lock = args.send.late_lock();
+
+        let s1 = with_backend(&session, |w, mask| {
+            Ok(owner::init_send_tx(w, mask, tx_args, false)?)
+        })?;
+        // No wallet lock during the round trip. Nothing is locked yet, so a
+        // failed send leaves only an unused transaction context behind.
+        let s2 = sender.send_tx(&s1, false).map_err(|e| {
+            GrinError::new(
+                GrinErrorCode::Http,
+                format!("the recipient wallet did not take the transaction: {e}"),
+            )
+        })?;
+        if s2.id != s1.id || s2.state != SlateState::Standard2 {
+            return Err(GrinError::new(
+                GrinErrorCode::Http,
+                format!(
+                    "the recipient wallet answered with an unexpected slate ({} {})",
+                    s2.id,
+                    state_name(&s2.state)
+                ),
+            ));
+        }
+        let s3 = with_backend(&session, |w, mask| {
+            if !late_lock {
+                owner::tx_lock_outputs(w, mask, &s2)?;
+            }
+            Ok(owner::finalize_tx(w, mask, &s2)?)
+        })
+        .map_err(|e| with_slate_id(e, &s1.id))?;
+        remember(&session, s3.id, None, Some(counterparty));
+        let post = args.post.unwrap_or(true);
+        if post {
+            post_slate(&session, &s3, args.fluff.unwrap_or(false))?;
+        }
+        to_json(&SendHttpOut {
+            slate_id: s3.id.to_string(),
+            state: state_name(&s3.state),
+            amount: s1.amount,
+            fee: slate_fee(&s1),
+            kernel_excess: kernel_excess_hex(&s3),
+            posted: post,
+        })
+    }
+}
+
+/// Receives an S1 Slatepack and returns the S2 Slatepack.
+#[no_mangle]
+pub extern "C" fn grin_tx_receive_slatepack(
+    handle: u64,
+    armored_s1: *const c_char,
+    message: *const c_char,
+) -> GrinFfiResult {
+    ffi_guard! {
+        let session = get_session(handle)?;
+        let armored = read_str(armored_s1, "armored_s1")?;
+        // Slate v4 has no message field; read only to check the argument.
+        let _ = read_opt_str(message, "message")?;
+        let decoded = decode_with_wallet(&session, armored, ADDRESS_INDEX)?;
+        let s1 = &decoded.slate;
+        require_state(s1, SlateState::Standard1)?;
+        let s2 = with_backend(&session, |w, mask| {
+            Ok(foreign::receive_tx(w, mask, s1, None, false)?)
+        })?;
+        let counterparty = decoded.sender.as_ref().map(address_string).transpose()?;
+        // Encrypt the reply to the sender when the S1 named one.
+        let out = pack_out(
+            &session,
+            &s2,
+            s1.amount,
+            slate_fee(s1),
+            decoded.sender.clone().into_iter().collect(),
+        )
+        .map_err(|e| with_slate_id(e, &s2.id))?;
+        remember(&session, s2.id, Some(out.armored_slatepack.clone()), counterparty);
+        to_json(&out)
+    }
+}
+
+/// Finalizes an S2 Slatepack into S3, optionally broadcasting it.
+#[no_mangle]
+pub extern "C" fn grin_tx_finalize_slatepack(
+    handle: u64,
+    armored_s2: *const c_char,
+    broadcast: bool,
+    fluff: bool,
+) -> GrinFfiResult {
+    ffi_guard! {
+        let session = get_session(handle)?;
+        let armored = read_str(armored_s2, "armored_s2")?;
+        let decoded = decode_with_wallet(&session, armored, ADDRESS_INDEX)?;
+        require_state(&decoded.slate, SlateState::Standard2)?;
+        let (s3, amount) = with_backend(&session, |w, mask| {
+            let s3 = owner::finalize_tx(w, mask, &decoded.slate)?;
+            let amount = amount_for_slate(w, &s3.id)?;
+            Ok((s3, amount))
+        })?;
+        let counterparty = decoded.sender.as_ref().map(address_string).transpose()?;
+        to_json(&finish_finalized(&session, &s3, amount, counterparty, broadcast, fluff)?)
+    }
+}
+
+/// `args_json` of `grin_tx_issue_invoice`.
+#[derive(Deserialize)]
+struct InvoiceArgs {
+    amount: u64,
+    #[serde(default)]
+    dest_acct_name: Option<String>,
+    #[serde(default)]
+    recipient_address: Option<String>,
+}
+
+/// Issues an I1 invoice Slatepack.
+#[no_mangle]
+pub extern "C" fn grin_tx_issue_invoice(handle: u64, args_json: *const c_char) -> GrinFfiResult {
+    ffi_guard! {
+        let session = get_session(handle)?;
+        let args: InvoiceArgs = parse_args(args_json, "args_json")?;
+        if args.amount == 0 {
+            return Err(GrinError::invalid_argument("amount must be greater than zero"));
+        }
+        let payer = args
+            .recipient_address
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(parse_slatepack_address)
+            .transpose()?;
+        let invoice_args = IssueInvoiceTxArgs {
+            dest_acct_name: args.dest_acct_name.filter(|s| !s.is_empty()),
+            amount: args.amount,
+            target_slate_version: None,
+        };
+        let i1 = with_backend(&session, |w, mask| {
+            Ok(owner::issue_invoice_tx(w, mask, invoice_args, false)?)
+        })?;
+        let counterparty = payer.as_ref().map(address_string).transpose()?;
+        let out = pack_out(&session, &i1, i1.amount, slate_fee(&i1), payer.into_iter().collect())
+            .map_err(|e| with_slate_id(e, &i1.id))?;
+        remember(&session, i1.id, Some(out.armored_slatepack.clone()), counterparty);
+        to_json(&out)
+    }
+}
+
+/// `args_json` of `grin_tx_process_invoice`.
+#[derive(Deserialize)]
+struct PayInvoiceArgs {
+    #[serde(default = "default_min_confirms")]
+    min_confirms: u64,
+    #[serde(default)]
+    selection_strategy_is_all: Option<bool>,
+    #[serde(default)]
+    ttl_blocks: Option<u64>,
+}
+
+/// Pays an I1 invoice, locks the inputs and returns the I2 Slatepack.
+#[no_mangle]
+pub extern "C" fn grin_tx_process_invoice(
+    handle: u64,
+    armored_i1: *const c_char,
+    args_json: *const c_char,
+) -> GrinFfiResult {
+    ffi_guard! {
+        let session = get_session(handle)?;
+        let armored = read_str(armored_i1, "armored_i1")?;
+        let args: PayInvoiceArgs = parse_args(args_json, "args_json")?;
+        if args.ttl_blocks == Some(0) {
+            return Err(GrinError::invalid_argument("ttl_blocks must be greater than zero"));
+        }
+        let decoded = decode_with_wallet(&session, armored, ADDRESS_INDEX)?;
+        let i1 = &decoded.slate;
+        require_state(i1, SlateState::Invoice1)?;
+        let tx_args = InitTxArgs {
+            amount: i1.amount,
+            minimum_confirmations: args.min_confirms,
+            selection_strategy_is_use_all: args.selection_strategy_is_all.unwrap_or(false),
+            ttl_blocks: args.ttl_blocks,
+            ..Default::default()
+        };
+        let i2 = with_backend(&session, |w, mask| {
+            let i2 = owner::process_invoice_tx(w, mask, i1, tx_args, false)?;
+            // process_invoice_tx selects inputs but does not lock them.
+            owner::tx_lock_outputs(w, mask, &i2)?;
+            Ok(i2)
+        })?;
+        let counterparty = decoded.sender.as_ref().map(address_string).transpose()?;
+        let out = pack_out(
+            &session,
+            &i2,
+            i1.amount,
+            slate_fee(&i2),
+            decoded.sender.clone().into_iter().collect(),
+        )
+        .map_err(|e| with_slate_id(e, &i2.id))?;
+        remember(&session, i2.id, Some(out.armored_slatepack.clone()), counterparty);
+        to_json(&out)
+    }
+}
+
+/// Finalizes an I2 Slatepack into I3, optionally broadcasting it.
+#[no_mangle]
+pub extern "C" fn grin_tx_finalize_invoice(
+    handle: u64,
+    armored_i2: *const c_char,
+    broadcast: bool,
+    fluff: bool,
+) -> GrinFfiResult {
+    ffi_guard! {
+        let session = get_session(handle)?;
+        let armored = read_str(armored_i2, "armored_i2")?;
+        let decoded = decode_with_wallet(&session, armored, ADDRESS_INDEX)?;
+        require_state(&decoded.slate, SlateState::Invoice2)?;
+        let (i3, amount) = with_backend(&session, |w, mask| {
+            // Broadcasting happens below, with the wallet mutex released.
+            let i3 = foreign::finalize_tx(w, mask, &decoded.slate, false)?;
+            let amount = amount_for_slate(w, &i3.id)?;
+            Ok((i3, amount))
+        })?;
+        let counterparty = decoded.sender.as_ref().map(address_string).transpose()?;
+        to_json(&finish_finalized(&session, &i3, amount, counterparty, broadcast, fluff)?)
+    }
+}
+
+/// Re-broadcasts a finalized, unconfirmed transaction.
+#[no_mangle]
+pub extern "C" fn grin_tx_repost(
+    handle: u64,
+    tx_id: i64,
+    slate_id: *const c_char,
+    fluff: bool,
+) -> GrinFfiResult {
+    ffi_guard! {
+        let session = get_session(handle)?;
+        let (tx_id, slate_id) = tx_selector(tx_id, slate_id)?;
+        let slate = with_backend(&session, |w, _mask| {
+            match owner::get_stored_tx(w, tx_id, slate_id.as_ref()) {
+                Ok(Some(slate)) => Ok(slate),
+                // StoredTx: no log entry or slate id matched. IO: the
+                // transaction was never finalized, so no file was saved.
+                Ok(None) | Err(LibwalletError::StoredTx(_)) | Err(LibwalletError::IO(_)) => {
+                    Err(GrinError::new(
+                        GrinErrorCode::NotFound,
+                        "no finalized transaction is stored for this id",
+                    ))
+                }
+                Err(e) => Err(e.into()),
+            }
+        })?;
+        // libwallet stores the unsigned transaction as soon as outputs are
+        // locked, so a stored file alone does not mean it can be posted.
+        slate.tx_or_err()?.validate(Weighting::AsTransaction).map_err(|_| {
+            GrinError::new(
+                GrinErrorCode::NotFound,
+                "the stored transaction is not finalized yet",
+            )
+        })?;
+        post_slate(&session, &slate, fluff)?;
+        to_json(&serde_json::json!({ "posted": true }))
+    }
+}
+
+/// Cancels a transaction by id or slate id and unlocks its inputs.
+#[no_mangle]
+pub extern "C" fn grin_tx_cancel(
+    handle: u64,
+    tx_id: i64,
+    slate_id: *const c_char,
+) -> GrinFfiResult {
+    ffi_guard! {
+        let session = get_session(handle)?;
+        let (tx_id, slate_id) = tx_selector(tx_id, slate_id)?;
+        let mask = session.mask();
+        owner::cancel_tx(session.wallet.clone(), mask.as_ref(), &None, tx_id, slate_id)?;
+        to_json(&serde_json::json!({ "cancelled": true }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use grin_core::global::ChainTypes;
+    use grin_core::libtx::tx_fee;
+    use std::ffi::CString;
+
+    #[test]
+    fn inputs_follow_from_the_fee() {
+        global::set_local_chain_type(ChainTypes::AutomatedTesting);
+        for inputs in [1usize, 2, 7, 120] {
+            for outputs in [1usize, 2] {
+                let fee = tx_fee(inputs, outputs, 1);
+                assert_eq!(
+                    inputs_from_fee(fee, outputs as u64),
+                    Some(inputs as u32),
+                    "{inputs} inputs, {outputs} outputs"
+                );
+            }
+        }
+        assert_eq!(inputs_from_fee(1, 1), None);
+        assert_eq!(inputs_from_fee(0, 2), None);
+    }
+
+    #[test]
+    fn selector_rules() {
+        assert_eq!(
+            tx_selector(-1, std::ptr::null()).unwrap_err().code,
+            GrinErrorCode::InvalidArgument
+        );
+        let empty = CString::new(" ").unwrap();
+        assert_eq!(
+            tx_selector(-5, empty.as_ptr()).unwrap_err().code,
+            GrinErrorCode::InvalidArgument
+        );
+        assert_eq!(
+            tx_selector(i64::from(u32::MAX) + 1, std::ptr::null())
+                .unwrap_err()
+                .code,
+            GrinErrorCode::InvalidArgument
+        );
+        let bad = CString::new("not-a-uuid").unwrap();
+        assert_eq!(
+            tx_selector(-1, bad.as_ptr()).unwrap_err().code,
+            GrinErrorCode::InvalidArgument
+        );
+        assert_eq!(tx_selector(3, std::ptr::null()).unwrap(), (Some(3), None));
+        let id = Uuid::new_v4();
+        let s = CString::new(id.to_string()).unwrap();
+        assert_eq!(tx_selector(-1, s.as_ptr()).unwrap(), (None, Some(id)));
+    }
+
+    #[test]
+    fn send_args_defaults_and_checks() {
+        let a: SendArgs = serde_json::from_str(r#"{"amount": 5, "message": "hi"}"#).unwrap();
+        assert_eq!(a.min_confirms, DEFAULT_MIN_CONFIRMS);
+        let t = a.init_tx_args(None).unwrap();
+        assert!(!t.selection_strategy_is_use_all);
+        assert_eq!(t.amount_includes_fee, Some(false));
+        assert_eq!(t.late_lock, Some(false));
+        let a: SendArgs = serde_json::from_str(r#"{"amount": 0}"#).unwrap();
+        assert_eq!(
+            a.init_tx_args(None).unwrap_err().code,
+            GrinErrorCode::InvalidArgument
+        );
+        let a: SendArgs = serde_json::from_str(r#"{"amount": 1, "ttl_blocks": 0}"#).unwrap();
+        assert!(a.init_tx_args(None).is_err());
+        assert!(serde_json::from_str::<SendArgs>(r#"{"min_confirms": 1}"#).is_err());
+        let h: SendHttpArgs = serde_json::from_str(
+            r#"{"amount": 7, "min_confirms": 2, "recipient_url_or_address": "http://x", "late_lock": null}"#,
+        )
+        .unwrap();
+        assert_eq!(h.send.amount, 7);
+        assert_eq!(h.send.min_confirms, 2);
+        assert!(h.post.is_none());
+    }
+
+    #[test]
+    fn amounts_from_log_entries() {
+        use grin_keychain::Keychain;
+        let id = ExtKeychain::derive_key_id(2, 0, 0, 0, 0);
+        let mut t = TxLogEntry::new(id, TxLogEntryType::TxSent, 1);
+        t.amount_debited = 100;
+        t.amount_credited = 30;
+        t.fee = grin_core::core::FeeFields::new(0, 5).ok();
+        assert_eq!(logged_amount(&t), 65);
+        t.amount_debited = 0;
+        assert_eq!(logged_amount(&t), 30);
+    }
+}

@@ -145,7 +145,10 @@ impl From<LibwalletError> for GrinError {
             LibwalletError::Lifecycle(_)
             | LibwalletError::KeychainDoesntExist
             | LibwalletError::InvalidKeychainMask => C::Lifecycle,
-            LibwalletError::Node | LibwalletError::ClientCallback(_) => C::Node,
+            // owner::cancel_tx refuses to cancel when it cannot reach the node.
+            LibwalletError::Node
+            | LibwalletError::ClientCallback(_)
+            | LibwalletError::TransactionCancellationError(_) => C::Node,
             LibwalletError::WalletComms(_) | LibwalletError::Hyper | LibwalletError::Uri => C::Http,
             LibwalletError::IO(_) => C::Io,
             LibwalletError::Format(_) => C::Json,
@@ -166,7 +169,6 @@ impl From<LibwalletError> for GrinError {
             LibwalletError::TransactionDoesntExist(_) => C::NotFound,
             LibwalletError::DuplicateTransactionId
             | LibwalletError::TransactionNotCancellable(_)
-            | LibwalletError::TransactionCancellationError(_)
             | LibwalletError::TransactionDumpError(_)
             | LibwalletError::TransactionAlreadyConfirmed
             | LibwalletError::TransactionAlreadyReceived(_)
@@ -175,12 +177,22 @@ impl From<LibwalletError> for GrinError {
             | LibwalletError::TransactionExpired
             | LibwalletError::Transaction(_)
             | LibwalletError::LibTX(_)
-            | LibwalletError::StoredTx(_) => C::Transaction,
+            | LibwalletError::StoredTx(_)
+            // A proof that does not verify (signature, kernel not on chain).
+            | LibwalletError::PaymentProof(_) => C::Transaction,
             LibwalletError::SlatepackAddress(_)
             | LibwalletError::AddressDecoding(_)
             | LibwalletError::OnionV3Address(_)
             | LibwalletError::ED25519Key(_) => C::InvalidAddress,
             LibwalletError::PaymentProofRetrieval(_) => C::NotFound,
+            // grin_store's NotFoundErr, e.g. no transaction context for a
+            // slate that is unknown or already finalized.
+            LibwalletError::Backend(msg) if msg.starts_with("DB Not Found Error") => C::NotFound,
+            // Coin selection with the fee taken out of a too small amount.
+            LibwalletError::GenericError(msg) if msg.contains("too small to include fee") => {
+                C::Transaction
+            }
+            LibwalletError::PaymentProofParsing(_) => C::Json,
             LibwalletError::UnknownAccountLabel(_) => C::InvalidArgument,
             _ => C::Internal,
         };
@@ -495,6 +507,27 @@ mod tests {
         let d = e.details.unwrap();
         assert_eq!(d["required"], 9);
         assert_eq!(d["available"], 5);
+    }
+
+    #[test]
+    fn transaction_error_mapping() {
+        let e: GrinError = LibwalletError::TransactionCancellationError("no node").into();
+        assert_eq!(e.code, GrinErrorCode::Node);
+        let e: GrinError = LibwalletError::PaymentProof("Invalid sender signature".into()).into();
+        assert_eq!(e.code, GrinErrorCode::Transaction);
+        let e: GrinError = LibwalletError::PaymentProofRetrieval("none".into()).into();
+        assert_eq!(e.code, GrinErrorCode::NotFound);
+        let e: GrinError = LibwalletError::SlateState.into();
+        assert_eq!(e.code, GrinErrorCode::Slate);
+        let e: GrinError =
+            LibwalletError::Backend("DB Not Found Error: Slate id: [1]".into()).into();
+        assert_eq!(e.code, GrinErrorCode::NotFound);
+        let e: GrinError = LibwalletError::Backend("LMDB error: x".into()).into();
+        assert_eq!(e.code, GrinErrorCode::Internal);
+        let e: GrinError =
+            LibwalletError::GenericError("Transaction amount is too small to include fee".into())
+                .into();
+        assert_eq!(e.code, GrinErrorCode::Transaction);
     }
 
     #[test]

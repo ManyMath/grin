@@ -1279,7 +1279,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "url",
- "uuid 0.8.2",
+ "uuid",
  "zeroize",
 ]
 
@@ -1563,7 +1563,7 @@ dependencies = [
  "strum",
  "strum_macros",
  "thiserror 1.0.69",
- "uuid 1.29.0",
+ "uuid",
  "x25519-dalek 2.0.1",
 ]
 
@@ -4145,16 +4145,6 @@ name = "utf_types"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a3b425286980a367278453f3b6d28cdcb134b574e5a35824a6ff5eebad50bb6"
-
-[[package]]
-name = "uuid"
-version = "0.8.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc5cf98d8186244414c848017f0e2676b3fcb46807f6668a97dfe67359a3c4b7"
-dependencies = [
- "getrandom 0.2.17",
- "serde",
-]
 
 [[package]]
 name = "uuid"

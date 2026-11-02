@@ -2,7 +2,7 @@
 # which rebuilds the header first. Direct: `dart run ffigen --config ffigen.yaml`.
 name: GrinFfiBindings
 description: |
-  Bindings for rust/grin-ffi/include/grin_ffi.h.
+  Bindings for rust/include/grin_ffi.h.
 
   Regenerate with `dart run tool/regen_bindings.dart`.
 output: 'lib/src/ffi/bindings.g.dart'
@@ -10,9 +10,13 @@ ffi-native:
   asset-id: 'package:grin/src/ffi/bindings.g.dart'
 headers:
   entry-points:
-    - 'rust/grin-ffi/include/grin_ffi.h'
+    - 'rust/include/grin_ffi.h'
   include-directives:
-    - 'rust/grin-ffi/include/grin_ffi.h'
+    - 'rust/include/grin_ffi.h'
+# The grin_test_* declarations sit behind this define in the header. They are
+# bound lazily, so a library built without test-utils only fails when one is called.
+compiler-opts:
+  - '-DGRIN_FFI_TEST_UTILS'
 functions:
   include:
     - 'grin_.*'

@@ -18,7 +18,13 @@ Future<void> main(List<String> args) => runNativeBuildHook(
     // Read by nix/build-apple.sh; the hook sets it, users do not.
     appleAnyXcodeVariable: 'GRIN_FFI_ANY_XCODE',
     // Rerun source and dev builds when what the Nix build reads changes.
-    nativeSources: ['rust', 'flake.nix', 'flake.lock', 'nix', 'build-config.json'],
+    nativeSources: [
+      'rust',
+      'flake.nix',
+      'flake.lock',
+      'nix',
+      'build-config.json',
+    ],
     cargoBuild: _cargoBuild,
   ),
 );
@@ -72,7 +78,7 @@ Future<void> _cargoBuild(BuildInput input, BuildOutputBuilder output) async {
 
   await RustBuilder(
     assetName: 'src/ffi/bindings.g.dart',
-    cratePath: 'rust/grin-ffi',
+    cratePath: 'rust',
     extraCargoBuildArgs: [
       '--locked',
       '--lib',

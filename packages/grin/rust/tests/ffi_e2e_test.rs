@@ -26,7 +26,6 @@ const NODE: i32 = GrinErrorCode::Node as i32;
 const CANCELLED: i32 = GrinErrorCode::Cancelled as i32;
 const INTERNAL_PANIC: i32 = GrinErrorCode::InternalPanic as i32;
 const WALLET_BUSY: i32 = GrinErrorCode::WalletBusy as i32;
-const NOT_SUPPORTED: i32 = GrinErrorCode::NotSupported as i32;
 const INVALID_ADDRESS: i32 = GrinErrorCode::InvalidAddress as i32;
 const INVALID_MNEMONIC: i32 = GrinErrorCode::InvalidMnemonic as i32;
 
@@ -311,12 +310,13 @@ fn funded_wallet_on_test_chain() {
     assert_eq!(code_of(call(grin_wallet_scan(alice, 0, false))), CANCELLED);
     call(grin_wallet_scan(alice, 3, false)).unwrap();
 
-    // Phase 1b entry points exist and say so.
-    assert_eq!(code_of(call(grin_txs_get(alice, false))), NOT_SUPPORTED);
-    assert_eq!(
-        code_of(call(grin_tx_estimate_fee(alice, 1, 1, false, false))),
-        NOT_SUPPORTED
-    );
+    // History holds only the coinbase outputs so far.
+    let txs = call(grin_txs_get(alice, false)).unwrap();
+    let txs = txs["txs"].as_array().unwrap();
+    assert!(!txs.is_empty());
+    assert!(txs.iter().all(|t| t["type"] == "ConfirmedCoinbase"));
+    let est = call(grin_tx_estimate_fee(alice, 1_000_000_000, 1, false, false)).unwrap();
+    assert!(est["fee"].as_u64().unwrap() > 0, "{est}");
 
     close(alice);
     close(bob);

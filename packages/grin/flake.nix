@@ -17,7 +17,7 @@
     # evaluation time with the user's ssh setup, flake.lock pins it by rev
     # and narHash, and the overlay below hands that tree to importCargoLock
     # in place of fetchgit. Keep rev equal to the rev in
-    # rust/grin-ffi/Cargo.toml (test/kit_pin_test.dart checks that too).
+    # rust/Cargo.toml (test/kit_pin_test.dart checks that too).
     grin-wallet = {
       url = "git+ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git?ref=optional-tor-rustls&rev=64d361f2e49fa6d544cf0236417da48a99444b2f&submodules=1";
       flake = false;

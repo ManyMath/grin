@@ -4,14 +4,14 @@
 //   dart run tool/regen_bindings.dart --check  # fail if anything would change
 //
 // Steps: cargo build -p grin-ffi (build.rs runs cbindgen and refreshes
-// packages/grin/rust/grin-ffi/include/grin_ffi.h), then ffigen in
+// packages/grin/rust/include/grin_ffi.h), then ffigen in
 // packages/grin, then dart format on the generated file. --check runs the
 // same and fails when git reports a diff in either generated file.
 import 'dart:io';
 
 import 'package:path/path.dart' as p;
 
-const _header = 'packages/grin/rust/grin-ffi/include/grin_ffi.h';
+const _header = 'packages/grin/rust/include/grin_ffi.h';
 const _bindings = 'packages/grin/lib/src/ffi/bindings.g.dart';
 
 Future<void> main(List<String> args) async {
