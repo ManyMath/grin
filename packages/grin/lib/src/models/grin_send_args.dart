@@ -34,8 +34,8 @@ final class GrinSendArgs {
   /// and a payment proof is requested from it.
   final String? recipientAddress;
 
-  /// Blocks until the transaction expires, greater than 0, or null for no
-  /// limit.
+  /// Blocks until the transaction expires, 1 to 1,000,000,000, or null for
+  /// no limit.
   final int? ttlBlocks;
 
   /// Accepted and ignored by the native library, because Slate V4 has no
@@ -132,8 +132,8 @@ final class GrinHttpSendArgs {
   /// [recipientUrlOrAddress] when that is a Slatepack address too.
   final String? recipientAddress;
 
-  /// Blocks until the transaction expires, greater than 0, or null for no
-  /// limit.
+  /// Blocks until the transaction expires, 1 to 1,000,000,000, or null for
+  /// no limit.
   final int? ttlBlocks;
 
   /// Accepted and ignored by the native library.

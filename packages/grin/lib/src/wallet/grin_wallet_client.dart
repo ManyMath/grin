@@ -51,6 +51,13 @@ import 'grin_wallet_event.dart';
 ///   [FormatException], also through the returned future. It means a
 ///   mismatch between this package and the library, not a wallet problem.
 ///
+/// A queued operation runs whether or not anyone awaits its future, and the
+/// queue goes on to the next one when it fails. Its error is only
+/// observable through its own future: the queue handles every result, so a
+/// failed call that nobody awaits does not reach the zone's uncaught-error
+/// handler either. Await the future, or attach a handler, for any call
+/// whose failure matters.
+///
 /// Call [close] when you are done. A client that is dropped without it is
 /// closed by a native finalizer when it is garbage collected, but the
 /// directory may stay busy until any operation still running has returned.
@@ -60,12 +67,30 @@ class GrinWalletClient implements Finalizable {
   /// Only for code that obtains a handle by other means, such as the test
   /// harness. Use [create] or [open] otherwise. The client takes ownership
   /// of the handle and closes it.
+  ///
+  /// The native finalizer gets the handle as its pointer token, and on a
+  /// 32-bit platform a pointer holds only 32 bits. A handle above
+  /// 4294967295 is therefore closed at once and [StateError] is thrown,
+  /// rather than leaving a finalizer that would close the wrong handle.
+  /// Handles start at 1 and grow by one per successful open, so this takes
+  /// 2^32 opens in one process.
   @internal
   GrinWalletClient.fromHandle({
     required int handle,
     required this.walletDir,
     required this.network,
   }) : _handle = handle {
+    if (sizeOf<Pointer<Void>>() == 4 && handle > 0xFFFFFFFF) {
+      try {
+        unwrapFfiResult(bindings.grin_wallet_close(handle));
+      } on GrinException {
+        // Nothing more can be done with it.
+      }
+      throw StateError(
+        'wallet handle $handle does not fit the native finalizer token on '
+        'this 32-bit platform',
+      );
+    }
     _finalizer.attach(this, Pointer<Void>.fromAddress(handle), detach: this);
   }
 
@@ -282,7 +307,8 @@ class GrinWalletClient implements Finalizable {
   bool get isClosed => _closed;
 
   /// Events of this client. A broadcast stream: listen before the action
-  /// whose events you want. It ends after [GrinWalletClosed].
+  /// whose events you want. It ends after [GrinWalletClosed], or without it
+  /// when the native close in [close] failed.
   Stream<GrinWalletEvent> get events => _events.stream;
 
   /// The native handle. For the test harness only.
@@ -294,6 +320,10 @@ class GrinWalletClient implements Finalizable {
 
   /// Runs [operation] after everything queued before it. For the test
   /// harness only.
+  ///
+  /// [operation] runs even if the returned future is never awaited. Its
+  /// error is only observable through that future, and the queue carries on
+  /// after it.
   @internal
   Future<T> runQueued<T>(Future<T> Function() operation) {
     _ensureOpen();
@@ -768,7 +798,11 @@ class GrinWalletClient implements Finalizable {
   ///    boundary and a scan still waiting in the queue is skipped,
   /// 3. waits for the operations already queued, ignoring their errors,
   /// 4. detaches the native finalizer,
-  /// 5. closes the native handle and then the [events] stream.
+  /// 5. closes the native handle, emits [GrinWalletClosed] if that
+  ///    worked, and then closes the [events] stream.
+  ///
+  /// If the native close fails, the [events] stream is still closed, without
+  /// [GrinWalletClosed], and the returned future completes with the error.
   ///
   /// Step 3 can still take up to one scan batch (10,001 blocks and their
   /// node requests). See section 8 of docs/ffi-json.md.
@@ -790,11 +824,13 @@ class GrinWalletClient implements Finalizable {
     _finalizer.detach(this);
     try {
       await _closeHandle(handle);
-    } finally {
+      // Only a close that worked is reported as one.
       _emit(const GrinWalletClosed());
-      // Not awaited: a broadcast controller finishes closing only when
-      // every subscription has received the done event, and a paused one
-      // (an `await for` body that calls close(), a StreamQueue) never does.
+    } finally {
+      // Runs on failure too, before the error goes on to the caller. Not
+      // awaited: a broadcast controller finishes closing only when every
+      // subscription has received the done event, and a paused one (an
+      // `await for` body that calls close(), a StreamQueue) never does.
       unawaited(_events.close());
     }
   }

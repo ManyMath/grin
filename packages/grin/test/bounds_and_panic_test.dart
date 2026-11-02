@@ -115,6 +115,36 @@ void main() {
       expect(e.available, isNull);
     });
 
+    test('InsufficientFunds reads integer strings', () {
+      final e = GrinException.fromJson(
+        10,
+        '{"code":10,"message":"m","details":'
+        '{"required":"18446744073709551615","available":"7"}}',
+      ) as GrinInsufficientFundsException;
+      expect(e.required, BigInt.parse('18446744073709551615'));
+      expect(e.available, BigInt.from(7));
+    });
+
+    test('InsufficientFunds with malformed amounts gives null', () {
+      for (final bad in ['"abc"', '1.5', '-1', '"-5"', 'true', '[1]', '{}']) {
+        final e = GrinException.fromJson(
+          10,
+          '{"code":10,"message":"m","details":'
+          '{"required":$bad,"available":$bad}}',
+        ) as GrinInsufficientFundsException;
+        expect(() => e.required, returnsNormally, reason: bad);
+        expect(e.required, isNull, reason: bad);
+        expect(e.available, isNull, reason: bad);
+      }
+      // One malformed value does not affect the other.
+      final e = GrinException.fromJson(
+        10,
+        '{"code":10,"message":"m","details":{"required":"x","available":3}}',
+      ) as GrinInsufficientFundsException;
+      expect(e.required, isNull);
+      expect(e.available, BigInt.from(3));
+    });
+
     test('WalletBusy exposes the directory', () {
       final e = GrinException.fromJson(
         18,

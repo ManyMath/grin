@@ -180,6 +180,14 @@ fn validate_node_url(url: &str) -> Result<String, GrinError> {
     if parsed.host_str().is_none_or(str::is_empty) {
         return Err(GrinError::invalid_argument("node_url has no host"));
     }
+    // reqwest puts the whole URL in its error text and HTTPNodeClient logs
+    // it, so a user:pass@ part would end up in Node errors and on stderr.
+    // The message does not repeat the URL.
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(GrinError::invalid_argument(
+            "node_url must not contain credentials (user:pass@); pass the node API secret in node_api_secret",
+        ));
+    }
     // HTTPNodeClient appends "/v2/foreign" itself.
     Ok(url.trim_end_matches('/').to_owned())
 }
@@ -357,6 +365,34 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(e.code, GrinErrorCode::InvalidArgument);
+    }
+
+    #[test]
+    fn node_url_with_credentials_is_refused() {
+        for url in [
+            "https://user:hunter2@n.example",
+            "https://user@n.example:3413/",
+            "http://:hunter2@n.example",
+        ] {
+            let e = validate_node_url(url).unwrap_err();
+            assert_eq!(e.code, GrinErrorCode::InvalidArgument, "{url}");
+            assert!(e.message.contains("node_api_secret"), "{}", e.message);
+            assert!(!e.message.contains("hunter2"), "{}", e.message);
+            assert!(e.details.is_none());
+
+            let json = serde_json::json!({"wallet_dir": "/w", "network": 0, "node_url": url});
+            let e = WalletConfig::parse(&json.to_string()).unwrap_err();
+            assert_eq!(e.code, GrinErrorCode::InvalidArgument, "{url}");
+            // grin_node_test_connection and grin_wallet_update_network go
+            // through NodeSettings::new as well.
+            let e = NodeSettings::new(url, None, None, Duration::from_secs(1)).unwrap_err();
+            assert_eq!(e.code, GrinErrorCode::InvalidArgument, "{url}");
+        }
+        // An @ in the path is not userinfo.
+        assert_eq!(
+            validate_node_url("https://n.example/a@b").unwrap(),
+            "https://n.example/a@b"
+        );
     }
 
     #[test]

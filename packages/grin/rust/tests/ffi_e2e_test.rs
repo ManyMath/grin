@@ -532,6 +532,18 @@ fn network_settings() {
         ))),
         INVALID_ARGUMENT
     );
+    // Credentials in the URL would reach error text and logs; the secret
+    // goes in its own argument.
+    let with_password = "http://grin:hunter2@127.0.0.1:2";
+    let e = call(grin_wallet_update_network(
+        h,
+        cs(with_password).as_ptr(),
+        ptr::null(),
+        ptr::null(),
+    ))
+    .unwrap_err();
+    assert_eq!(e.0, INVALID_ARGUMENT, "{}", e.1);
+    assert!(!e.1.to_string().contains("hunter2"), "{}", e.1);
     call(grin_wallet_update_network(
         h,
         cs(UNREACHABLE_NODE).as_ptr(),
@@ -563,6 +575,22 @@ fn network_settings() {
         ))),
         INVALID_ARGUMENT
     );
+    let e = call(grin_node_test_connection(
+        cs(with_password).as_ptr(),
+        ptr::null(),
+        ptr::null(),
+    ))
+    .unwrap_err();
+    assert_eq!(e.0, INVALID_ARGUMENT, "{}", e.1);
+    assert!(!e.1.to_string().contains("hunter2"), "{}", e.1);
+    let config = json!({"wallet_dir": dir, "network": AUTOMATED, "node_url": with_password});
+    let e = call(grin_wallet_open(
+        cs(&config.to_string()).as_ptr(),
+        cs(PASSWORD).as_ptr(),
+    ))
+    .unwrap_err();
+    assert_eq!(e.0, INVALID_ARGUMENT, "{}", e.1);
+    assert!(!e.1.to_string().contains("hunter2"), "{}", e.1);
 }
 
 #[test]
@@ -673,6 +701,50 @@ fn scan_cancels_between_batches() {
     let w = test_wallet(&chain, &dir, "w");
     let v = call(grin_wallet_scan(w, 0, false)).unwrap();
     assert_eq!(v, json!({"scanned_height": 12, "tip_height": 12}));
+    close(w);
+}
+
+#[test]
+fn second_scan_is_busy_while_one_runs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("w");
+    let w = test_wallet(&tmp.path().join("chain"), &dir, "w");
+    call(grin_test_mine_blocks(w, 4)).unwrap();
+    let data_dir = std::fs::canonicalize(dir.join("wallet_data")).unwrap();
+
+    // After each batch of the running scan, another thread starts a scan on
+    // the same wallet. It is refused before it makes a node call.
+    let refused: Arc<Mutex<Vec<(i32, Value)>>> = Arc::default();
+    let log = refused.clone();
+    let hooked = set_scan_test_hooks(
+        w,
+        2,
+        Some(Box::new(move |_height| {
+            let second = thread::spawn(move || call(grin_wallet_scan(w, 0, false)))
+                .join()
+                .unwrap();
+            log.lock().unwrap().push(second.unwrap_err());
+        })),
+    );
+    assert!(hooked);
+    let v = call(grin_wallet_scan(w, 0, false)).unwrap();
+    assert_eq!(v, json!({"scanned_height": 4, "tip_height": 4}));
+    let refused = std::mem::take(&mut *refused.lock().unwrap());
+    assert_eq!(refused.len(), 2, "{refused:?}");
+    for (code, e) in &refused {
+        assert_eq!(*code, WALLET_BUSY, "{e}");
+        assert_eq!(e["details"]["reason"], "scan_in_progress", "{e}");
+        assert_eq!(
+            e["details"]["wallet_dir"],
+            data_dir.to_string_lossy().as_ref()
+        );
+    }
+
+    // The refused scans left the slot alone: the next scan runs.
+    set_scan_test_hooks(w, 0, None);
+    assert!(!progress(w)["is_scanning"].as_bool().unwrap());
+    let v = call(grin_wallet_scan(w, 0, false)).unwrap();
+    assert_eq!(v, json!({"scanned_height": 4, "tip_height": 4}));
     close(w);
 }
 
@@ -809,6 +881,57 @@ fn delete_closes_a_handle_whose_data_is_gone() {
     assert_eq!(code_of(delete(&missing, other)), INVALID_ARGUMENT);
     address(other, 0);
     close(other);
+}
+
+/// A `wallet_data` that links to a directory with another name is refused
+/// by create and open before they read or write through it.
+#[cfg(unix)]
+#[test]
+fn wallet_data_link_to_another_name_is_refused() {
+    use std::os::unix::fs::symlink;
+    let tmp = tempfile::tempdir().unwrap();
+    let link_to = |top: &str, target: &Path| {
+        let top = tmp.path().join(top);
+        std::fs::create_dir(&top).unwrap();
+        symlink(target, top.join("wallet_data")).unwrap();
+        path_str(&top)
+    };
+
+    // A real wallet's data, moved to a directory named "moved".
+    let real = tmp.path().join("real");
+    close(create(&path_str(&real), AUTOMATED, None).unwrap());
+    let moved = tmp.path().join("moved");
+    std::fs::rename(real.join("wallet_data"), &moved).unwrap();
+    let dir = link_to("w", &moved);
+    for e in [
+        open(&dir, AUTOMATED).unwrap_err(),
+        create(&dir, AUTOMATED, Some(MNEMONIC)).unwrap_err(),
+    ] {
+        assert_eq!(e.0, INVALID_ARGUMENT, "{}", e.1);
+        assert!(
+            e.1["message"]
+                .as_str()
+                .unwrap()
+                .contains("differently named"),
+            "{}",
+            e.1
+        );
+    }
+    assert!(moved.join("wallet.seed").is_file());
+
+    // An empty target: create would otherwise make a wallet in it.
+    let empty = tmp.path().join("empty");
+    std::fs::create_dir(&empty).unwrap();
+    let dir = link_to("w2", &empty);
+    assert_eq!(code_of(create(&dir, AUTOMATED, None)), INVALID_ARGUMENT);
+    assert_eq!(code_of(open(&dir, AUTOMATED)), INVALID_ARGUMENT);
+    assert_eq!(std::fs::read_dir(&empty).unwrap().count(), 0);
+
+    // A link to a directory that is itself named wallet_data is fine.
+    let named = tmp.path().join("elsewhere").join("wallet_data");
+    std::fs::create_dir(tmp.path().join("elsewhere")).unwrap();
+    std::fs::rename(&moved, &named).unwrap();
+    close(open(&link_to("w3", &named), AUTOMATED).unwrap());
 }
 
 #[test]

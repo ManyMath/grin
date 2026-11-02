@@ -62,8 +62,8 @@ final class GrinProcessInvoiceArgs {
   /// smallest as needed.
   final bool selectionStrategyIsAll;
 
-  /// Blocks until the transaction expires, greater than 0, or null for no
-  /// limit.
+  /// Blocks until the transaction expires, 1 to 1,000,000,000, or null for
+  /// no limit.
   final int? ttlBlocks;
 
   /// The `args_json` of `grin_tx_process_invoice`.

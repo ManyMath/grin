@@ -381,6 +381,92 @@ fn close(handle: u64) {
 }
 
 #[test]
+fn late_lock_locks_inputs_at_finalization() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (alice, bob) = alice_and_bob(tmp.path(), 5);
+    let bob_addr = address(bob);
+    let amount = 50 * GRIN;
+    let spendable = 2 * REWARD;
+    assert_eq!(
+        u(&balance(alice, true)["amount_currently_spendable"]),
+        spendable
+    );
+
+    let s1 = init_send(
+        alice,
+        json!({
+            "amount": amount,
+            "min_confirms": 1,
+            "recipient_address": bob_addr,
+            "late_lock": true,
+        }),
+    )
+    .unwrap();
+    assert_eq!(s1["state"], "S1");
+    let fee = u(&s1["fee"]);
+    assert!(fee > 0, "{s1}");
+    let slate_id = s(&s1["slate_id"]).to_owned();
+
+    // Nothing is locked, and libwallet logs the transaction only when it
+    // locks the inputs.
+    let b = balance(alice, false);
+    assert_eq!(u(&b["amount_locked"]), 0, "{b}");
+    assert_eq!(u(&b["amount_currently_spendable"]), spendable, "{b}");
+    let logged = txs(alice, false)["txs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|t| t["slate_id"] == slate_id.as_str())
+        .count();
+    assert_eq!(logged, 0);
+
+    // So the whole balance can still go into another S1. Cancelling that
+    // one frees its inputs again.
+    let all = init_send(
+        alice,
+        json!({
+            "amount": spendable,
+            "min_confirms": 1,
+            "amount_includes_fee": true,
+            "selection_strategy_is_all": true,
+        }),
+    )
+    .unwrap();
+    assert_eq!(u(&balance(alice, false)["amount_locked"]), spendable);
+    call(grin_tx_cancel(alice, -1, cs(s(&all["slate_id"])).as_ptr())).unwrap();
+    assert_eq!(u(&balance(alice, false)["amount_locked"]), 0);
+
+    // Finalizing selects and locks the inputs, then broadcasts.
+    let s2 = receive(bob, &armored(&s1)).unwrap();
+    let s3 = finalize(alice, &armored(&s2), true).unwrap();
+    assert_eq!(s3["state"], "S3");
+    assert_eq!(s3["posted"], true);
+    assert_eq!(u(&s3["amount"]), amount);
+    assert_eq!(u(&s3["fee"]), fee);
+    // The wallet has not looked at the chain since, so the spent inputs
+    // still show as locked.
+    assert!(u(&balance(alice, false)["amount_locked"]) >= amount + fee);
+    let a = entry(&txs(alice, false), &slate_id);
+    assert_eq!(a["type"], "TxSent");
+    assert!(u(&a["num_inputs"]) >= 1, "{a}");
+    assert_eq!(a["has_stored_tx"], true);
+
+    // The broadcast mined height 6.
+    assert_eq!(mine(alice, 1), 7);
+    let b = balance(bob, true);
+    assert_eq!(u(&b["amount_currently_spendable"]), amount, "{b}");
+    let a = balance(alice, true);
+    assert_eq!(u(&a["total"]), 7 * REWARD - amount, "{a}");
+    assert_eq!(u(&a["amount_locked"]), 0, "{a}");
+    let a = entry(&txs(alice, false), &slate_id);
+    assert_eq!(a["confirmed"], true);
+    assert_eq!(a["kernel_excess"], s3["kernel_excess"]);
+    assert_eq!(a["payment_proof"]["receiver_signature_present"], true);
+    close(alice);
+    close(bob);
+}
+
+#[test]
 fn invoice_i1_i2_i3_locks_payer_inputs() {
     let tmp = tempfile::tempdir().unwrap();
     // Height 6: heights 1 to 3 are mature.
@@ -949,6 +1035,32 @@ fn argument_errors() {
     assert_eq!(code_of(init_send(alice, json!({"amount": "1"}))), JSON);
     assert_eq!(
         code_of(init_send(alice, json!({"amount": 0}))),
+        INVALID_ARGUMENT
+    );
+    // Values libwallet would overflow on are refused before anything is
+    // built or locked.
+    for args in [
+        json!({"amount": u64::MAX, "min_confirms": 1}),
+        json!({"amount": GRIN, "min_confirms": 1, "ttl_blocks": u64::MAX}),
+    ] {
+        assert_eq!(code_of(init_send(alice, args.clone())), INVALID_ARGUMENT);
+        let mut http = args;
+        http["recipient_url_or_address"] = json!("http://127.0.0.1:1");
+        assert_eq!(code_of(send_http(alice, http)), INVALID_ARGUMENT);
+    }
+    assert_eq!(
+        code_of(call(grin_tx_issue_invoice(
+            bob,
+            cs(&json!({ "amount": u64::MAX }).to_string()).as_ptr()
+        ))),
+        INVALID_ARGUMENT
+    );
+    assert_eq!(
+        code_of(call(grin_tx_process_invoice(
+            alice,
+            cs(&armored(&i1)).as_ptr(),
+            cs(&json!({"min_confirms": 1, "ttl_blocks": u64::MAX}).to_string()).as_ptr(),
+        ))),
         INVALID_ARGUMENT
     );
     // Bob's key as a mainnet address is refused by a test chain wallet.

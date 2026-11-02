@@ -112,7 +112,10 @@ final class GrinJsonException extends GrinException {
 final class GrinWalletNotFoundException extends GrinException {
   const GrinWalletNotFoundException._(super.code, super.message, super.details);
 
-  /// The directory as it was given to the call.
+  /// The wallet directory exactly as the caller gave it (the parent of
+  /// `wallet_data`, not resolved), or null if the native library did not
+  /// say. Unlike [GrinWalletBusyException.walletDir], it can be compared
+  /// with the `walletDir` the call was made with.
   String? get walletDir => _walletDir;
 }
 
@@ -129,7 +132,10 @@ final class GrinInvalidPasswordException extends GrinException {
 final class GrinWalletExistsException extends GrinException {
   const GrinWalletExistsException._(super.code, super.message, super.details);
 
-  /// The directory as it was given to the call.
+  /// The wallet directory exactly as the caller gave it (the parent of
+  /// `wallet_data`, not resolved), or null if the native library did not
+  /// say. Unlike [GrinWalletBusyException.walletDir], it can be compared
+  /// with the `walletDir` the call was made with.
   String? get walletDir => _walletDir;
 }
 
@@ -157,17 +163,23 @@ final class GrinInsufficientFundsException extends GrinException {
   );
 
   /// The amount the transaction needs, in nanogrin, or null if the native
-  /// library did not say.
+  /// library did not say or the value is not a non-negative integer (or
+  /// integer string). Never throws.
   BigInt? get required => _amount('required');
 
   /// The amount that can be spent now, in nanogrin, or null if the native
-  /// library did not say.
+  /// library did not say or the value is not a non-negative integer (or
+  /// integer string). Never throws.
   BigInt? get available => _amount('available');
 
   BigInt? _amount(String key) {
-    final Object? value = details?[key];
-    if (value == null) return null;
-    return readBigInt(value, key);
+    try {
+      return readBigInt(details?[key], key);
+    } on FormatException {
+      // Missing or malformed. A getter on an exception should not throw
+      // while the caller is handling it.
+      return null;
+    }
   }
 }
 
@@ -218,8 +230,15 @@ final class GrinInternalException extends GrinException {
 final class GrinWalletBusyException extends GrinException {
   const GrinWalletBusyException._(super.code, super.message, super.details);
 
-  /// The canonical path of the busy directory, or null if the native
-  /// library did not say.
+  /// The canonical path of the busy `wallet_data` directory itself
+  /// (`<walletDir>/wallet_data` with links and `.` or `..` resolved), or
+  /// null if the native library did not say.
+  ///
+  /// This is not the directory the caller passed: it never equals
+  /// `GrinWalletClient.walletDir`, and two different spellings of one
+  /// wallet give the same value here. [GrinWalletNotFoundException.walletDir]
+  /// and [GrinWalletExistsException.walletDir], by contrast, carry the
+  /// directory as the caller gave it.
   String? get walletDir => _walletDir;
 
   /// True when the cause is a scan already running on the wallet, rather

@@ -99,7 +99,7 @@ Values are append-only; Dart maps them by number.
 | 15 | `Io` | File system error. | null |
 | 16 | `InternalPanic` | A Rust panic was caught. | null |
 | 17 | `Internal` | Unexpected internal error. | null |
-| 18 | `WalletBusy` | The wallet directory is held by an open wallet or one still closing, or a scan is already running. | `{"wallet_dir": string}` (canonical path); for a running scan also `"reason": "scan_in_progress"` |
+| 18 | `WalletBusy` | The wallet directory is held by an open wallet or one still closing, or a scan is already running. | `{"wallet_dir": string}` (canonical path of `wallet_data` itself, not the `wallet_dir` that was passed); for a running scan also `"reason": "scan_in_progress"` |
 | 19 | `Http` | Wallet-to-wallet HTTP communication failed, or the other wallet refused the slate. | null |
 | 20 | `NotSupported` | The function is not implemented in this build. | null |
 | 21 | `InvalidAddress` | Not a valid slatepack address, onion address or URL, or a slatepack address for the other network. | null |
@@ -124,7 +124,7 @@ Used by `grin_wallet_create` and `grin_wallet_open`.
 |---|---|---|---|
 | `wallet_dir` | string | yes | Must not be empty. Wallet files live in `<wallet_dir>/wallet_data` (`wallet.seed`, `db/`, `saved_txs/`, `tx_metadata.json`). Nothing else in `wallet_dir` is touched. |
 | `network` | u8 | yes | See 1.2. |
-| `node_url` | string | yes | `http://` or `https://` base URL of a node's API. A trailing `/` is removed; `/v2/foreign` is appended internally. |
+| `node_url` | string | yes | `http://` or `https://` base URL of a node's API. A trailing `/` is removed; `/v2/foreign` is appended internally. Credentials in the URL (`user:pass@`) are `InvalidArgument`, because the HTTP client puts the URL in its error text and logs; pass the secret in `node_api_secret`. |
 | `node_api_secret` | string or null | no | Node foreign API secret. Empty string is the same as null. |
 | `socks_proxy` | string or null | no | `"host:port"` with an IPv4 literal host, optionally prefixed `socks5h://` or `socks5://`. Host names are rejected (resolving them would leak a DNS query) and so is IPv6. Traffic uses `socks5h`, so `.onion` names resolve inside Tor. |
 | `request_timeout_secs` | u64 or null | no | Default 30. Must be greater than 0. |
@@ -649,12 +649,12 @@ it with `grin_tx_repost`.
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
-| `amount` | u64 | required | Greater than 0. |
+| `amount` | u64 | required | Greater than 0 and at most 2^63 - 1 (an overflow guard; libwallet adds the fee to it unchecked). |
 | `min_confirms` | u64 | 10 | |
 | `selection_strategy_is_all` | bool | false | See `grin_tx_estimate_fee`. |
 | `amount_includes_fee` | bool | false | |
 | `recipient_address` | string or null | null | Recipient's slatepack address. When given, the S1 is encrypted to it and a payment proof is requested from it. |
-| `ttl_blocks` | u64 or null | null | Blocks until the transaction expires; greater than 0. |
+| `ttl_blocks` | u64 or null | null | Blocks until the transaction expires; 1 to 1,000,000,000. |
 | `message` | any | | Accepted and ignored: Slate V4 has no message. |
 | `late_lock` | bool | false | When true, inputs are selected and locked at finalization instead of now. |
 
@@ -730,7 +730,7 @@ it with `grin_tx_repost`.
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
-| `amount` | u64 | required | Greater than 0. |
+| `amount` | u64 | required | Greater than 0 and at most 2^63 - 1. |
 | `dest_acct_name` | string or null | null | Wallet account to receive into; unknown names fall back to the default account. |
 | `recipient_address` | string or null | null | The payer's slatepack address. When given, the I1 is encrypted to it. |
 
@@ -748,12 +748,14 @@ it with `grin_tx_repost`.
 |---|---|---|
 | `min_confirms` | u64 | 10 |
 | `selection_strategy_is_all` | bool | false |
-| `ttl_blocks` | u64 or null | null (greater than 0 when given) |
+| `ttl_blocks` | u64 or null | null (1 to 1,000,000,000 when given) |
 
 - Pays the invoice: selects inputs, signs, and locks the inputs in the same
   call (libwallet's `process_invoice_tx` does not lock them by itself).
   Returns a `GrinSlatepack` with state `I2`, encrypted to the invoicer when
   the I1 named one.
+- An I1 whose amount is above 2^63 - 1 is `InvalidArgument`, before
+  anything is selected or locked.
 - Errors: `Slate` (not an I1), `InsufficientFunds`, `Transaction`
   (already paid or cancelled, expired), `Json`, `InvalidArgument`. A
   failure after libwallet saved the payment (locking the inputs, armoring

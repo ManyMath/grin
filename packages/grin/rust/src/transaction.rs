@@ -55,6 +55,44 @@ const DEFAULT_MIN_CONFIRMS: u64 = 10;
 /// already writes the unsigned transaction there; finalizing overwrites it.
 const STORED_TX_DIR: &str = "saved_txs";
 
+/// Largest `ttl_blocks` accepted, about 1,900 years of one-minute blocks.
+/// libwallet adds it to the chain height without an overflow check.
+const MAX_TTL_BLOCKS: u64 = 1_000_000_000;
+
+/// Largest amount accepted, in nanogrin (2^63 - 1, the same limit the Dart
+/// package applies). Grin's supply has no cap, so this is only an overflow
+/// guard: libwallet adds the fee to the amount without an overflow check,
+/// and any real amount is far below it.
+const MAX_AMOUNT: u64 = u64::MAX / 2;
+
+/// Refuses an amount of 0 or above `MAX_AMOUNT`.
+fn check_amount(amount: u64) -> Result<(), GrinError> {
+    if amount == 0 {
+        return Err(GrinError::invalid_argument(
+            "amount must be greater than zero",
+        ));
+    }
+    if amount > MAX_AMOUNT {
+        return Err(GrinError::invalid_argument(format!(
+            "amount must be at most {MAX_AMOUNT} nanogrin, got {amount}"
+        )));
+    }
+    Ok(())
+}
+
+/// Refuses a given `ttl_blocks` of 0 or above `MAX_TTL_BLOCKS`.
+fn check_ttl_blocks(ttl_blocks: Option<u64>) -> Result<(), GrinError> {
+    match ttl_blocks {
+        Some(0) => Err(GrinError::invalid_argument(
+            "ttl_blocks must be greater than zero",
+        )),
+        Some(t) if t > MAX_TTL_BLOCKS => Err(GrinError::invalid_argument(format!(
+            "ttl_blocks must be at most {MAX_TTL_BLOCKS}, got {t}"
+        ))),
+        _ => Ok(()),
+    }
+}
+
 /// Runs `f` with the wallet mutex held and the keychain mask at hand.
 fn with_backend<T>(
     session: &WalletSession,
@@ -326,9 +364,7 @@ pub extern "C" fn grin_tx_estimate_fee(
 ) -> GrinFfiResult {
     ffi_guard! {
         let session = get_session(handle)?;
-        if amount == 0 {
-            return Err(GrinError::invalid_argument("amount must be greater than zero"));
-        }
+        check_amount(amount)?;
         let args = InitTxArgs {
             amount,
             amount_includes_fee: Some(amount_includes_fee),
@@ -569,20 +605,18 @@ impl SendArgs {
             .transpose()
     }
 
+    /// Checks the amount and `ttl_blocks`. Callers run it before anything
+    /// is built or locked.
+    fn check(&self) -> Result<(), GrinError> {
+        check_amount(self.amount)?;
+        check_ttl_blocks(self.ttl_blocks)
+    }
+
     fn init_tx_args(
         &self,
         proof_address: Option<SlatepackAddress>,
     ) -> Result<InitTxArgs, GrinError> {
-        if self.amount == 0 {
-            return Err(GrinError::invalid_argument(
-                "amount must be greater than zero",
-            ));
-        }
-        if self.ttl_blocks == Some(0) {
-            return Err(GrinError::invalid_argument(
-                "ttl_blocks must be greater than zero",
-            ));
-        }
+        self.check()?;
         Ok(InitTxArgs {
             amount: self.amount,
             amount_includes_fee: Some(self.amount_includes_fee.unwrap_or(false)),
@@ -602,6 +636,7 @@ pub extern "C" fn grin_tx_init_send(handle: u64, args_json: *const c_char) -> Gr
     ffi_guard! {
         let session = get_session(handle)?;
         let args: SendArgs = parse_args(args_json, "args_json")?;
+        args.check()?;
         let recipient = args.recipient()?;
         let tx_args = args.init_tx_args(recipient.clone())?;
         let late_lock = args.late_lock();
@@ -656,6 +691,7 @@ pub extern "C" fn grin_tx_send_http(handle: u64, args_json: *const c_char) -> Gr
     ffi_guard! {
         let session = get_session(handle)?;
         let args: SendHttpArgs = parse_args(args_json, "args_json")?;
+        args.send.check()?;
         let target = parse_address(&args.recipient_url_or_address)?;
         let explicit = args.send.recipient()?;
         // A slatepack or onion target is itself a slatepack key. The payment
@@ -821,15 +857,19 @@ struct InvoiceArgs {
     recipient_address: Option<String>,
 }
 
+impl InvoiceArgs {
+    fn check(&self) -> Result<(), GrinError> {
+        check_amount(self.amount)
+    }
+}
+
 /// Issues an I1 invoice Slatepack.
 #[no_mangle]
 pub extern "C" fn grin_tx_issue_invoice(handle: u64, args_json: *const c_char) -> GrinFfiResult {
     ffi_guard! {
         let session = get_session(handle)?;
         let args: InvoiceArgs = parse_args(args_json, "args_json")?;
-        if args.amount == 0 {
-            return Err(GrinError::invalid_argument("amount must be greater than zero"));
-        }
+        args.check()?;
         let payer = args
             .recipient_address
             .as_deref()
@@ -864,6 +904,12 @@ struct PayInvoiceArgs {
     ttl_blocks: Option<u64>,
 }
 
+impl PayInvoiceArgs {
+    fn check(&self) -> Result<(), GrinError> {
+        check_ttl_blocks(self.ttl_blocks)
+    }
+}
+
 /// Pays an I1 invoice, locks the inputs and returns the I2 Slatepack.
 #[no_mangle]
 pub extern "C" fn grin_tx_process_invoice(
@@ -875,12 +921,18 @@ pub extern "C" fn grin_tx_process_invoice(
         let session = get_session(handle)?;
         let armored = read_str(armored_i1, "armored_i1")?;
         let args: PayInvoiceArgs = parse_args(args_json, "args_json")?;
-        if args.ttl_blocks == Some(0) {
-            return Err(GrinError::invalid_argument("ttl_blocks must be greater than zero"));
-        }
+        args.check()?;
         let decoded = decode_with_wallet(&session, armored, ADDRESS_INDEX)?;
         let i1 = &decoded.slate;
         require_state(i1, SlateState::Invoice1)?;
+        // The amount comes from the invoicer, and libwallet adds the fee to
+        // it unchecked, as for a send.
+        if i1.amount > MAX_AMOUNT {
+            return Err(GrinError::invalid_argument(format!(
+                "the invoice amount must be at most {MAX_AMOUNT} nanogrin, got {}",
+                i1.amount
+            )));
+        }
         let tx_args = InitTxArgs {
             amount: i1.amount,
             minimum_confirmations: args.min_confirms.unwrap_or(DEFAULT_MIN_CONFIRMS),
@@ -1046,6 +1098,7 @@ mod tests {
     use super::*;
     use grin_core::global::ChainTypes;
     use grin_core::libtx::tx_fee;
+    use serde_json::{json, Value};
     use std::ffi::CString;
 
     #[test]
@@ -1168,6 +1221,72 @@ mod tests {
         assert_eq!(h.send.amount, 7);
         assert_eq!(h.send.min_confirms(), 2);
         assert!(h.post.is_none());
+    }
+
+    #[test]
+    fn amount_and_ttl_bounds() {
+        let invalid = |r: Result<(), GrinError>| r.unwrap_err().code;
+        let send = |json: Value| serde_json::from_value::<SendArgs>(json).unwrap();
+
+        // Largest values pass.
+        let a = send(json!({"amount": MAX_AMOUNT, "ttl_blocks": MAX_TTL_BLOCKS}));
+        a.check().unwrap();
+        let t = a.init_tx_args(None).unwrap();
+        assert_eq!(t.amount, MAX_AMOUNT);
+        assert_eq!(t.ttl_blocks, Some(MAX_TTL_BLOCKS));
+        send(json!({"amount": 1})).check().unwrap();
+
+        for bad in [
+            json!({"amount": MAX_AMOUNT + 1}),
+            json!({"amount": u64::MAX}),
+            json!({"amount": 1, "ttl_blocks": MAX_TTL_BLOCKS + 1}),
+            json!({"amount": 1, "ttl_blocks": u64::MAX}),
+            json!({"amount": 1, "ttl_blocks": 0}),
+        ] {
+            let a = send(bad.clone());
+            assert_eq!(invalid(a.check()), GrinErrorCode::InvalidArgument, "{bad}");
+            assert!(a.init_tx_args(None).is_err(), "{bad}");
+
+            // grin_tx_send_http takes the same keys.
+            let mut http = bad.clone();
+            http["recipient_url_or_address"] = json!("http://x");
+            let h: SendHttpArgs = serde_json::from_value(http).unwrap();
+            assert_eq!(
+                invalid(h.send.check()),
+                GrinErrorCode::InvalidArgument,
+                "{bad}"
+            );
+        }
+
+        let invoice = |amount: u64| {
+            serde_json::from_value::<InvoiceArgs>(json!({ "amount": amount }))
+                .unwrap()
+                .check()
+        };
+        invoice(MAX_AMOUNT).unwrap();
+        assert_eq!(
+            invalid(invoice(MAX_AMOUNT + 1)),
+            GrinErrorCode::InvalidArgument
+        );
+        assert_eq!(invalid(invoice(u64::MAX)), GrinErrorCode::InvalidArgument);
+        assert_eq!(invalid(invoice(0)), GrinErrorCode::InvalidArgument);
+
+        let pay = |ttl: Value| {
+            serde_json::from_value::<PayInvoiceArgs>(json!({ "ttl_blocks": ttl }))
+                .unwrap()
+                .check()
+        };
+        pay(Value::Null).unwrap();
+        pay(json!(MAX_TTL_BLOCKS)).unwrap();
+        assert_eq!(
+            invalid(pay(json!(MAX_TTL_BLOCKS + 1))),
+            GrinErrorCode::InvalidArgument
+        );
+        assert_eq!(
+            invalid(pay(json!(u64::MAX))),
+            GrinErrorCode::InvalidArgument
+        );
+        assert_eq!(invalid(pay(json!(0))), GrinErrorCode::InvalidArgument);
     }
 
     #[test]
