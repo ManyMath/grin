@@ -1250,6 +1250,8 @@ All in /home/user/src/stack_wallet/stack_wallet (a checkout on `security/rbf-his
 
 Each entry records a choice made while building, the evidence behind it, and how to reverse it. The settled decisions from the review rounds (sections 1 to 8) are not reopened here.
 
+Three entries do change a settled decision of the brief: D1 (the hook's user-define keys), D2 (the local wiring to the unpushed fork) and D6 (where the Cargo workspace lives). Each was forced by something the brief's own pins contradict, and each says how to reverse it. The brief asked for a stop before such a change; the changes were made and recorded first, and on 2026-11-02 the user, asked to accept or reverse them, delegated the call with the instruction to prefer correctness and security over effort. All three stand on that basis. D2 in particular is the safer of the two wirings: a Cargo `[patch]` on a git source still makes cargo fetch the original ssh URL, which the brief forbids, while the URL rewrite keeps cargo from ever reaching it.
+
 ### D1. The build hook follows the kit's user-define contract (`build`, `prebuilt_hashes.json`), plus a `grin`-specific `test_utils`
 
 - The brief named the keys `native_build`, `prebuilt_manifest_url` and `prebuilt_manifest_sha256`, and in the same decision required modelling the hook on `wt/tor` and pinning `native_prebuilt_hook` at `85f7eb097604e5b99db3f90bccbcada3336836b8`. Those two halves cannot both hold: the kit at that ref reads a `build` user-define (`dart/native_prebuilt_hook/lib/src/hook.dart` L60, L94-100; `lib/src/build_mode.dart` L22-30) and loads the release URL and per-file sha256 from the package's own `hook/prebuilt_hashes.json` (`lib/src/prebuilt_hashes.dart` L8-13, L36-43; `hook.dart` L184-190). It has no notion of a manifest URL in the consumer's pubspec.
@@ -1342,10 +1344,10 @@ Two things were learned there and fixed: the iOS device link needs the deploymen
 
 | Gate | Output |
 |---|---|
-| kit Apple reference build, all five targets (commit `0b95aa8`, scratch kit `58f72ac`) | `nix apple exit=0` (the kit's leak scan included), `Wrote .../build/apple7/SHA256SUMS.apple` |
+| kit Apple reference build, all five targets (commit `0b95aa8`; the kit at `85f7eb0` with `docs/kit-apple-shell-real-host.patch` applied in the Mac's scratch kit clone) | `nix apple exit=0` (the kit's leak scan included), `Wrote .../build/apple8/SHA256SUMS.apple`; run twice (once with the same change made in `nix/build-apple.sh`, once with the patch as shipped): `SUMS_SAME`, every hash identical |
 | exported symbols of each reference `libgrin_ffi.dylib` | `aarch64-apple-darwin: 35 standard, 0 test`, `x86_64-apple-darwin: 35 standard, 0 test`, `aarch64-apple-ios: 35 standard, 0 test`, `aarch64-apple-ios-sim: 35 standard, 0 test`, `x86_64-apple-ios: 35 standard, 0 test` |
 
-`SHA256SUMS.apple` from that run, for comparison with a later build from the patched kit:
+`SHA256SUMS.apple` from those runs, for comparison with a later build from the patched kit:
 
 ```text
 25ba8c9d26164e9dde222275f3db1d24bb7f682323e914695590ed4fdda6b025  ./aarch64-apple-darwin/libgrin_ffi.dylib
@@ -1382,22 +1384,15 @@ Of the review nits (section 13), three were deliberately not changed:
 
 Every other finding, nits included, was fixed: F18 (the lease is keyed by device and inode on unix, so bind mounts and renamed parents share one key), F21 (the pointer-taking `extern "C"` functions are `unsafe` in Rust; the C header is unchanged), F24 and F25 (the test proxy cannot hang a caller indefinitely and mining restores the thread's chain type on a panic), N3 (a Dart `Finalizer` over a weak reference closes the `events` stream on the GC path; the native close stays with the `NativeFinalizer`), and N10 (the hook warns when `test_utils` is set with a build mode other than `cargo`).
 
-### D10. The kit's Apple shell must not fake the host; a flake-side workaround was tried and reverted
+### D10. The kit's Apple shell must not fake the host; the fix is shipped as a kit patch, and a flake-side workaround was tried and reverted
 
-The kit's Nix Apple reference build failed for this crate against the kit at `85f7eb0`. Root cause, from the failing build scripts' own output: the Apple shell exports the kit's fixed-host `RUSTC_WRAPPER` (`nix/cargo-library.nix`, the `apple` shell), which answers `rustc -vV` with `host: x86_64-unknown-linux-musl` so that crate metadata hashes do not depend on the build machine. Cargo therefore hands every host build script `TARGET=x86_64-unknown-linux-musl`. On Linux the kit's derivations provide a zig-based compiler for that name; in the Apple shell nothing does, and the host side of this crate compiles C (`libz-sys` and `libgit2-sys`, pulled in by `grin_util`'s `built` build-dependency through its `git2` feature). Two failures follow, in order:
+The kit's Nix Apple reference build failed for this crate against the kit at `85f7eb0`. Root cause, from the failing build scripts' own output: the Apple shell exports the kit's fixed-host `RUSTC_WRAPPER` (`nix/cargo-library.nix`, the `apple` shell, L824-826), which answers `rustc -vV` with `host: x86_64-unknown-linux-musl` so that crate metadata hashes do not depend on the build machine. Cargo therefore hands every host build script `TARGET=x86_64-unknown-linux-musl`. On Linux the kit's derivations provide a zig-based compiler for that name; in the Apple shell nothing does, and the host side of this crate compiles C (`libz-sys` and `libgit2-sys`, pulled in by `grin_util`'s `built` build-dependency through its `git2` feature). Two failures follow, in order:
 
 1. `libz-sys`: cc-rs passes `--target=x86_64-unknown-linux-musl` to Xcode's clang, which has no headers for it (`'stddef.h' file not found`).
 2. `libgit2-sys`: its build script selects libgit2's platform configuration from `TARGET`, so it compiles the Linux variant on macOS (`no member named 'st_mtim' in 'struct stat'`).
 
 Commit `0b95aa8` tried the first fix that is possible from this flake: `families.apple.env` set `CC_x86_64_unknown_linux_musl` and `CXX_x86_64_unknown_linux_musl` to a wrapper that drops the target flags and compiles natively. It got `libz-sys` through and stopped at `libgit2-sys`, whose configuration no compiler wrapper can correct; it was reverted in the next commit. Plugins whose host build scripts compile no C (frostdart, tor) do not hit either failure.
 
-The fix belongs in the kit. The one verified here, applied as a scratch commit (`58f72ac`) to the Mac's scratch kit clone and not to the kit's own checkout, is this change to `nix/build-apple.sh`, after `unset NIX_CFLAGS_COMPILE NIX_LDFLAGS`:
+The fix belongs in the kit, and the correct place is the shell, not the script: `build-apple.sh` refuses to run outside the shell, and anything else run in `nix develop .#apple` would hit the same fake host. The change is `docs/kit-apple-shell-real-host.patch` in this repository: it removes `RUSTC_WRAPPER = rustcWrapper;` from the `apple` shell and replaces the comment with the reason. It applies to the kit at `85f7eb0` with `git apply` (checked against the local checkout without modifying it) and was verified on the Mac in a scratch clone of the kit, never in the kit's own checkout: with it every Apple target built and passed the kit's leak scan (section 13), and the hashes matched a run made with the same change placed in `build-apple.sh`, so the two placements are equivalent and the build reproduces on that Mac.
 
-```diff
- unset NIX_CFLAGS_COMPILE NIX_LDFLAGS
-+# The fixed-host rustc wrapper makes host build scripts (libz-sys,
-+# libgit2-sys) configure for Linux; on Apple the host is real.
-+unset RUSTC_WRAPPER
-```
-
-With it every Apple target built and passed the kit's leak scan (section 13). The cost is the one the wrapper exists to avoid: Apple crate metadata hashes now depend on the building Mac's host triple (`aarch64-apple-darwin` or `x86_64-apple-darwin`), so a build from an Intel Mac and one from an Apple Silicon Mac will not be byte-identical. That is a kit decision (an alternative is to keep the wrapper but make it report the real host on Darwin), so it is proposed to the kit rather than worked around here; the upstream alternative, dropping `built`'s `git2` feature in `grin_util`, lives in the grin node repository. Until the kit carries a fix, the Apple reference build needs this patch and the hook's `cargo` mode is the way Apple builds are made from this checkout.
+Why not keep the fixed host and give the Apple shell a compiler for it: the host crates' C objects then have to link into host build-script executables and proc macros, which are Mach-O for the real host, so the fake host's objects must be ABI-compatible with the real host. That holds on x86_64 Linux (musl objects link into gnu binaries) and cannot hold on a Mac for a Linux triple. A fixed Apple triple instead (`aarch64-apple-darwin` for every Mac) would break on Intel Macs the same way. The remaining cost of the patch is the one the wrapper existed to avoid: Apple crate metadata hashes depend on the building Mac's architecture, so a build from an Intel Mac and one from an Apple Silicon Mac will not be byte-identical. They already depend on the Mac's Xcode, which `build-apple.sh` pins by version. The upstream alternative, dropping `built`'s `git2` feature in `grin_util`, lives in the grin node repository and would only move the problem to the next crate with C in a host dependency. Until the kit carries the patch, the Apple reference build needs it, and the hook's `cargo` mode is the way Apple builds are made from this checkout.
