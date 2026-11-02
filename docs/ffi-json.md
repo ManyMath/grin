@@ -254,8 +254,10 @@ See 1.1.
 - Deletes `<wallet_dir>/wallet_data` and everything in it. `wallet_dir`
   itself stays.
 - `handle`: 0, or the handle of the wallet in this directory, which is closed
-  first. A handle that belongs to another directory is `InvalidArgument`; a
-  handle that is not registered is ignored.
+  first. The handle matches if it was opened at the same canonical path or
+  at another path to the same directory (see the directory guard below). A
+  handle that belongs to another directory is `InvalidArgument`; a handle
+  that is not registered is ignored.
 - A missing `wallet_data` counts as already deleted (success). If `handle`
   is registered and its own data directory is gone as well (removed outside
   the library), the handle is closed; if its data directory still exists, it
@@ -270,10 +272,17 @@ See 1.1.
 A wallet directory can be held by at most one wallet in the process. It is
 held from a successful create/open until the wallet is closed and every call
 that was running on it has returned. While held, create, open and delete on
-the same directory return `WalletBusy`. Paths are compared after
-canonicalization, so `dir`, `dir/`, `dir/./` and symlinks to `dir` are the
-same directory. `wallet_data` itself must not be a symlink to a directory with
-another name (`InvalidArgument`).
+the same directory return `WalletBusy`. The guard is keyed by the identity
+of the `wallet_data` directory, taken after create makes it and after open
+and delete canonicalize it (a directory that does not exist has no
+identity). On unix the identity is the device and inode number, so `dir`,
+`dir/`, `dir/./`, symlinks to `dir`, a bind mount of it and a path to it
+after a rename while it is open are all the same directory, and a directory
+removed and made again at the same path is a different one. On Windows it is
+the canonical path, which covers `dir`, `dir/`, `dir/./` and symlinks but not
+other mounts of the same directory. The `wallet_dir` detail of `WalletBusy`
+is the canonical path of the call that was refused. `wallet_data` itself must
+not be a symlink to a directory with another name (`InvalidArgument`).
 
 ### `grin_wallet_change_password(handle, old_pw, new_pw)`
 

@@ -1,6 +1,10 @@
 //! Session registry, `Drop`-based close and the per-directory LMDB guard
 //! (docs/architecture.md section 4.5).
 //!
+//! `OPEN_DIRS` is keyed by directory identity (`DirKey`), not by path, so a
+//! wallet database reached through a bind mount or through a directory
+//! renamed while it was open still maps to the one entry.
+//!
 //! Lock rules: `SESSION_REGISTRY` and `OPEN_DIRS` are never held at the same
 //! time, no LMDB work runs while either is held, and both are locked with
 //! `unwrap_or_else(PoisonError::into_inner)` because `Drop` may run while a
@@ -151,7 +155,8 @@ pub struct WalletSession {
     /// XOR mask for the in-memory keychain. Zeroized in `Drop`.
     pub keychain_mask: Mutex<Option<SecretKey>>,
     pub scan_state: ScanProgressState,
-    /// Canonical `<wallet_dir>/wallet_data`.
+    /// Canonical `<wallet_dir>/wallet_data` as it was when the wallet was
+    /// opened. The directory lease is keyed by `dir_key()`, not by this path.
     pub data_dir: PathBuf,
     pub node: Mutex<NodeSettings>,
     /// In-process chain of a wallet made by `grin_test_create_wallet`.
@@ -187,6 +192,11 @@ impl WalletSession {
             scan_hooks: Default::default(),
             _lease: lease,
         }
+    }
+
+    /// Identity of the data directory, as held in `OPEN_DIRS`.
+    pub fn dir_key(&self) -> &DirKey {
+        self._lease.key()
     }
 
     /// Copy of the keychain mask for one libwallet call.
@@ -254,7 +264,7 @@ static SESSION_REGISTRY: LazyLock<Mutex<HashMap<u64, Arc<WalletSession>>>> =
 
 static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
 
-static OPEN_DIRS: LazyLock<Mutex<HashSet<PathBuf>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+static OPEN_DIRS: LazyLock<Mutex<HashSet<DirKey>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 
 fn registry() -> MutexGuard<'static, HashMap<u64, Arc<WalletSession>>> {
     SESSION_REGISTRY
@@ -262,7 +272,7 @@ fn registry() -> MutexGuard<'static, HashMap<u64, Arc<WalletSession>>> {
         .unwrap_or_else(PoisonError::into_inner)
 }
 
-fn open_dirs() -> MutexGuard<'static, HashSet<PathBuf>> {
+fn open_dirs() -> MutexGuard<'static, HashSet<DirKey>> {
     OPEN_DIRS.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
@@ -316,16 +326,67 @@ pub(crate) fn remove_session(handle: u64) -> Option<Arc<WalletSession>> {
     session
 }
 
-/// RAII membership of a canonical wallet data directory in `OPEN_DIRS`.
+/// Identity of a directory, the key of `OPEN_DIRS`.
+///
+/// On unix this is the device and inode number of the directory, so two
+/// paths to one directory (a bind mount, a renamed parent) give the same key,
+/// and a directory removed and made again at the same path gives a new one.
+/// On other platforms it is the canonical path: std has no stable way to get
+/// the Windows file index yet.
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DirKey {
+    dev: u64,
+    ino: u64,
+}
+
+/// Identity of a directory, the key of `OPEN_DIRS`. Here it is the
+/// canonical path; see the unix version for what it is there.
+#[cfg(not(unix))]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DirKey(PathBuf);
+
+impl DirKey {
+    /// Reads the identity of `dir`, which must exist. On platforms without
+    /// inode numbers `dir` must be canonical.
+    pub fn of(dir: &Path) -> io::Result<DirKey> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let meta = std::fs::metadata(dir)?;
+            Ok(DirKey {
+                dev: meta.dev(),
+                ino: meta.ino(),
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            Ok(DirKey(dir.to_path_buf()))
+        }
+    }
+}
+
+/// RAII membership of a wallet data directory in `OPEN_DIRS`. Holds the
+/// directory's identity as the key and its canonical path for error details
+/// and `WalletSession::data_dir`.
 #[derive(Debug)]
-pub struct DirLease(PathBuf);
+pub struct DirLease {
+    key: DirKey,
+    path: PathBuf,
+}
 
 impl DirLease {
-    /// Fails with `WalletBusy` if another lease holds `dir`. `dir` must be
-    /// canonical.
+    /// Fails with `WalletBusy` if another lease holds the same directory,
+    /// whatever path it was reached through. `dir` must exist (it has no
+    /// identity otherwise) and should be canonical: it is what the error
+    /// detail and `path()` report.
     pub fn acquire(dir: &Path) -> Result<DirLease, GrinError> {
-        if open_dirs().insert(dir.to_path_buf()) {
-            Ok(DirLease(dir.to_path_buf()))
+        let key = DirKey::of(dir)?;
+        if open_dirs().insert(key.clone()) {
+            Ok(DirLease {
+                key,
+                path: dir.to_path_buf(),
+            })
         } else {
             Err(GrinError::new(
                 GrinErrorCode::WalletBusy,
@@ -335,14 +396,18 @@ impl DirLease {
         }
     }
 
+    pub fn key(&self) -> &DirKey {
+        &self.key
+    }
+
     pub fn path(&self) -> &Path {
-        &self.0
+        &self.path
     }
 }
 
 impl Drop for DirLease {
     fn drop(&mut self) {
-        open_dirs().remove(&self.0);
+        open_dirs().remove(&self.key);
     }
 }
 
@@ -376,17 +441,95 @@ mod tests {
 
     #[test]
     fn lease_is_exclusive_and_released() {
-        let dir = tempfile::tempdir().unwrap();
-        let p = std::fs::canonicalize(dir.path()).unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let root_canon = std::fs::canonicalize(root.path()).unwrap();
+        let p = root_canon.join("wallet_data");
+        std::fs::create_dir(&p).unwrap();
+
+        // Other spellings of the same directory: `dir/./` and, where the
+        // platform allows it without privileges, a symlink to the parent.
+        // Callers canonicalize first; on unix the key does not need that.
+        #[cfg_attr(not(unix), allow(unused_mut))]
+        let mut aliases = vec![p.join(".").join("")];
+        #[cfg(unix)]
+        {
+            let link = root_canon.join("link");
+            std::os::unix::fs::symlink(&root_canon, &link).unwrap();
+            aliases.push(link.join("wallet_data"));
+        }
+        let key = DirKey::of(&p).unwrap();
+        for alias in &aliases {
+            let canon = std::fs::canonicalize(alias).unwrap();
+            assert_eq!(DirKey::of(&canon).unwrap(), key, "{}", alias.display());
+            #[cfg(unix)]
+            assert_eq!(DirKey::of(alias).unwrap(), key, "{}", alias.display());
+        }
+
         let a = DirLease::acquire(&p).unwrap();
+        assert_eq!(*a.key(), key);
+        assert_eq!(a.path(), p);
         let e = DirLease::acquire(&p).unwrap_err();
         assert_eq!(e.code, GrinErrorCode::WalletBusy);
         assert_eq!(
             e.details.unwrap()["wallet_dir"],
             p.to_string_lossy().as_ref()
         );
+        for alias in &aliases {
+            let canon = std::fs::canonicalize(alias).unwrap();
+            let e = DirLease::acquire(&canon).unwrap_err();
+            assert_eq!(e.code, GrinErrorCode::WalletBusy);
+            #[cfg(unix)]
+            {
+                let e = DirLease::acquire(alias).unwrap_err();
+                assert_eq!(e.code, GrinErrorCode::WalletBusy);
+            }
+        }
         drop(a);
         let _b = DirLease::acquire(&p).unwrap();
+    }
+
+    #[test]
+    fn lease_needs_an_existing_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let e = DirLease::acquire(&root.path().join("missing")).unwrap_err();
+        assert_eq!(e.code, GrinErrorCode::Io);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lease_follows_the_directory_not_the_path() {
+        let root = tempfile::tempdir().unwrap();
+        let root_canon = std::fs::canonicalize(root.path()).unwrap();
+        let p = root_canon.join("wallet_data");
+        std::fs::create_dir(&p).unwrap();
+
+        // Renamed while held: the new path is still busy.
+        let a = DirLease::acquire(&p).unwrap();
+        let moved = root_canon.join("moved");
+        std::fs::rename(&p, &moved).unwrap();
+        let e = DirLease::acquire(&moved).unwrap_err();
+        assert_eq!(e.code, GrinErrorCode::WalletBusy);
+        let first = a.key().clone();
+        drop(a);
+        std::fs::rename(&moved, &p).unwrap();
+
+        // Removed and made again at the same path: a different directory.
+        // The open handle keeps the old inode allocated so the filesystem
+        // cannot hand the same number to the new directory.
+        let a = DirLease::acquire(&p).unwrap();
+        let pin = std::fs::File::open(&p).unwrap();
+        std::fs::remove_dir(&p).unwrap();
+        std::fs::create_dir(&p).unwrap();
+        let b = DirLease::acquire(&p).unwrap();
+        assert_ne!(*b.key(), first);
+        assert_eq!(a.path(), b.path());
+        drop(a);
+        drop(pin);
+        // Dropping the old lease leaves the new directory's lease in place.
+        let e = DirLease::acquire(&p).unwrap_err();
+        assert_eq!(e.code, GrinErrorCode::WalletBusy);
+        drop(b);
+        let _c = DirLease::acquire(&p).unwrap();
     }
 
     #[test]

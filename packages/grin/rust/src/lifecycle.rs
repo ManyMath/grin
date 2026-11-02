@@ -25,7 +25,7 @@ use crate::error::{
 };
 use crate::handle::{
     canonical_data_dir_create, canonical_data_dir_existing, get_session, lookup_session,
-    register_session, remove_session, DirLease, WalletInstance, WalletLc, WalletSession,
+    register_session, remove_session, DirKey, DirLease, WalletInstance, WalletLc, WalletSession,
 };
 
 /// Name of the encrypted seed file inside `wallet_data` (impls keeps its own
@@ -418,7 +418,9 @@ pub unsafe extern "C" fn grin_wallet_delete(
         let target = canonical_data_dir_existing(wallet_dir)?;
         if let Some(session) = lookup_session(handle) {
             let same = match &target {
-                Some(t) => *t == session.data_dir,
+                // The same path, or another path to the same directory
+                // (a bind mount, a parent renamed since the open).
+                Some(t) => *t == session.data_dir || DirKey::of(t)? == *session.dir_key(),
                 // The directory was removed behind the wallet's back (its
                 // canonical path no longer resolves); if the handle's own
                 // data directory is gone as well, it is this wallet.

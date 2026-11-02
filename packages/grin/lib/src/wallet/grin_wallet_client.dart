@@ -61,6 +61,7 @@ import 'grin_wallet_event.dart';
 /// Call [close] when you are done. A client that is dropped without it is
 /// closed by a native finalizer when it is garbage collected, but the
 /// directory may stay busy until any operation still running has returned.
+/// Its [events] stream is then closed too, without [GrinWalletClosed].
 class GrinWalletClient implements Finalizable {
   /// Wraps a native wallet [handle].
   ///
@@ -92,6 +93,7 @@ class GrinWalletClient implements Finalizable {
       );
     }
     _finalizer.attach(this, Pointer<Void>.fromAddress(handle), detach: this);
+    _eventsFinalizer.attach(this, WeakReference(_events), detach: this);
   }
 
   /// Calls `grin_wallet_close_finalizer` with the handle as the token. A
@@ -100,6 +102,24 @@ class GrinWalletClient implements Finalizable {
   static final NativeFinalizer _finalizer = NativeFinalizer(
     bindings.addresses.grin_wallet_close_finalizer,
   );
+
+  /// Closes the [events] stream of a client that was garbage collected
+  /// without [close], so a listener that still holds its subscription gets
+  /// the done event. The native handle is not touched here: [_finalizer]
+  /// still closes it. This only releases the Dart side of the stream.
+  ///
+  /// The token is a weak reference. A subscription's callbacks may refer to
+  /// the client, and a finalizer token that reaches the client keeps it
+  /// alive forever, which would stop [_finalizer] from running too. If the
+  /// controller is gone by then, nobody held a subscription and there is
+  /// nothing to close.
+  static final Finalizer<WeakReference<StreamController<GrinWalletEvent>>>
+  _eventsFinalizer = Finalizer((ref) {
+    final controller = ref.target;
+    if (controller != null && !controller.isClosed) {
+      unawaited(controller.close());
+    }
+  });
 
   // Static members ----------------------------------------------------------
 
@@ -797,7 +817,7 @@ class GrinWalletClient implements Finalizable {
   /// 2. calls [cancelScan], so a running scan stops at its next batch
   ///    boundary and a scan still waiting in the queue is skipped,
   /// 3. waits for the operations already queued, ignoring their errors,
-  /// 4. detaches the native finalizer,
+  /// 4. detaches the native finalizer and the [events] finalizer,
   /// 5. closes the native handle, emits [GrinWalletClosed] if that
   ///    worked, and then closes the [events] stream.
   ///
@@ -822,6 +842,7 @@ class GrinWalletClient implements Finalizable {
     }
     await _tail;
     _finalizer.detach(this);
+    _eventsFinalizer.detach(this);
     try {
       await _closeHandle(handle);
       // Only a close that worked is reported as one.
