@@ -1338,7 +1338,22 @@ Apple hosts, run on m3max-mbp (macOS 26, Xcode 27.0.1, rustup 1.94.0) with `tool
 | cargo release builds with the host toolchain (commit `2f0a9e1`) | `nm aarch64-apple-darwin: 35 standard, 0 test symbols`, `nm x86_64-apple-darwin: 35 standard, 0 test symbols`, `nm aarch64-apple-ios: 35 standard, 0 test symbols`, `nm aarch64-apple-ios-sim: 35 standard, 0 test symbols`, `nm x86_64-apple-ios: 35 standard, 0 test symbols` |
 | example through the hook's cargo mode (commit `dc3e37c`) | `flutter build macos`: `Built build/macos/Build/Products/Release/grin_flutter_example.app (62.0MB)`; `flutter build ios --no-codesign`: `Built build/ios/iphoneos/Runner.app (25.7MB)` |
 
-Two things were learned there and fixed: the iOS device link needs the deployment floors (`IPHONEOS_DEPLOYMENT_TARGET=13.0`, which the hook already passes; the script now does too), and inside an Xcode build the hook's cargo mode must build with `strip = none` on Apple, because under Xcode's PATH the stripped host proc-macro dylibs stop loading (reproduced with that PATH alone; `CARGO_PROFILE_RELEASE_STRIP=none` in `hook/build.dart`). The flake's Apple shell (`nix develop .#apple` in dev mode) started building but failed in `libz-sys`'s build script with `'stddef.h' file not found`, a kit-side Apple environment problem that the kit's own README also lists as unrechecked; the reference Apple dylibs therefore remain unverified.
+Two things were learned there and fixed: the iOS device link needs the deployment floors (`IPHONEOS_DEPLOYMENT_TARGET=13.0`, which the hook already passes; the script now does too), and inside an Xcode build the hook's cargo mode must build with `strip = none` on Apple, because under Xcode's PATH the stripped host proc-macro dylibs stop loading (reproduced with that PATH alone; `CARGO_PROFILE_RELEASE_STRIP=none` in `hook/build.dart`). The kit's Nix Apple reference build (`nix develop "git+file://$PWD?dir=packages/grin#apple" --command packages/grin/nix/build-apple.sh <out>`, with the local kit and fork as overridden inputs and `GRIN_FFI_ANY_XCODE=1`) fails against the kit at `85f7eb0` and passes with a three-line change to the kit's `nix/build-apple.sh` (D10). With that change, on the same Mac (2026-11-02):
+
+| Gate | Output |
+|---|---|
+| kit Apple reference build, all five targets (commit `0b95aa8`, scratch kit `58f72ac`) | `nix apple exit=0` (the kit's leak scan included), `Wrote .../build/apple7/SHA256SUMS.apple` |
+| exported symbols of each reference `libgrin_ffi.dylib` | `aarch64-apple-darwin: 35 standard, 0 test`, `x86_64-apple-darwin: 35 standard, 0 test`, `aarch64-apple-ios: 35 standard, 0 test`, `aarch64-apple-ios-sim: 35 standard, 0 test`, `x86_64-apple-ios: 35 standard, 0 test` |
+
+`SHA256SUMS.apple` from that run, for comparison with a later build from the patched kit:
+
+```text
+25ba8c9d26164e9dde222275f3db1d24bb7f682323e914695590ed4fdda6b025  ./aarch64-apple-darwin/libgrin_ffi.dylib
+631823db0fd5449edd6dfd6c4b5cb9992f6bae280c11c198d9c9601039a8ad2e  ./aarch64-apple-ios-sim/libgrin_ffi.dylib
+0d2ba29640137857fee237c11f88415180b439ae05769612b199a7bef5cbe612  ./aarch64-apple-ios/libgrin_ffi.dylib
+f1ffd2e181aee2a90db37b65c544149d5af901fde3e5fe94be4e0fdf806c72a6  ./x86_64-apple-darwin/libgrin_ffi.dylib
+e602d685d472d25cb60d18053902bf71248ab910d85dec13d7cd3a6b15d31e48  ./x86_64-apple-ios/libgrin_ffi.dylib
+```
 
 Windows host, run on desktop-pmacb92 (Windows 10, rustup with the MSVC toolchain; Rust 1.94.0 installed by rust-toolchain.toml) with `tool/verify-windows.ps1` from a clone made out of git bundles copied over scp (git over ssh from that host prompts for a key passphrase):
 
@@ -1351,7 +1366,7 @@ Live node smoke test: no public Grin testnet node answered, so a grin 5.5.2 node
 
 Private chain (regtest) run, on this machine: the node's usernet mode (`ChainTypes::UserTesting`) with its test miner, a grin-wallet CLI wallet (built from the fork) owning the mined coins and running a foreign API listener, and a local SOCKS5 proxy; all set up by `tool/regtest.sh`. `packages/grin/test/regtest_test.dart` passed, both from the hand-run setup (`00:18 +1: All tests passed!`) and from a clean `tool/regtest.sh` run that builds everything into a temp dir (`tip: 22`, `00:56 +1: All tests passed!`, `proxy connections: 3`), and covered: a scan over a populated chain (tip above 100), a Slatepack exchange with another implementation (S1 from grin-wallet, S2 from this library, finalized and posted by grin-wallet, confirmed by the miner), a real HTTP send from this library to grin-wallet's listener (`init_send_tx`, `receive_tx` over HTTP, lock, finalize, post), and the same send through the SOCKS5 proxy (the proxy log shows the CONNECTs to the node and to the listener). What this does not cover is Tor itself (an onion address through a real Tor daemon) and mainnet.
 
-Not verified here: an onion-address send through a real Tor daemon, a mainnet or testnet sync of a populated public chain (the local testnet node was still header-syncing when stopped), the kit's Nix Apple reference build (above). Root cause, from the failing build script's own output: it ran with `TARGET=x86_64-unknown-linux-musl`, the fixed host the kit's rustc wrapper reports to cargo so that builds do not depend on the build host. On Linux the kit supplies a zig-based compiler for that fake host; in the Apple shell there is none, so any host-side C build (here `libz-sys`, which `grin_util`'s `built` build-dependency pulls in through `git2`) is compiled by Xcode's clang for a Linux musl target with no sysroot, hence `'stddef.h' file not found`. A plugin whose host build scripts compile no C (frostdart, tor) does not hit this. The fix belongs in the kit (give the Apple shell a compiler for its fixed host, or stop faking the host for Apple script builds) or upstream in grin (drop `built`'s `git2` feature); it is not addressable from this flake, a send against a real node, the Tor path of `grin_tx_send_http` beyond its proxy checks, and the GC-finalizer path of `GrinWalletClient` beyond the Rust-side simulation with a retained session.
+Not verified here: an onion-address send through a real Tor daemon, a mainnet or testnet sync of a populated public chain (the local testnet node was still header-syncing when stopped), a send against a public node (the regtest send went to a grin-wallet listener on a private chain), the Tor path of `grin_tx_send_http` beyond its proxy checks, the GC-finalizer path of `GrinWalletClient` beyond the Rust-side simulation with a retained session, and the kit's Apple reference build against an unpatched kit (D10).
 
 Process note: while testing the brief's Cargo `[patch]` wiring, one command ran without the ssh guard and cargo opened an ssh connection to git.cypherstack.com, which answered that `sneurlax/grin-wallet` does not exist there. Nothing was fetched or pushed. Every later cargo, pub and nix command ran with `GIT_SSH_COMMAND=/bin/false`, and tool/local-fork-env.sh sets it as well.
 
@@ -1366,3 +1381,23 @@ Of the review nits (section 13), three were deliberately not changed:
 - F26: an embedded NUL cannot cross the C boundary; the Dart side rejects it with `ArgumentError`.
 
 Every other finding, nits included, was fixed: F18 (the lease is keyed by device and inode on unix, so bind mounts and renamed parents share one key), F21 (the pointer-taking `extern "C"` functions are `unsafe` in Rust; the C header is unchanged), F24 and F25 (the test proxy cannot hang a caller indefinitely and mining restores the thread's chain type on a panic), N3 (a Dart `Finalizer` over a weak reference closes the `events` stream on the GC path; the native close stays with the `NativeFinalizer`), and N10 (the hook warns when `test_utils` is set with a build mode other than `cargo`).
+
+### D10. The kit's Apple shell must not fake the host; a flake-side workaround was tried and reverted
+
+The kit's Nix Apple reference build failed for this crate against the kit at `85f7eb0`. Root cause, from the failing build scripts' own output: the Apple shell exports the kit's fixed-host `RUSTC_WRAPPER` (`nix/cargo-library.nix`, the `apple` shell), which answers `rustc -vV` with `host: x86_64-unknown-linux-musl` so that crate metadata hashes do not depend on the build machine. Cargo therefore hands every host build script `TARGET=x86_64-unknown-linux-musl`. On Linux the kit's derivations provide a zig-based compiler for that name; in the Apple shell nothing does, and the host side of this crate compiles C (`libz-sys` and `libgit2-sys`, pulled in by `grin_util`'s `built` build-dependency through its `git2` feature). Two failures follow, in order:
+
+1. `libz-sys`: cc-rs passes `--target=x86_64-unknown-linux-musl` to Xcode's clang, which has no headers for it (`'stddef.h' file not found`).
+2. `libgit2-sys`: its build script selects libgit2's platform configuration from `TARGET`, so it compiles the Linux variant on macOS (`no member named 'st_mtim' in 'struct stat'`).
+
+Commit `0b95aa8` tried the first fix that is possible from this flake: `families.apple.env` set `CC_x86_64_unknown_linux_musl` and `CXX_x86_64_unknown_linux_musl` to a wrapper that drops the target flags and compiles natively. It got `libz-sys` through and stopped at `libgit2-sys`, whose configuration no compiler wrapper can correct; it was reverted in the next commit. Plugins whose host build scripts compile no C (frostdart, tor) do not hit either failure.
+
+The fix belongs in the kit. The one verified here, applied as a scratch commit (`58f72ac`) to the Mac's scratch kit clone and not to the kit's own checkout, is this change to `nix/build-apple.sh`, after `unset NIX_CFLAGS_COMPILE NIX_LDFLAGS`:
+
+```diff
+ unset NIX_CFLAGS_COMPILE NIX_LDFLAGS
++# The fixed-host rustc wrapper makes host build scripts (libz-sys,
++# libgit2-sys) configure for Linux; on Apple the host is real.
++unset RUSTC_WRAPPER
+```
+
+With it every Apple target built and passed the kit's leak scan (section 13). The cost is the one the wrapper exists to avoid: Apple crate metadata hashes now depend on the building Mac's host triple (`aarch64-apple-darwin` or `x86_64-apple-darwin`), so a build from an Intel Mac and one from an Apple Silicon Mac will not be byte-identical. That is a kit decision (an alternative is to keep the wrapper but make it report the real host on Darwin), so it is proposed to the kit rather than worked around here; the upstream alternative, dropping `built`'s `git2` feature in `grin_util`, lives in the grin node repository. Until the kit carries a fix, the Apple reference build needs this patch and the hook's `cargo` mode is the way Apple builds are made from this checkout.

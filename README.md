@@ -112,6 +112,10 @@ stand in for them. Both are described in `docs/architecture.md` (D2) and in
 ## Status
 
 Built and tested on Linux x86_64 (Rust tests on an in-process chain, Dart
-tests, the Flutter example, Nix reference builds for Linux and Android).
-macOS, iOS and Windows builds, and a sync against a public node, have not
-been run here. See the "unverified" list in the project report.
+tests, the Flutter example, Nix reference builds for Linux, Android and
+Windows), on macOS (cargo builds for all five Apple targets, the macOS and
+iOS example builds, and the kit's Apple reference build with the kit patch
+described in `docs/architecture.md` D10) and on Windows (the DLL and the
+example). A live testnet node and a private regtest chain (scan, Slatepack
+exchange, HTTP and SOCKS5 sends) were exercised; mainnet, a populated public
+chain and Tor itself were not. See section 13 of `docs/architecture.md`.
