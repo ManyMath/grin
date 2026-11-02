@@ -19,6 +19,13 @@ if [ -n "$fork" ]; then
   GRIN_WALLET_LOCAL=$fork source "$root/tool/local-fork-env.sh"
 fi
 export GIT_SSH_COMMAND=/bin/false
+# The deployment floors from packages/grin/build-config.json, which the hook's
+# cargo mode also passes. Without them rustc links for iOS 10 while Xcode's
+# clang compiles the C code (secp256k1-zkp, lmdb) for the SDK's own version,
+# and the iOS 10 runtime lacks ___chkstk_darwin.
+export IPHONEOS_DEPLOYMENT_TARGET=13.0
+export MACOSX_DEPLOYMENT_TARGET=11.0
+export NIX_CONFIG="extra-experimental-features = nix-command flakes"
 
 echo "== host"; sw_vers 2>/dev/null || true; xcodebuild -version 2>/dev/null | head -2 || true; rustc --version; cargo --version
 
@@ -38,7 +45,16 @@ done
 
 if [ "${FLUTTER:-0}" = 1 ] && command -v flutter >/dev/null; then
   echo "== flutter build macos (example)"
-  (cd "$root" && dart pub get >/dev/null && cd packages/grin_flutter/example && flutter build macos) || { echo "FLUTTER_FAIL"; fail=1; }
+  if [ -n "${KIT_LOCAL:-}" ] && [ ! -f "$root/pubspec_overrides.yaml" ]; then
+    # The same uncommitted override the README describes, so pub does not
+    # try to reach the kit's private remote.
+    printf 'dependency_overrides:\n  native_prebuilt_hook:\n    path: %s/dart/native_prebuilt_hook\n' "$KIT_LOCAL" > "$root/pubspec_overrides.yaml"
+  fi
+  if [ -f "$root/pubspec_overrides.yaml" ]; then
+    (cd "$root" && dart pub get >/dev/null && cd packages/grin_flutter/example && flutter build macos) || { echo "FLUTTER_FAIL"; fail=1; }
+  else
+    echo "FLUTTER_SKIPPED (set KIT_LOCAL or provide pubspec_overrides.yaml while the kit is unpushed)"
+  fi
 fi
 
 if [ -n "${KIT_LOCAL:-}" ] && command -v nix >/dev/null; then
