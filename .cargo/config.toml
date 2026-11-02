@@ -1,0 +1,6 @@
+[net]
+# Fetch git dependencies with the git CLI so the fork (a private ssh remote)
+# is reached with the user's ssh setup, and so a url.<base>.insteadOf
+# rewrite can point cargo at a local clone before the fork is pushed
+# (tool/local-fork-env.sh, docs/architecture.md D2).
+git-fetch-with-cli = true
