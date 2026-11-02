@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/grin-ffi"]
+members = ["grin-ffi"]
 
 [profile.release]
 # Explicit so reproducibility does not depend on toolchain defaults.

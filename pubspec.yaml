@@ -1,0 +1,23 @@
+name: grin_workspace
+description: Pub workspace for the grin and grin_flutter packages. Not a package.
+publish_to: none
+
+environment:
+  sdk: ^3.13.0
+
+workspace:
+  - packages/grin
+  - packages/grin_flutter
+  - packages/grin_flutter/example
+
+# Applies to every build resolved from this workspace (dart test, the
+# example app). Stack Wallet sets its own block; see packages/grin/README.md.
+hooks:
+  user_defines:
+    grin:
+      # Build with the host Rust toolchain while developing in this repo.
+      # Release artifacts come from the Nix flake (tool/ci.dart).
+      build: cargo
+      # Export grin_test_* so dart test can drive an in-process chain.
+      # Only the cargo mode honours this; never set it in an app.
+      test_utils: true

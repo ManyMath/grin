@@ -1,0 +1,33 @@
+name: grin
+description: Dart bindings and a typed wallet client for Grin, over the grin-ffi Rust library (built or downloaded by this package's build hook).
+version: 0.1.0
+repository: https://github.com/cypherstack/grin
+# Target: pub.dev/packages/grin, published by the maintainers once the
+# native-build-kit hook package is itself publishable. Never publish from a
+# working tree.
+publish_to: none
+resolution: workspace
+
+environment:
+  sdk: ^3.13.0
+
+dependencies:
+  code_assets: ^1.2.1
+  ffi: ^2.1.0
+  hooks: ^2.2.0
+  meta: ^1.16.0
+  # Keep ref equal to the kit rev in flake.lock (test/kit_pin_test.dart).
+  native_prebuilt_hook:
+    git:
+      url: ssh://git@git.cypherstack.com:222/sneurlax/native-build-kit.git
+      path: dart/native_prebuilt_hook
+      ref: 85f7eb097604e5b99db3f90bccbcada3336836b8
+  # For the cargo build mode (hook/build.dart). 1.0.7 needs code_assets ^2,
+  # which the kit's ^1.2.1 excludes.
+  native_toolchain_rust: 1.0.6
+
+dev_dependencies:
+  ffigen: ^21.0.0
+  lints: ^6.0.0
+  path: ^1.9.0
+  test: ^1.26.0
