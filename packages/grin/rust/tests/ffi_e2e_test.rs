@@ -43,7 +43,7 @@ const UNREACHABLE_NODE: &str = "http://127.0.0.1:1";
 
 /// Reads and frees a result. Ok carries the data JSON (Null when the
 /// function returns nothing); Err carries the code and the error JSON.
-fn call(res: GrinFfiResult) -> Result<Value, (i32, Value)> {
+fn read_result(res: GrinFfiResult) -> Result<Value, (i32, Value)> {
     let read = |p: *mut c_char| -> Option<String> {
         if p.is_null() {
             None
@@ -54,7 +54,7 @@ fn call(res: GrinFfiResult) -> Result<Value, (i32, Value)> {
     let code = res.code;
     let data = read(res.data);
     let error = read(res.error);
-    grin_ffi_result_free(res);
+    unsafe { grin_ffi_result_free(res) };
     if code == OK {
         assert!(error.is_none(), "success must not carry an error");
         Ok(data
@@ -71,6 +71,18 @@ fn call(res: GrinFfiResult) -> Result<Value, (i32, Value)> {
         assert!(e.get("details").is_some());
         Err((code, e))
     }
+}
+
+/// Calls an entry point and reads its result with `read_result`. The
+/// pointers these tests pass are NULL or come from a `CString` that lives
+/// until the end of the statement, which is what the entry points require.
+/// Entry points that take only integers are safe, hence the allow.
+macro_rules! call {
+    ($e:expr) => {{
+        #[allow(unused_unsafe)]
+        let res = unsafe { $e };
+        read_result(res)
+    }};
 }
 
 fn code_of<T>(r: Result<T, (i32, Value)>) -> i32 {
@@ -102,7 +114,7 @@ fn config(dir: &str, network: u8) -> CString {
 
 fn create(dir: &str, network: u8, mnemonic: Option<&str>) -> Result<u64, (i32, Value)> {
     let m = mnemonic.map(cs);
-    let v = call(grin_wallet_create(
+    let v = call!(grin_wallet_create(
         config(dir, network).as_ptr(),
         m.as_ref().map_or(ptr::null(), |m| m.as_ptr()),
         cs(PASSWORD).as_ptr(),
@@ -111,7 +123,7 @@ fn create(dir: &str, network: u8, mnemonic: Option<&str>) -> Result<u64, (i32, V
 }
 
 fn open_with(dir: &str, network: u8, password: &str) -> Result<u64, (i32, Value)> {
-    let v = call(grin_wallet_open(
+    let v = call!(grin_wallet_open(
         config(dir, network).as_ptr(),
         cs(password).as_ptr(),
     ))?;
@@ -123,11 +135,11 @@ fn open(dir: &str, network: u8) -> Result<u64, (i32, Value)> {
 }
 
 fn close(handle: u64) {
-    call(grin_wallet_close(handle)).unwrap();
+    call!(grin_wallet_close(handle)).unwrap();
 }
 
 fn address(handle: u64, index: u32) -> String {
-    let v = call(grin_wallet_get_address(handle, index)).unwrap();
+    let v = call!(grin_wallet_get_address(handle, index)).unwrap();
     assert_eq!(v["index"], index);
     let ov3 = v["onion_v3_url"].as_str().unwrap();
     assert!(ov3.starts_with("http://") && ov3.ends_with(".onion"));
@@ -135,11 +147,11 @@ fn address(handle: u64, index: u32) -> String {
 }
 
 fn delete(dir: &str, handle: u64) -> Result<Value, (i32, Value)> {
-    call(grin_wallet_delete(cs(dir).as_ptr(), handle))
+    call!(grin_wallet_delete(cs(dir).as_ptr(), handle))
 }
 
 fn progress(handle: u64) -> Value {
-    call(grin_wallet_scan_progress(handle)).unwrap()
+    call!(grin_wallet_scan_progress(handle)).unwrap()
 }
 
 /// The last scanned block the wallet saved, read through the library.
@@ -155,7 +167,7 @@ fn last_scanned_block(handle: u64) -> ScannedBlockInfo {
 }
 
 fn test_wallet(chain: &Path, dir: &Path, client_id: &str) -> u64 {
-    let v = call(grin_test_create_wallet(
+    let v = call!(grin_test_create_wallet(
         cs(&path_str(chain)).as_ptr(),
         cs(&path_str(dir)).as_ptr(),
         cs(client_id).as_ptr(),
@@ -170,25 +182,25 @@ fn test_wallet(chain: &Path, dir: &Path, client_id: &str) -> u64 {
 #[test]
 fn mnemonic_generate_and_validate() {
     for words in [12u32, 15, 18, 21, 24] {
-        let v = call(grin_mnemonic_generate(words)).unwrap();
+        let v = call!(grin_mnemonic_generate(words)).unwrap();
         let m = v["mnemonic"].as_str().unwrap().to_owned();
         assert_eq!(m.split_whitespace().count() as u32, words);
-        let v = call(grin_mnemonic_validate(cs(&m).as_ptr())).unwrap();
+        let v = call!(grin_mnemonic_validate(cs(&m).as_ptr())).unwrap();
         assert_eq!(v, json!({"valid": true, "word_count": words}));
     }
-    assert_eq!(code_of(call(grin_mnemonic_generate(13))), INVALID_ARGUMENT);
-    assert_eq!(code_of(call(grin_mnemonic_generate(0))), INVALID_ARGUMENT);
+    assert_eq!(code_of(call!(grin_mnemonic_generate(13))), INVALID_ARGUMENT);
+    assert_eq!(code_of(call!(grin_mnemonic_generate(0))), INVALID_ARGUMENT);
 
     // Right length, wrong checksum.
     let bad = "abandon ".repeat(12);
-    let v = call(grin_mnemonic_validate(cs(&bad).as_ptr())).unwrap();
+    let v = call!(grin_mnemonic_validate(cs(&bad).as_ptr())).unwrap();
     assert_eq!(v, json!({"valid": false, "word_count": 12}));
-    let v = call(grin_mnemonic_validate(cs("not a mnemonic").as_ptr())).unwrap();
+    let v = call!(grin_mnemonic_validate(cs("not a mnemonic").as_ptr())).unwrap();
     assert_eq!(v, json!({"valid": false, "word_count": 3}));
-    let v = call(grin_mnemonic_validate(cs(MNEMONIC).as_ptr())).unwrap();
+    let v = call!(grin_mnemonic_validate(cs(MNEMONIC).as_ptr())).unwrap();
     assert_eq!(v["valid"], true);
     assert_eq!(
-        code_of(call(grin_mnemonic_validate(ptr::null()))),
+        code_of(call!(grin_mnemonic_validate(ptr::null()))),
         INVALID_ARGUMENT
     );
 }
@@ -203,44 +215,44 @@ fn create_open_address_roundtrip() {
     assert!(addr.starts_with("tgrin1"), "{addr}");
     assert_ne!(address(h, 1), addr);
 
-    let v = call(grin_wallet_get_mnemonic(h, cs(PASSWORD).as_ptr())).unwrap();
+    let v = call!(grin_wallet_get_mnemonic(h, cs(PASSWORD).as_ptr())).unwrap();
     assert_eq!(
         v["mnemonic"].as_str().unwrap().split_whitespace().count(),
         24
     );
     assert_eq!(
-        code_of(call(grin_wallet_get_mnemonic(h, cs("nope").as_ptr()))),
+        code_of(call!(grin_wallet_get_mnemonic(h, cs("nope").as_ptr()))),
         INVALID_PASSWORD
     );
     close(h);
-    assert_eq!(code_of(call(grin_wallet_close(h))), INVALID_HANDLE);
+    assert_eq!(code_of(call!(grin_wallet_close(h))), INVALID_HANDLE);
 
     let h = open(&dir, AUTOMATED).unwrap();
     assert_eq!(address(h, 0), addr);
 
     // The address validates on its own network and is rejected on mainnet.
-    let v = call(grin_address_validate(cs(&addr).as_ptr(), AUTOMATED)).unwrap();
+    let v = call!(grin_address_validate(cs(&addr).as_ptr(), AUTOMATED)).unwrap();
     assert_eq!(v["kind"], "slatepack");
     assert_eq!(v["slatepack_address"], addr.as_str());
     assert_eq!(v["url"], v["onion_v3_url"]);
     assert_eq!(
-        code_of(call(grin_address_validate(cs(&addr).as_ptr(), MAINNET))),
+        code_of(call!(grin_address_validate(cs(&addr).as_ptr(), MAINNET))),
         INVALID_ADDRESS
     );
     assert_eq!(
-        code_of(call(grin_address_validate(cs(&addr).as_ptr(), 7))),
+        code_of(call!(grin_address_validate(cs(&addr).as_ptr(), 7))),
         INVALID_ARGUMENT
     );
 
     // Password change takes effect for the next open.
-    call(grin_wallet_change_password(
+    call!(grin_wallet_change_password(
         h,
         cs(PASSWORD).as_ptr(),
         cs("new password").as_ptr(),
     ))
     .unwrap();
     assert_eq!(
-        code_of(call(grin_wallet_change_password(
+        code_of(call!(grin_wallet_change_password(
             h,
             cs("wrong").as_ptr(),
             cs("x").as_ptr()
@@ -259,14 +271,14 @@ fn create_open_address_roundtrip() {
     let h = create(&main_dir, MAINNET, Some(MNEMONIC)).unwrap();
     let main_addr = address(h, 0);
     assert!(main_addr.starts_with("grin1"), "{main_addr}");
-    let main_onion = call(grin_wallet_get_address(h, 0)).unwrap()["onion_v3_url"].clone();
-    let v = call(grin_wallet_get_mnemonic(h, cs(PASSWORD).as_ptr())).unwrap();
+    let main_onion = call!(grin_wallet_get_address(h, 0)).unwrap()["onion_v3_url"].clone();
+    let v = call!(grin_wallet_get_mnemonic(h, cs(PASSWORD).as_ptr())).unwrap();
     assert_eq!(v["mnemonic"], MNEMONIC);
     close(h);
     let auto_dir = path_str(&tmp.path().join("auto2"));
     let h = create(&auto_dir, AUTOMATED, Some(MNEMONIC)).unwrap();
     assert!(address(h, 0).starts_with("tgrin1"));
-    let auto_onion = call(grin_wallet_get_address(h, 0)).unwrap()["onion_v3_url"].clone();
+    let auto_onion = call!(grin_wallet_get_address(h, 0)).unwrap()["onion_v3_url"].clone();
     close(h);
     assert_eq!(auto_onion, main_onion);
 
@@ -291,13 +303,13 @@ fn funded_wallet_on_test_chain() {
     let bob = test_wallet(&chain, &tmp.path().join("bob"), "bob");
     assert!(address(alice, 0).starts_with("tgrin1"));
 
-    let v = call(grin_test_mine_blocks(alice, 5)).unwrap();
+    let v = call!(grin_test_mine_blocks(alice, 5)).unwrap();
     assert_eq!(v["height"], 5);
-    let v = call(grin_wallet_get_chain_height(alice)).unwrap();
+    let v = call!(grin_wallet_get_chain_height(alice)).unwrap();
     assert_eq!(v["height"], 5);
     assert!(v["hash"].as_str().unwrap().len() == 64);
 
-    let b = call(grin_wallet_get_balance(alice, true, 1)).unwrap();
+    let b = call!(grin_wallet_get_balance(alice, true, 1)).unwrap();
     assert_eq!(b["refreshed_from_node"], true);
     assert_eq!(b["last_confirmed_height"], 5);
     let spendable = b["amount_currently_spendable"].as_u64().unwrap();
@@ -306,37 +318,37 @@ fn funded_wallet_on_test_chain() {
     assert!(immature > 0, "{b}");
     assert_eq!(b["total"].as_u64().unwrap(), spendable + immature);
 
-    let b = call(grin_wallet_get_balance(bob, true, 1)).unwrap();
+    let b = call!(grin_wallet_get_balance(bob, true, 1)).unwrap();
     assert_eq!(b["total"], 0);
 
-    let v = call(grin_wallet_scan(alice, 0, false)).unwrap();
+    let v = call!(grin_wallet_scan(alice, 0, false)).unwrap();
     assert_eq!(v, json!({"scanned_height": 5, "tip_height": 5}));
-    let p = call(grin_wallet_scan_progress(alice)).unwrap();
+    let p = call!(grin_wallet_scan_progress(alice)).unwrap();
     assert_eq!(p["is_scanning"], false);
     assert_eq!(p["cancel_requested"], false);
     assert_eq!(p["start_height"], 1);
     assert_eq!(p["tip_height"], 5);
     assert_eq!(p["progress_pct"], 100);
 
-    let after = call(grin_wallet_get_balance(alice, false, 1)).unwrap();
+    let after = call!(grin_wallet_get_balance(alice, false, 1)).unwrap();
     assert_eq!(after["amount_currently_spendable"], spendable);
 
     // A cancel with no scan running does nothing and cannot stop the next
     // scan (scan_cancels_between_batches covers a running one).
-    call(grin_wallet_scan_cancel(alice)).unwrap();
+    call!(grin_wallet_scan_cancel(alice)).unwrap();
     let p = progress(alice);
     assert_eq!(p["cancel_requested"], false);
     assert_eq!(p["is_scanning"], false);
-    let v = call(grin_wallet_scan(alice, 3, false)).unwrap();
+    let v = call!(grin_wallet_scan(alice, 3, false)).unwrap();
     assert_eq!(v, json!({"scanned_height": 5, "tip_height": 5}));
     assert_eq!(progress(alice)["start_height"], 3);
 
     // History holds only the coinbase outputs so far.
-    let txs = call(grin_txs_get(alice, false)).unwrap();
+    let txs = call!(grin_txs_get(alice, false)).unwrap();
     let txs = txs["txs"].as_array().unwrap();
     assert!(!txs.is_empty());
     assert!(txs.iter().all(|t| t["type"] == "ConfirmedCoinbase"));
-    let est = call(grin_tx_estimate_fee(alice, 1_000_000_000, 1, false, false)).unwrap();
+    let est = call!(grin_tx_estimate_fee(alice, 1_000_000_000, 1, false, false)).unwrap();
     assert!(est["fee"].as_u64().unwrap() > 0, "{est}");
 
     close(alice);
@@ -344,7 +356,7 @@ fn funded_wallet_on_test_chain() {
 
     // Reopening a test wallet on the same chain keeps its funds.
     let alice = test_wallet(&chain, &tmp.path().join("alice"), "alice");
-    let b = call(grin_wallet_get_balance(alice, true, 1)).unwrap();
+    let b = call!(grin_wallet_get_balance(alice, true, 1)).unwrap();
     assert_eq!(b["amount_currently_spendable"], spendable);
     close(alice);
 }
@@ -380,11 +392,14 @@ fn wallet_busy_case(use_finalizer: bool) {
     // Stand-in for an in-flight call that still holds the session.
     let retained = retain_session(h).expect("session is registered");
     if use_finalizer {
-        grin_wallet_close_finalizer(h as usize as *mut c_void);
+        unsafe { grin_wallet_close_finalizer(h as usize as *mut c_void) };
     } else {
         close(h);
     }
-    assert_eq!(code_of(call(grin_wallet_get_address(h, 0))), INVALID_HANDLE);
+    assert_eq!(
+        code_of(call!(grin_wallet_get_address(h, 0))),
+        INVALID_HANDLE
+    );
 
     for d in &aliases {
         let e = open(d, AUTOMATED).unwrap_err();
@@ -427,15 +442,18 @@ fn wallet_busy_case(use_finalizer: bool) {
     assert_eq!(code_of(delete(&dir, other_h)), INVALID_ARGUMENT);
     close(other_h);
     delete(aliases.last().unwrap(), h).unwrap();
-    assert_eq!(code_of(call(grin_wallet_get_address(h, 0))), INVALID_HANDLE);
+    assert_eq!(
+        code_of(call!(grin_wallet_get_address(h, 0))),
+        INVALID_HANDLE
+    );
     assert!(!canonical.exists());
     assert!(real.exists(), "only wallet_data is removed");
     delete(&dir, 0).unwrap();
     assert_eq!(code_of(open(&dir, AUTOMATED)), WALLET_NOT_FOUND);
 
     // An unknown handle is ignored by the finalizer.
-    grin_wallet_close_finalizer(987_654_321usize as *mut c_void);
-    grin_wallet_close_finalizer(ptr::null_mut());
+    unsafe { grin_wallet_close_finalizer(987_654_321usize as *mut c_void) };
+    unsafe { grin_wallet_close_finalizer(ptr::null_mut()) };
 }
 
 #[test]
@@ -488,7 +506,7 @@ fn mainnet_and_testnet_concurrently() {
                     } else {
                         &test_addr
                     };
-                    call(grin_address_validate(cs(probe).as_ptr(), net)).unwrap();
+                    call!(grin_address_validate(cs(probe).as_ptr(), net)).unwrap();
                 }
             })
         })
@@ -506,8 +524,8 @@ fn network_settings() {
     let dir = path_str(&tmp.path().join("w"));
     let h = create(&dir, AUTOMATED, None).unwrap();
 
-    assert_eq!(code_of(call(grin_wallet_get_chain_height(h))), NODE);
-    call(grin_wallet_update_network(
+    assert_eq!(code_of(call!(grin_wallet_get_chain_height(h))), NODE);
+    call!(grin_wallet_update_network(
         h,
         cs("http://127.0.0.1:2").as_ptr(),
         cs("secret").as_ptr(),
@@ -515,7 +533,7 @@ fn network_settings() {
     ))
     .unwrap();
     assert_eq!(
-        code_of(call(grin_wallet_update_network(
+        code_of(call!(grin_wallet_update_network(
             h,
             cs(UNREACHABLE_NODE).as_ptr(),
             ptr::null(),
@@ -524,7 +542,7 @@ fn network_settings() {
         INVALID_ARGUMENT
     );
     assert_eq!(
-        code_of(call(grin_wallet_update_network(
+        code_of(call!(grin_wallet_update_network(
             h,
             cs("ftp://x").as_ptr(),
             ptr::null(),
@@ -535,7 +553,7 @@ fn network_settings() {
     // Credentials in the URL would reach error text and logs; the secret
     // goes in its own argument.
     let with_password = "http://grin:hunter2@127.0.0.1:2";
-    let e = call(grin_wallet_update_network(
+    let e = call!(grin_wallet_update_network(
         h,
         cs(with_password).as_ptr(),
         ptr::null(),
@@ -544,23 +562,23 @@ fn network_settings() {
     .unwrap_err();
     assert_eq!(e.0, INVALID_ARGUMENT, "{}", e.1);
     assert!(!e.1.to_string().contains("hunter2"), "{}", e.1);
-    call(grin_wallet_update_network(
+    call!(grin_wallet_update_network(
         h,
         cs(UNREACHABLE_NODE).as_ptr(),
         ptr::null(),
         cs("").as_ptr(),
     ))
     .unwrap();
-    assert_eq!(code_of(call(grin_wallet_get_chain_height(h))), NODE);
+    assert_eq!(code_of(call!(grin_wallet_get_chain_height(h))), NODE);
     // An unreachable node is not an error for balances, only not a refresh.
-    let b = call(grin_wallet_get_balance(h, true, 10)).unwrap();
+    let b = call!(grin_wallet_get_balance(h, true, 10)).unwrap();
     assert_eq!(b["refreshed_from_node"], false);
     assert_eq!(b["minimum_confirmations"], 10);
     assert_eq!(b["total"], 0);
     close(h);
 
     assert_eq!(
-        code_of(call(grin_node_test_connection(
+        code_of(call!(grin_node_test_connection(
             cs(UNREACHABLE_NODE).as_ptr(),
             ptr::null(),
             ptr::null(),
@@ -568,14 +586,14 @@ fn network_settings() {
         NODE
     );
     assert_eq!(
-        code_of(call(grin_node_test_connection(
+        code_of(call!(grin_node_test_connection(
             ptr::null(),
             ptr::null(),
             ptr::null()
         ))),
         INVALID_ARGUMENT
     );
-    let e = call(grin_node_test_connection(
+    let e = call!(grin_node_test_connection(
         cs(with_password).as_ptr(),
         ptr::null(),
         ptr::null(),
@@ -584,7 +602,7 @@ fn network_settings() {
     assert_eq!(e.0, INVALID_ARGUMENT, "{}", e.1);
     assert!(!e.1.to_string().contains("hunter2"), "{}", e.1);
     let config = json!({"wallet_dir": dir, "network": AUTOMATED, "node_url": with_password});
-    let e = call(grin_wallet_open(
+    let e = call!(grin_wallet_open(
         cs(&config.to_string()).as_ptr(),
         cs(PASSWORD).as_ptr(),
     ))
@@ -599,20 +617,20 @@ fn scan_cancels_between_batches() {
     let chain = tmp.path().join("chain");
     let dir = tmp.path().join("w");
     let w = test_wallet(&chain, &dir, "w");
-    call(grin_test_mine_blocks(w, 10)).unwrap();
+    call!(grin_test_mine_blocks(w, 10)).unwrap();
     let spendable =
-        call(grin_wallet_get_balance(w, true, 1)).unwrap()["amount_currently_spendable"].clone();
+        call!(grin_wallet_get_balance(w, true, 1)).unwrap()["amount_currently_spendable"].clone();
     assert!(spendable.as_u64().unwrap() > 0);
 
-    let v = call(grin_wallet_scan(w, 0, false)).unwrap();
+    let v = call!(grin_wallet_scan(w, 0, false)).unwrap();
     assert_eq!(v, json!({"scanned_height": 10, "tip_height": 10}));
     assert_eq!(progress(w)["progress_pct"], 100);
     assert_eq!(last_scanned_block(w).height, 10);
 
     // Two more blocks the wallet has not seen; the refresh at the start of
     // a scan records the new tip as the last confirmed height.
-    call(grin_test_mine_blocks(w, 2)).unwrap();
-    let tip_hash = call(grin_wallet_get_chain_height(w)).unwrap()["hash"].clone();
+    call!(grin_test_mine_blocks(w, 2)).unwrap();
+    let tip_hash = call!(grin_wallet_get_chain_height(w)).unwrap()["hash"].clone();
 
     // Two heights per batch: 1-2, 3-4, 5-6, ... The hook runs after each
     // batch is saved and cancels after the one ending at 4.
@@ -625,14 +643,14 @@ fn scan_cancels_between_batches() {
             let mut p = progress(w);
             p["batch_end"] = json!(height);
             if height == 4 {
-                call(grin_wallet_scan_cancel(w)).unwrap();
+                call!(grin_wallet_scan_cancel(w)).unwrap();
                 p["after_cancel"] = progress(w)["cancel_requested"].clone();
             }
             log.lock().unwrap().push(p);
         })),
     );
     assert!(hooked);
-    let e = call(grin_wallet_scan(w, 0, false)).unwrap_err();
+    let e = call!(grin_wallet_scan(w, 0, false)).unwrap_err();
     assert_eq!(e.0, CANCELLED, "{}", e.1);
     assert_eq!(
         e.1["details"],
@@ -658,7 +676,7 @@ fn scan_cancels_between_batches() {
     assert_eq!(p["scanned_height"], 4);
     assert_eq!(p["tip_height"], 12);
     assert_eq!(last_scanned_block(w).height, 4);
-    let b = call(grin_wallet_get_balance(w, false, 1)).unwrap();
+    let b = call!(grin_wallet_get_balance(w, false, 1)).unwrap();
     assert_eq!(b["last_confirmed_height"], 12);
 
     // A cancel that arrives after the last batch has nothing to stop, and
@@ -668,19 +686,19 @@ fn scan_cancels_between_batches() {
         5,
         Some(Box::new(move |height| {
             if height == 12 {
-                call(grin_wallet_scan_cancel(w)).unwrap();
+                call!(grin_wallet_scan_cancel(w)).unwrap();
             }
         })),
     );
-    let v = call(grin_wallet_scan(w, 0, false)).unwrap();
+    let v = call!(grin_wallet_scan(w, 0, false)).unwrap();
     assert_eq!(v, json!({"scanned_height": 12, "tip_height": 12}));
     set_scan_test_hooks(w, 0, None);
-    let v = call(grin_wallet_scan(w, 0, false)).unwrap();
+    let v = call!(grin_wallet_scan(w, 0, false)).unwrap();
     assert_eq!(v, json!({"scanned_height": 12, "tip_height": 12}));
     let saved = last_scanned_block(w);
     assert_eq!(saved.height, 12);
     assert_eq!(json!(saved.hash), tip_hash);
-    let b = call(grin_wallet_get_balance(w, true, 1)).unwrap();
+    let b = call!(grin_wallet_get_balance(w, true, 1)).unwrap();
     assert!(b["amount_currently_spendable"].as_u64().unwrap() >= spendable.as_u64().unwrap());
 
     // Closing the handle stops a running scan too, so close does not wait
@@ -690,16 +708,16 @@ fn scan_cancels_between_batches() {
         2,
         Some(Box::new(move |height| {
             if height == 2 {
-                call(grin_wallet_close(w)).unwrap();
+                call!(grin_wallet_close(w)).unwrap();
             }
         })),
     );
-    let e = call(grin_wallet_scan(w, 0, false)).unwrap_err();
+    let e = call!(grin_wallet_scan(w, 0, false)).unwrap_err();
     assert_eq!(e.0, CANCELLED, "{}", e.1);
     assert_eq!(e.1["details"]["scanned_height"], 2);
-    assert_eq!(code_of(call(grin_wallet_scan_progress(w))), INVALID_HANDLE);
+    assert_eq!(code_of(call!(grin_wallet_scan_progress(w))), INVALID_HANDLE);
     let w = test_wallet(&chain, &dir, "w");
-    let v = call(grin_wallet_scan(w, 0, false)).unwrap();
+    let v = call!(grin_wallet_scan(w, 0, false)).unwrap();
     assert_eq!(v, json!({"scanned_height": 12, "tip_height": 12}));
     close(w);
 }
@@ -709,7 +727,7 @@ fn second_scan_is_busy_while_one_runs() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().join("w");
     let w = test_wallet(&tmp.path().join("chain"), &dir, "w");
-    call(grin_test_mine_blocks(w, 4)).unwrap();
+    call!(grin_test_mine_blocks(w, 4)).unwrap();
     let data_dir = std::fs::canonicalize(dir.join("wallet_data")).unwrap();
 
     // After each batch of the running scan, another thread starts a scan on
@@ -720,14 +738,14 @@ fn second_scan_is_busy_while_one_runs() {
         w,
         2,
         Some(Box::new(move |_height| {
-            let second = thread::spawn(move || call(grin_wallet_scan(w, 0, false)))
+            let second = thread::spawn(move || call!(grin_wallet_scan(w, 0, false)))
                 .join()
                 .unwrap();
             log.lock().unwrap().push(second.unwrap_err());
         })),
     );
     assert!(hooked);
-    let v = call(grin_wallet_scan(w, 0, false)).unwrap();
+    let v = call!(grin_wallet_scan(w, 0, false)).unwrap();
     assert_eq!(v, json!({"scanned_height": 4, "tip_height": 4}));
     let refused = std::mem::take(&mut *refused.lock().unwrap());
     assert_eq!(refused.len(), 2, "{refused:?}");
@@ -743,7 +761,7 @@ fn second_scan_is_busy_while_one_runs() {
     // The refused scans left the slot alone: the next scan runs.
     set_scan_test_hooks(w, 0, None);
     assert!(!progress(w)["is_scanning"].as_bool().unwrap());
-    let v = call(grin_wallet_scan(w, 0, false)).unwrap();
+    let v = call!(grin_wallet_scan(w, 0, false)).unwrap();
     assert_eq!(v, json!({"scanned_height": 4, "tip_height": 4}));
     close(w);
 }
@@ -759,9 +777,9 @@ fn password_errors_are_precise() {
     let seed = data.join("wallet.seed");
     let h = create(&dir, AUTOMATED, None).unwrap();
     let original = std::fs::read(&seed).unwrap();
-    let mnemonic = |h: u64, pw: &str| call(grin_wallet_get_mnemonic(h, cs(pw).as_ptr()));
+    let mnemonic = |h: u64, pw: &str| call!(grin_wallet_get_mnemonic(h, cs(pw).as_ptr()));
     let change = |h: u64, old: &str, new: &str| {
-        call(grin_wallet_change_password(
+        call!(grin_wallet_change_password(
             h,
             cs(old).as_ptr(),
             cs(new).as_ptr(),
@@ -871,7 +889,10 @@ fn delete_closes_a_handle_whose_data_is_gone() {
     let h = create(&dir, AUTOMATED, None).unwrap();
     std::fs::remove_dir_all(tmp.path().join("w").join("wallet_data")).unwrap();
     delete(&dir, h).unwrap();
-    assert_eq!(code_of(call(grin_wallet_get_address(h, 0))), INVALID_HANDLE);
+    assert_eq!(
+        code_of(call!(grin_wallet_get_address(h, 0))),
+        INVALID_HANDLE
+    );
     close(create(&dir, AUTOMATED, None).unwrap());
 
     // A handle whose data still exists is not closed by deleting some other,
@@ -936,28 +957,31 @@ fn wallet_data_link_to_another_name_is_refused() {
 
 #[test]
 fn error_paths() {
-    call(grin_init_logs(cs("error").as_ptr())).unwrap();
-    call(grin_init_logs(ptr::null())).unwrap();
-    call(grin_init_logs(cs("error").as_ptr())).unwrap();
+    call!(grin_init_logs(cs("error").as_ptr())).unwrap();
+    call!(grin_init_logs(ptr::null())).unwrap();
+    call!(grin_init_logs(cs("error").as_ptr())).unwrap();
     assert_eq!(
-        code_of(call(grin_init_logs(cs("chatty").as_ptr()))),
+        code_of(call!(grin_init_logs(cs("chatty").as_ptr()))),
         INVALID_ARGUMENT
     );
 
-    let e = call(grin_test_panic()).unwrap_err();
+    let e = call!(grin_test_panic()).unwrap_err();
     assert_eq!(e.0, INTERNAL_PANIC);
     assert_eq!(e.1["message"], "grin_test_panic");
 
     for h in [0u64, 12345] {
-        assert_eq!(code_of(call(grin_wallet_get_address(h, 0))), INVALID_HANDLE);
-        assert_eq!(code_of(call(grin_wallet_scan_progress(h))), INVALID_HANDLE);
-        assert_eq!(code_of(call(grin_wallet_scan_cancel(h))), INVALID_HANDLE);
         assert_eq!(
-            code_of(call(grin_wallet_get_balance(h, false, 1))),
+            code_of(call!(grin_wallet_get_address(h, 0))),
             INVALID_HANDLE
         );
-        assert_eq!(code_of(call(grin_wallet_close(h))), INVALID_HANDLE);
-        assert_eq!(code_of(call(grin_test_mine_blocks(h, 1))), INVALID_HANDLE);
+        assert_eq!(code_of(call!(grin_wallet_scan_progress(h))), INVALID_HANDLE);
+        assert_eq!(code_of(call!(grin_wallet_scan_cancel(h))), INVALID_HANDLE);
+        assert_eq!(
+            code_of(call!(grin_wallet_get_balance(h, false, 1))),
+            INVALID_HANDLE
+        );
+        assert_eq!(code_of(call!(grin_wallet_close(h))), INVALID_HANDLE);
+        assert_eq!(code_of(call!(grin_test_mine_blocks(h, 1))), INVALID_HANDLE);
     }
 
     let tmp = tempfile::tempdir().unwrap();
@@ -966,7 +990,7 @@ fn error_paths() {
 
     // NULL pointers.
     assert_eq!(
-        code_of(call(grin_wallet_create(
+        code_of(call!(grin_wallet_create(
             ptr::null(),
             ptr::null(),
             pw.as_ptr()
@@ -974,7 +998,7 @@ fn error_paths() {
         INVALID_ARGUMENT
     );
     assert_eq!(
-        code_of(call(grin_wallet_create(
+        code_of(call!(grin_wallet_create(
             config(&dir, AUTOMATED).as_ptr(),
             ptr::null(),
             ptr::null()
@@ -982,33 +1006,33 @@ fn error_paths() {
         INVALID_ARGUMENT
     );
     assert_eq!(
-        code_of(call(grin_wallet_open(
+        code_of(call!(grin_wallet_open(
             config(&dir, AUTOMATED).as_ptr(),
             ptr::null()
         ))),
         INVALID_ARGUMENT
     );
     assert_eq!(
-        code_of(call(grin_wallet_delete(ptr::null(), 0))),
+        code_of(call!(grin_wallet_delete(ptr::null(), 0))),
         INVALID_ARGUMENT
     );
     assert_eq!(
-        code_of(call(grin_address_validate(ptr::null(), MAINNET))),
+        code_of(call!(grin_address_validate(ptr::null(), MAINNET))),
         INVALID_ARGUMENT
     );
 
     // Invalid UTF-8.
     let bad = CString::new(vec![b'{', 0xff, 0xfe, b'}']).unwrap();
     assert_eq!(
-        code_of(call(grin_wallet_open(bad.as_ptr(), pw.as_ptr()))),
+        code_of(call!(grin_wallet_open(bad.as_ptr(), pw.as_ptr()))),
         INVALID_UTF8
     );
     assert_eq!(
-        code_of(call(grin_mnemonic_validate(bad.as_ptr()))),
+        code_of(call!(grin_mnemonic_validate(bad.as_ptr()))),
         INVALID_UTF8
     );
     assert_eq!(
-        code_of(call(grin_wallet_create(
+        code_of(call!(grin_wallet_create(
             config(&dir, AUTOMATED).as_ptr(),
             ptr::null(),
             bad.as_ptr()
@@ -1018,14 +1042,14 @@ fn error_paths() {
 
     // Malformed or invalid config.
     assert_eq!(
-        code_of(call(grin_wallet_open(
+        code_of(call!(grin_wallet_open(
             cs("{not json").as_ptr(),
             pw.as_ptr()
         ))),
         JSON
     );
     assert_eq!(
-        code_of(call(grin_wallet_open(
+        code_of(call!(grin_wallet_open(
             cs("{\"network\": 0}").as_ptr(),
             pw.as_ptr()
         ))),
@@ -1033,7 +1057,7 @@ fn error_paths() {
     );
     let bad_net = json!({"wallet_dir": dir, "network": 9, "node_url": UNREACHABLE_NODE});
     assert_eq!(
-        code_of(call(grin_wallet_create(
+        code_of(call!(grin_wallet_create(
             cs(&bad_net.to_string()).as_ptr(),
             ptr::null(),
             pw.as_ptr()
@@ -1045,7 +1069,7 @@ fn error_paths() {
         "socks_proxy": "tor.example:9050",
     });
     assert_eq!(
-        code_of(call(grin_wallet_create(
+        code_of(call!(grin_wallet_create(
             cs(&bad_proxy.to_string()).as_ptr(),
             ptr::null(),
             pw.as_ptr()
@@ -1058,7 +1082,7 @@ fn error_paths() {
     );
 
     // Address forms.
-    let v = call(grin_address_validate(
+    let v = call!(grin_address_validate(
         cs("https://wallet.example.com/v2/foreign").as_ptr(),
         MAINNET,
     ))
@@ -1073,7 +1097,7 @@ fn error_paths() {
         })
     );
     assert_eq!(
-        code_of(call(grin_address_validate(
+        code_of(call!(grin_address_validate(
             cs("grin1nope").as_ptr(),
             MAINNET
         ))),

@@ -39,7 +39,7 @@ const PASSWORD: &str = "pw";
 const REWARD: u64 = 60_000_000_000;
 const GRIN: u64 = 1_000_000_000;
 
-fn call(res: GrinFfiResult) -> Result<Value, (i32, Value)> {
+fn read_result(res: GrinFfiResult) -> Result<Value, (i32, Value)> {
     let read = |p: *mut c_char| -> Option<String> {
         if p.is_null() {
             None
@@ -50,7 +50,7 @@ fn call(res: GrinFfiResult) -> Result<Value, (i32, Value)> {
     let code = res.code;
     let data = read(res.data);
     let error = read(res.error);
-    grin_ffi_result_free(res);
+    unsafe { grin_ffi_result_free(res) };
     if code == OK {
         assert!(error.is_none());
         Ok(data
@@ -62,6 +62,18 @@ fn call(res: GrinFfiResult) -> Result<Value, (i32, Value)> {
         assert_eq!(e["code"], code);
         Err((code, e))
     }
+}
+
+/// Calls an entry point and reads its result with `read_result`. The
+/// pointers these tests pass are NULL or come from a `CString` that lives
+/// until the end of the statement, which is what the entry points require.
+/// Entry points that take only integers are safe, hence the allow.
+macro_rules! call {
+    ($e:expr) => {{
+        #[allow(unused_unsafe)]
+        let res = unsafe { $e };
+        read_result(res)
+    }};
 }
 
 fn code_of<T>(r: Result<T, (i32, Value)>) -> i32 {
@@ -76,7 +88,7 @@ fn cs(s: &str) -> CString {
 }
 
 fn test_wallet(chain: &Path, dir: &Path, client_id: &str) -> u64 {
-    let v = call(grin_test_create_wallet(
+    let v = call!(grin_test_create_wallet(
         cs(chain.to_str().unwrap()).as_ptr(),
         cs(dir.to_str().unwrap()).as_ptr(),
         cs(client_id).as_ptr(),
@@ -100,20 +112,20 @@ fn alice_and_bob(tmp: &Path, blocks: u64) -> (u64, u64) {
 }
 
 fn mine(handle: u64, count: u64) -> u64 {
-    call(grin_test_mine_blocks(handle, count)).unwrap()["height"]
+    call!(grin_test_mine_blocks(handle, count)).unwrap()["height"]
         .as_u64()
         .unwrap()
 }
 
 fn address(handle: u64) -> String {
-    call(grin_wallet_get_address(handle, 0)).unwrap()["slatepack_address"]
+    call!(grin_wallet_get_address(handle, 0)).unwrap()["slatepack_address"]
         .as_str()
         .unwrap()
         .to_owned()
 }
 
 fn balance(handle: u64, refresh: bool) -> Value {
-    call(grin_wallet_get_balance(handle, refresh, 1)).unwrap()
+    call!(grin_wallet_get_balance(handle, refresh, 1)).unwrap()
 }
 
 fn u(v: &Value) -> u64 {
@@ -125,11 +137,11 @@ fn s(v: &Value) -> &str {
 }
 
 fn init_send(handle: u64, args: Value) -> Result<Value, (i32, Value)> {
-    call(grin_tx_init_send(handle, cs(&args.to_string()).as_ptr()))
+    call!(grin_tx_init_send(handle, cs(&args.to_string()).as_ptr()))
 }
 
 fn receive(handle: u64, armored: &str) -> Result<Value, (i32, Value)> {
-    call(grin_tx_receive_slatepack(
+    call!(grin_tx_receive_slatepack(
         handle,
         cs(armored).as_ptr(),
         ptr::null(),
@@ -137,7 +149,7 @@ fn receive(handle: u64, armored: &str) -> Result<Value, (i32, Value)> {
 }
 
 fn finalize(handle: u64, armored: &str, broadcast: bool) -> Result<Value, (i32, Value)> {
-    call(grin_tx_finalize_slatepack(
+    call!(grin_tx_finalize_slatepack(
         handle,
         cs(armored).as_ptr(),
         broadcast,
@@ -146,7 +158,7 @@ fn finalize(handle: u64, armored: &str, broadcast: bool) -> Result<Value, (i32, 
 }
 
 fn decode(handle: u64, armored: &str) -> Result<Value, (i32, Value)> {
-    call(grin_slatepack_decode(
+    call!(grin_slatepack_decode(
         handle,
         AUTOMATED,
         cs(armored).as_ptr(),
@@ -155,7 +167,7 @@ fn decode(handle: u64, armored: &str) -> Result<Value, (i32, Value)> {
 }
 
 fn txs(handle: u64, refresh: bool) -> Value {
-    call(grin_txs_get(handle, refresh)).unwrap()
+    call!(grin_txs_get(handle, refresh)).unwrap()
 }
 
 /// The single log entry for `slate_id`.
@@ -187,7 +199,7 @@ fn slatepack_s1_s2_s3_with_payment_proof() {
     let b = balance(alice, true);
     assert_eq!(u(&b["amount_currently_spendable"]), 2 * REWARD, "{b}");
 
-    let est = call(grin_tx_estimate_fee(alice, amount, 1, false, false)).unwrap();
+    let est = call!(grin_tx_estimate_fee(alice, amount, 1, false, false)).unwrap();
     let fee = u(&est["fee"]);
     assert!(fee > 0, "{est}");
     assert_eq!(u(&est["amount"]), amount);
@@ -195,7 +207,7 @@ fn slatepack_s1_s2_s3_with_payment_proof() {
     assert_eq!(u(&est["total"]), amount + fee);
     assert_eq!(est["inputs_count"], 1, "{est}");
     assert_eq!(est["change_outputs"], 1, "{est}");
-    let inc = call(grin_tx_estimate_fee(alice, amount, 1, false, true)).unwrap();
+    let inc = call!(grin_tx_estimate_fee(alice, amount, 1, false, true)).unwrap();
     assert_eq!(u(&inc["total"]), amount);
     assert_eq!(u(&inc["amount"]) + u(&inc["fee"]), amount);
 
@@ -328,12 +340,12 @@ fn slatepack_s1_s2_s3_with_payment_proof() {
     assert_eq!(b["armored_slatepack"], s2["armored_slatepack"]);
 
     // Payment proof: export on Alice, verify on both sides.
-    let exported = call(grin_payment_proof_export(alice, -1, cs(&slate_id).as_ptr())).unwrap();
+    let exported = call!(grin_payment_proof_export(alice, -1, cs(&slate_id).as_ptr())).unwrap();
     let proof = exported["proof"].clone();
     assert_eq!(proof["recipient_address"], bob_addr.as_str());
     assert_eq!(proof["sender_address"], alice_addr.as_str());
     assert_eq!(proof["excess"], excess.as_str());
-    let by_id = call(grin_payment_proof_export(
+    let by_id = call!(grin_payment_proof_export(
         alice,
         u(&a["id"]) as i64,
         ptr::null(),
@@ -342,21 +354,21 @@ fn slatepack_s1_s2_s3_with_payment_proof() {
     assert_eq!(by_id, exported);
 
     let wrapped = cs(&exported.to_string());
-    let v = call(grin_payment_proof_verify(alice, wrapped.as_ptr())).unwrap();
+    let v = call!(grin_payment_proof_verify(alice, wrapped.as_ptr())).unwrap();
     assert_eq!(v, json!({"is_sender": true, "is_recipient": false}));
     let bare = cs(&proof.to_string());
-    let v = call(grin_payment_proof_verify(bob, bare.as_ptr())).unwrap();
+    let v = call!(grin_payment_proof_verify(bob, bare.as_ptr())).unwrap();
     assert_eq!(v, json!({"is_sender": false, "is_recipient": true}));
 
     let mut tampered = proof.clone();
     tampered["amount"] = json!("20");
-    let e = call(grin_payment_proof_verify(
+    let e = call!(grin_payment_proof_verify(
         bob,
         cs(&tampered.to_string()).as_ptr(),
     ));
     assert_eq!(code_of(e), TRANSACTION);
     assert_eq!(
-        code_of(call(grin_payment_proof_verify(
+        code_of(call!(grin_payment_proof_verify(
             alice,
             cs("{\"proof\": 1}").as_ptr()
         ))),
@@ -364,7 +376,7 @@ fn slatepack_s1_s2_s3_with_payment_proof() {
     );
     // Bob's side of a send keeps no proof.
     assert_eq!(
-        code_of(call(grin_payment_proof_export(
+        code_of(call!(grin_payment_proof_export(
             bob,
             -1,
             cs(&slate_id).as_ptr()
@@ -377,7 +389,7 @@ fn slatepack_s1_s2_s3_with_payment_proof() {
 }
 
 fn close(handle: u64) {
-    call(grin_wallet_close(handle)).unwrap();
+    call!(grin_wallet_close(handle)).unwrap();
 }
 
 #[test]
@@ -433,7 +445,7 @@ fn late_lock_locks_inputs_at_finalization() {
     )
     .unwrap();
     assert_eq!(u(&balance(alice, false)["amount_locked"]), spendable);
-    call(grin_tx_cancel(alice, -1, cs(s(&all["slate_id"])).as_ptr())).unwrap();
+    call!(grin_tx_cancel(alice, -1, cs(s(&all["slate_id"])).as_ptr())).unwrap();
     assert_eq!(u(&balance(alice, false)["amount_locked"]), 0);
 
     // Finalizing selects and locks the inputs, then broadcasts.
@@ -475,7 +487,7 @@ fn invoice_i1_i2_i3_locks_payer_inputs() {
     let bob_addr = address(bob);
     let amount = 30 * GRIN;
 
-    let i1 = call(grin_tx_issue_invoice(
+    let i1 = call!(grin_tx_issue_invoice(
         bob,
         cs(
             &json!({"amount": amount, "dest_acct_name": null, "recipient_address": alice_addr})
@@ -499,7 +511,7 @@ fn invoice_i1_i2_i3_locks_payer_inputs() {
     let spendable = u(&balance(alice, true)["amount_currently_spendable"]);
     assert_eq!(spendable, 3 * REWARD);
 
-    let i2 = call(grin_tx_process_invoice(
+    let i2 = call!(grin_tx_process_invoice(
         alice,
         cs(&armored(&i1)).as_ptr(),
         cs(r#"{"min_confirms": 1, "selection_strategy_is_all": true, "ttl_blocks": null}"#)
@@ -532,7 +544,7 @@ fn invoice_i1_i2_i3_locks_payer_inputs() {
     assert_eq!(a["slate_state"], "I2");
     assert_eq!(a["counterparty_address"], bob_addr.as_str());
 
-    let i3 = call(grin_tx_finalize_invoice(
+    let i3 = call!(grin_tx_finalize_invoice(
         bob,
         cs(&armored(&i2)).as_ptr(),
         true,
@@ -541,7 +553,7 @@ fn invoice_i1_i2_i3_locks_payer_inputs() {
     .unwrap();
     assert_eq!(i3["state"], "I3");
     assert_eq!(i3["posted"], true);
-    let e = call(grin_tx_finalize_invoice(
+    let e = call!(grin_tx_finalize_invoice(
         bob,
         cs(&armored(&i2)).as_ptr(),
         false,
@@ -598,7 +610,7 @@ fn cancel_by_slate_id_and_by_tx_id() {
     assert!(u(&locked["amount_currently_spendable"]) < before);
     assert!(u(&locked["amount_locked"]) > 0);
 
-    let v = call(grin_tx_cancel(alice, -1, cs(&slate_id).as_ptr())).unwrap();
+    let v = call!(grin_tx_cancel(alice, -1, cs(&slate_id).as_ptr())).unwrap();
     assert_eq!(v, json!({"cancelled": true}));
     let e = entry(&txs(alice, false), &slate_id);
     assert_eq!(e["type"], "TxSentCancelled");
@@ -607,13 +619,13 @@ fn cancel_by_slate_id_and_by_tx_id() {
     assert_eq!(u(&b["amount_locked"]), 0);
     // Already cancelled.
     assert_eq!(
-        code_of(call(grin_tx_cancel(alice, -1, cs(&slate_id).as_ptr()))),
+        code_of(call!(grin_tx_cancel(alice, -1, cs(&slate_id).as_ptr()))),
         TRANSACTION
     );
 
     let s1 = init_send(alice, json!({"amount": 15 * GRIN, "min_confirms": 1})).unwrap();
     let id = u(&entry(&txs(alice, false), s(&s1["slate_id"]))["id"]);
-    let v = call(grin_tx_cancel(alice, id as i64, ptr::null())).unwrap();
+    let v = call!(grin_tx_cancel(alice, id as i64, ptr::null())).unwrap();
     assert_eq!(v["cancelled"], true);
     let e = entry(&txs(alice, false), s(&s1["slate_id"]));
     assert_eq!(e["type"], "TxSentCancelled");
@@ -624,11 +636,11 @@ fn cancel_by_slate_id_and_by_tx_id() {
 
     let unknown = cs("6f1c3e1a-0d4b-4c39-9b6e-6c1f6f0d2a11");
     assert_eq!(
-        code_of(call(grin_tx_cancel(alice, -1, unknown.as_ptr()))),
+        code_of(call!(grin_tx_cancel(alice, -1, unknown.as_ptr()))),
         NOT_FOUND
     );
     assert_eq!(
-        code_of(call(grin_tx_cancel(alice, -1, ptr::null()))),
+        code_of(call!(grin_tx_cancel(alice, -1, ptr::null()))),
         INVALID_ARGUMENT
     );
     close(alice);
@@ -649,7 +661,7 @@ fn repost_a_finalized_transaction() {
     let slate_id = s(&s1["slate_id"]).to_owned();
     // Not finalized yet, so nothing is stored to repost.
     assert_eq!(
-        code_of(call(grin_tx_repost(
+        code_of(call!(grin_tx_repost(
             alice,
             -1,
             cs(&slate_id).as_ptr(),
@@ -664,7 +676,7 @@ fn repost_a_finalized_transaction() {
     assert_eq!(e["has_stored_tx"], true);
     assert_eq!(e["confirmed"], false);
 
-    let v = call(grin_tx_repost(alice, -1, cs(&slate_id).as_ptr(), false)).unwrap();
+    let v = call!(grin_tx_repost(alice, -1, cs(&slate_id).as_ptr(), false)).unwrap();
     assert_eq!(v, json!({"posted": true}));
     assert_eq!(mine(alice, 1), 7);
     let e = entry(&txs(alice, true), &slate_id);
@@ -681,7 +693,7 @@ fn repost_a_finalized_transaction() {
         .map(|t| u(&t["id"]))
         .unwrap();
     assert_eq!(
-        code_of(call(grin_tx_repost(
+        code_of(call!(grin_tx_repost(
             alice,
             coinbase_id as i64,
             ptr::null(),
@@ -690,7 +702,7 @@ fn repost_a_finalized_transaction() {
         NOT_FOUND
     );
     assert_eq!(
-        code_of(call(grin_tx_repost(alice, -1, ptr::null(), false))),
+        code_of(call!(grin_tx_repost(alice, -1, ptr::null(), false))),
         INVALID_ARGUMENT
     );
 
@@ -708,13 +720,13 @@ fn repost_a_finalized_transaction() {
         entry(&txs(alice, false), &cancelled_id)["has_stored_tx"],
         true
     );
-    call(grin_tx_cancel(alice, -1, cs(&cancelled_id).as_ptr())).unwrap();
-    let e = call(grin_tx_repost(alice, -1, cs(&cancelled_id).as_ptr(), false)).unwrap_err();
+    call!(grin_tx_cancel(alice, -1, cs(&cancelled_id).as_ptr())).unwrap();
+    let e = call!(grin_tx_repost(alice, -1, cs(&cancelled_id).as_ptr(), false)).unwrap_err();
     assert_eq!(e.0, TRANSACTION, "{}", e.1);
     assert!(s(&e.1["message"]).contains("cancelled"), "{}", e.1);
     let id = u(&entry(&txs(alice, false), &cancelled_id)["id"]);
     assert_eq!(
-        code_of(call(grin_tx_repost(alice, id as i64, ptr::null(), false))),
+        code_of(call!(grin_tx_repost(alice, id as i64, ptr::null(), false))),
         TRANSACTION
     );
     close(alice);
@@ -726,7 +738,7 @@ fn estimate_when_change_comes_out_at_zero() {
     let tmp = tempfile::tempdir().unwrap();
     // Height 4: one mature coinbase output of REWARD.
     let (alice, bob) = alice_and_bob(tmp.path(), 4);
-    let est = call(grin_tx_estimate_fee(alice, 50 * GRIN, 1, false, false)).unwrap();
+    let est = call!(grin_tx_estimate_fee(alice, 50 * GRIN, 1, false, false)).unwrap();
     assert_eq!(est["inputs_count"], 1);
     assert_eq!(est["change_outputs"], 1);
     // The fee of one input and two outputs.
@@ -745,10 +757,10 @@ fn estimate_when_change_comes_out_at_zero() {
     };
     // With one spendable output, pricing a further change output runs out
     // of funds.
-    check(&call(grin_tx_estimate_fee(alice, amount, 1, false, false)).unwrap());
+    check(&call!(grin_tx_estimate_fee(alice, amount, 1, false, false)).unwrap());
     // With two, it selects both and the fee moves.
     assert_eq!(mine(alice, 1), 5);
-    let est = call(grin_tx_estimate_fee(alice, amount, 1, false, false)).unwrap();
+    let est = call!(grin_tx_estimate_fee(alice, amount, 1, false, false)).unwrap();
     check(&est);
 
     // The real send agrees.
@@ -756,11 +768,11 @@ fn estimate_when_change_comes_out_at_zero() {
     assert_eq!(u(&s1["fee"]), fee);
     let e = entry(&txs(alice, false), s(&s1["slate_id"]));
     assert_eq!(e["num_inputs"], est["inputs_count"], "{e}");
-    call(grin_tx_cancel(alice, -1, cs(s(&s1["slate_id"])).as_ptr())).unwrap();
+    call!(grin_tx_cancel(alice, -1, cs(s(&s1["slate_id"])).as_ptr())).unwrap();
 
     // The whole output with the fee taken out of it: paid exactly on the
     // first try, priced for one output.
-    let est = call(grin_tx_estimate_fee(alice, REWARD, 1, false, true)).unwrap();
+    let est = call!(grin_tx_estimate_fee(alice, REWARD, 1, false, true)).unwrap();
     assert_eq!(est["change_outputs"], 0, "{est}");
     assert_eq!(est["inputs_count"], 1, "{est}");
     assert_eq!(u(&est["total"]), REWARD);
@@ -849,7 +861,7 @@ fn foreign_api(bob: u64) -> (String, thread::JoinHandle<Vec<String>>) {
 }
 
 fn send_http(handle: u64, args: Value) -> Result<Value, (i32, Value)> {
-    call(grin_tx_send_http(handle, cs(&args.to_string()).as_ptr()))
+    call!(grin_tx_send_http(handle, cs(&args.to_string()).as_ptr()))
 }
 
 #[test]
@@ -862,7 +874,7 @@ fn synchronous_http_send() {
 
     // Test wallets have no SOCKS proxy, so nothing that resolves to .onion
     // is allowed.
-    let onion = s(&call(grin_wallet_get_address(bob, 0)).unwrap()["onion_v3_url"]).to_owned();
+    let onion = s(&call!(grin_wallet_get_address(bob, 0)).unwrap()["onion_v3_url"]).to_owned();
     for target in [bob_addr.as_str(), onion.as_str()] {
         let e = send_http(
             alice,
@@ -938,8 +950,8 @@ fn synchronous_http_send() {
     assert_eq!(a["kernel_excess"], excess.as_str());
     assert_eq!(a["counterparty_address"], bob_addr.as_str());
     assert!(a["armored_slatepack"].is_null());
-    let proof = call(grin_payment_proof_export(alice, -1, cs(&slate_id).as_ptr())).unwrap();
-    let v = call(grin_payment_proof_verify(
+    let proof = call!(grin_payment_proof_export(alice, -1, cs(&slate_id).as_ptr())).unwrap();
+    let v = call!(grin_payment_proof_verify(
         bob,
         cs(&proof.to_string()).as_ptr(),
     ))
@@ -963,7 +975,7 @@ fn argument_errors() {
     let e = finalize(alice, &armored(&s1), false).unwrap_err();
     assert_eq!(e.0, SLATE);
     assert!(s(&e.1["message"]).contains("expected an S2"), "{}", e.1);
-    let e = call(grin_tx_process_invoice(
+    let e = call!(grin_tx_process_invoice(
         bob,
         cs(&armored(&s1)).as_ptr(),
         cs("{}").as_ptr(),
@@ -971,7 +983,7 @@ fn argument_errors() {
     .unwrap_err();
     assert_eq!(e.0, SLATE);
     assert!(s(&e.1["message"]).contains("expected an I1"), "{}", e.1);
-    let e = call(grin_tx_finalize_invoice(
+    let e = call!(grin_tx_finalize_invoice(
         bob,
         cs(&armored(&s1)).as_ptr(),
         false,
@@ -979,33 +991,33 @@ fn argument_errors() {
     ))
     .unwrap_err();
     assert!(s(&e.1["message"]).contains("expected an I2"), "{}", e.1);
-    call(grin_tx_cancel(alice, -1, cs(s(&s1["slate_id"])).as_ptr())).unwrap();
+    call!(grin_tx_cancel(alice, -1, cs(s(&s1["slate_id"])).as_ptr())).unwrap();
 
     // tx_id -1 with no slate id.
     assert_eq!(
-        code_of(call(grin_tx_repost(alice, -1, ptr::null(), false))),
+        code_of(call!(grin_tx_repost(alice, -1, ptr::null(), false))),
         INVALID_ARGUMENT
     );
     assert_eq!(
-        code_of(call(grin_tx_cancel(alice, -1, cs("").as_ptr()))),
+        code_of(call!(grin_tx_cancel(alice, -1, cs("").as_ptr()))),
         INVALID_ARGUMENT
     );
     assert_eq!(
-        code_of(call(grin_payment_proof_export(alice, -1, ptr::null()))),
+        code_of(call!(grin_payment_proof_export(alice, -1, ptr::null()))),
         INVALID_ARGUMENT
     );
     assert_eq!(
-        code_of(call(grin_tx_cancel(alice, -1, cs("nope").as_ptr()))),
+        code_of(call!(grin_tx_cancel(alice, -1, cs("nope").as_ptr()))),
         INVALID_ARGUMENT
     );
 
     // Arguments JSON.
     assert_eq!(
-        code_of(call(grin_tx_init_send(alice, ptr::null()))),
+        code_of(call!(grin_tx_init_send(alice, ptr::null()))),
         INVALID_ARGUMENT
     );
     assert_eq!(
-        code_of(call(grin_tx_init_send(alice, cs("{").as_ptr()))),
+        code_of(call!(grin_tx_init_send(alice, cs("{").as_ptr()))),
         JSON
     );
     assert_eq!(code_of(init_send(alice, json!({"min_confirms": 1}))), JSON);
@@ -1019,12 +1031,12 @@ fn argument_errors() {
     )
     .unwrap_err();
     assert_eq!(e.0, INSUFFICIENT_FUNDS, "{}", e.1);
-    let i1 = call(grin_tx_issue_invoice(
+    let i1 = call!(grin_tx_issue_invoice(
         bob,
         cs(r#"{"amount": 1000000000, "dest_acct_name": null, "recipient_address": null}"#).as_ptr(),
     ))
     .unwrap();
-    let e = call(grin_tx_process_invoice(
+    let e = call!(grin_tx_process_invoice(
         alice,
         cs(&armored(&i1)).as_ptr(),
         cs(r#"{"min_confirms": null, "selection_strategy_is_all": null, "ttl_blocks": null}"#)
@@ -1049,14 +1061,14 @@ fn argument_errors() {
         assert_eq!(code_of(send_http(alice, http)), INVALID_ARGUMENT);
     }
     assert_eq!(
-        code_of(call(grin_tx_issue_invoice(
+        code_of(call!(grin_tx_issue_invoice(
             bob,
             cs(&json!({ "amount": u64::MAX }).to_string()).as_ptr()
         ))),
         INVALID_ARGUMENT
     );
     assert_eq!(
-        code_of(call(grin_tx_process_invoice(
+        code_of(call!(grin_tx_process_invoice(
             alice,
             cs(&armored(&i1)).as_ptr(),
             cs(&json!({"min_confirms": 1, "ttl_blocks": u64::MAX}).to_string()).as_ptr(),
@@ -1064,8 +1076,8 @@ fn argument_errors() {
         INVALID_ARGUMENT
     );
     // Bob's key as a mainnet address is refused by a test chain wallet.
-    let onion = s(&call(grin_wallet_get_address(bob, 0)).unwrap()["onion_v3_url"]).to_owned();
-    let mainnet = call(grin_address_validate(cs(&onion).as_ptr(), 0)).unwrap();
+    let onion = s(&call!(grin_wallet_get_address(bob, 0)).unwrap()["onion_v3_url"]).to_owned();
+    let mainnet = call!(grin_address_validate(cs(&onion).as_ptr(), 0)).unwrap();
     let mainnet = s(&mainnet["slatepack_address"]).to_owned();
     assert!(mainnet.starts_with("grin1"), "{mainnet}");
     assert_eq!(
@@ -1076,29 +1088,29 @@ fn argument_errors() {
         INVALID_ADDRESS
     );
     assert_eq!(
-        code_of(call(grin_tx_issue_invoice(
+        code_of(call!(grin_tx_issue_invoice(
             bob,
             cs(r#"{"amount": 0}"#).as_ptr()
         ))),
         INVALID_ARGUMENT
     );
     assert_eq!(
-        code_of(call(grin_payment_proof_verify(alice, cs("[]").as_ptr()))),
+        code_of(call!(grin_payment_proof_verify(alice, cs("[]").as_ptr()))),
         JSON
     );
 
     // Not enough funds, with the amounts in the details.
-    let e = call(grin_tx_estimate_fee(alice, 1_000 * GRIN, 1, false, false)).unwrap_err();
+    let e = call!(grin_tx_estimate_fee(alice, 1_000 * GRIN, 1, false, false)).unwrap_err();
     assert_eq!(e.0, INSUFFICIENT_FUNDS);
     assert_eq!(u(&e.1["details"]["available"]), 2 * REWARD);
     assert!(u(&e.1["details"]["required"]) > 1_000 * GRIN);
     assert_eq!(
-        code_of(call(grin_tx_estimate_fee(alice, 0, 1, false, false))),
+        code_of(call!(grin_tx_estimate_fee(alice, 0, 1, false, false))),
         INVALID_ARGUMENT
     );
     // With the fee taken out of it, one nanogrin cannot pay the fee.
     assert_eq!(
-        code_of(call(grin_tx_estimate_fee(alice, 1, 1, false, true))),
+        code_of(call!(grin_tx_estimate_fee(alice, 1, 1, false, true))),
         TRANSACTION
     );
     // Nothing is locked by an estimate.
@@ -1107,43 +1119,43 @@ fn argument_errors() {
     // Unknown handles.
     let args = cs(r#"{"amount": 1}"#);
     for h in [0u64, 987_654] {
-        assert_eq!(code_of(call(grin_txs_get(h, false))), INVALID_HANDLE);
+        assert_eq!(code_of(call!(grin_txs_get(h, false))), INVALID_HANDLE);
         assert_eq!(
-            code_of(call(grin_tx_estimate_fee(h, 1, 1, false, false))),
+            code_of(call!(grin_tx_estimate_fee(h, 1, 1, false, false))),
             INVALID_HANDLE
         );
         assert_eq!(
-            code_of(call(grin_tx_init_send(h, args.as_ptr()))),
+            code_of(call!(grin_tx_init_send(h, args.as_ptr()))),
             INVALID_HANDLE
         );
         assert_eq!(
-            code_of(call(grin_tx_send_http(h, args.as_ptr()))),
+            code_of(call!(grin_tx_send_http(h, args.as_ptr()))),
             INVALID_HANDLE
         );
         assert_eq!(
-            code_of(call(grin_tx_issue_invoice(h, args.as_ptr()))),
+            code_of(call!(grin_tx_issue_invoice(h, args.as_ptr()))),
             INVALID_HANDLE
         );
         assert_eq!(
-            code_of(call(grin_tx_cancel(h, 1, ptr::null()))),
+            code_of(call!(grin_tx_cancel(h, 1, ptr::null()))),
             INVALID_HANDLE
         );
         assert_eq!(
-            code_of(call(grin_tx_repost(h, 1, ptr::null(), false))),
+            code_of(call!(grin_tx_repost(h, 1, ptr::null(), false))),
             INVALID_HANDLE
         );
         assert_eq!(
-            code_of(call(grin_payment_proof_export(h, 1, ptr::null()))),
+            code_of(call!(grin_payment_proof_export(h, 1, ptr::null()))),
             INVALID_HANDLE
         );
         assert_eq!(
-            code_of(call(grin_payment_proof_verify(h, args.as_ptr()))),
+            code_of(call!(grin_payment_proof_verify(h, args.as_ptr()))),
             INVALID_HANDLE
         );
     }
     // Handle 0 means "no wallet" only for decode.
     assert_eq!(
-        code_of(call(grin_slatepack_decode(
+        code_of(call!(grin_slatepack_decode(
             987_654,
             AUTOMATED,
             cs(bad).as_ptr(),
@@ -1152,7 +1164,7 @@ fn argument_errors() {
         INVALID_HANDLE
     );
     assert_eq!(
-        code_of(call(grin_slatepack_decode(0, 9, cs(bad).as_ptr(), 0))),
+        code_of(call!(grin_slatepack_decode(0, 9, cs(bad).as_ptr(), 0))),
         INVALID_ARGUMENT
     );
     close(alice);

@@ -134,8 +134,14 @@ pub fn parse_address(input: &str) -> Result<ParsedAddress, GrinError> {
 /// Validates `address` for `network` (0 mainnet, 1 testnet, 2 user testing,
 /// 3 automated testing) and returns
 /// `{"kind", "slatepack_address", "onion_v3_url", "url"}`.
+// # Safety
+// Every pointer argument must be NULL or point to a NUL-terminated string
+// that stays valid and unchanged until the call returns.
 #[no_mangle]
-pub extern "C" fn grin_address_validate(address: *const c_char, network: u8) -> GrinFfiResult {
+pub unsafe extern "C" fn grin_address_validate(
+    address: *const c_char,
+    network: u8,
+) -> GrinFfiResult {
     ffi_guard! {
         let chain_type = chain_type_from_u8(network)?;
         global::set_local_chain_type(chain_type);

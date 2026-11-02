@@ -407,8 +407,11 @@ unsafe fn free_c_string(ptr: *mut c_char) {
 }
 
 /// Frees `res.data` and `res.error`. NULL members are ignored.
+// # Safety
+// `res` must be a result returned by this library whose strings have not
+// been freed yet. Each one may be freed only once.
 #[no_mangle]
-pub extern "C" fn grin_ffi_result_free(res: GrinFfiResult) {
+pub unsafe extern "C" fn grin_ffi_result_free(res: GrinFfiResult) {
     // Free errors cannot be reported through a void function, so a panic
     // here is logged rather than allowed to cross the C boundary.
     if let Err(payload) = catch_unwind(AssertUnwindSafe(|| unsafe {
@@ -420,11 +423,11 @@ pub extern "C" fn grin_ffi_result_free(res: GrinFfiResult) {
 }
 
 /// Frees one string allocated by this library. NULL is ignored.
-// Taking ownership of a caller-supplied pointer is the point of a C
-// destructor; the contract is that `ptr` came from this library.
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
+// # Safety
+// `ptr` must be NULL or a string returned by this library that has not
+// been freed yet.
 #[no_mangle]
-pub extern "C" fn grin_string_free(ptr: *mut c_char) {
+pub unsafe extern "C" fn grin_string_free(ptr: *mut c_char) {
     if let Err(payload) = catch_unwind(AssertUnwindSafe(|| unsafe { free_c_string(ptr) })) {
         log_caught_panic("grin_string_free", payload);
     }
@@ -504,7 +507,7 @@ mod tests {
             }
         };
         let out = (res.code, read(res.data), read(res.error));
-        grin_ffi_result_free(res);
+        unsafe { grin_ffi_result_free(res) };
         out
     }
 

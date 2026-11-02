@@ -1339,13 +1339,12 @@ Independent review: two Opus reviewers read grin-ffi and GrinWalletClient withou
 
 ### D9. Review items left as they are, and why
 
-The two independent reviews (section 13) listed nits that were deliberately not changed in this revision:
+Of the review nits (section 13), these were deliberately not changed:
 
 - F17 (fork): `grin_store::Store::new` can leave an open cached environment behind after a setup failure, and its drop refcount is not atomic. That is in the fork's `grin` submodule, outside this crate; the directory lease keeps the FFI from depending on it. A fix belongs upstream.
 - F18: the directory lease is keyed by canonical path, so the same database reached through a bind mount, or a directory renamed while open, gets a second key. heed itself refuses a second open of the same environment, so the consequence is an error rather than corruption.
-- F21: the `extern "C"` functions have safe Rust signatures although they dereference raw pointers. The only Rust callers are this crate's tests; the C ABI is unchanged either way. Marking them `unsafe` would be right for a Rust-facing rlib and is a mechanical follow-up.
-- F24, F25 (test harness only): the in-process proxy can hang a caller that violates the harness rules (two node calls on one test wallet, mining while broadcasting), and the chain type is not restored if mining panics. Both are documented in test_support.rs and do not ship.
 - N3: on the GC path the LMDB close runs inside the native finalizer and the client's `events` stream is never closed. That is the designed fallback for a client dropped without `close()`; the normal path is `close()`, and `OPEN_DIRS` keeps a reopen safe in the meantime (4.5).
 - N7: a mnemonic returned to Dart leaves copies on the Dart heap that cannot be wiped; this is inherent to Dart strings and is stated on `getMnemonic`.
-- N10: `test_utils: true` with a build mode other than `cargo` is silently ignored, because the kit's prebuilt, source and dev artifacts are release builds by definition; the README says so.
-- F26: an embedded NUL cannot cross the C boundary; the Dart side now rejects it with `ArgumentError`.
+- F26: an embedded NUL cannot cross the C boundary; the Dart side rejects it with `ArgumentError`.
+
+Every other finding, nits included, was fixed: F21 (the pointer-taking `extern "C"` functions are `unsafe` in Rust; the C header is unchanged), F24 and F25 (the test proxy cannot hang a caller indefinitely and mining restores the thread's chain type on a panic), and N10 (the hook warns when `test_utils` is set with a build mode other than `cargo`).

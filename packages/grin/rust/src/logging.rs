@@ -80,8 +80,11 @@ fn init(level: LevelFilter) {
 
 /// Sets up logging. `log_level` may be NULL (info) or one of trace, debug,
 /// info, warn, error, off. Safe to call more than once.
+// # Safety
+// Every pointer argument must be NULL or point to a NUL-terminated string
+// that stays valid and unchanged until the call returns.
 #[no_mangle]
-pub extern "C" fn grin_init_logs(log_level: *const c_char) -> GrinFfiResult {
+pub unsafe extern "C" fn grin_init_logs(log_level: *const c_char) -> GrinFfiResult {
     ffi_guard! {
         let level = parse_level(read_opt_str(log_level, "log_level")?)?;
         init(level);

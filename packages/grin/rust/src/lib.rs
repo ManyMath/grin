@@ -4,6 +4,12 @@
 //! thread's chain type from its `network` argument, its config, or the
 //! session it looks up (section 4.2).
 
+// The entry points that take raw pointers are `unsafe`. Their safety
+// contracts are plain comments above each function, because cbindgen copies
+// doc comments into include/grin_ffi.h and a `# Safety` doc section would
+// change the header.
+#![allow(clippy::missing_safety_doc)]
+
 #[macro_use]
 pub mod error;
 

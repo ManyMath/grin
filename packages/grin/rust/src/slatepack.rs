@@ -187,8 +187,11 @@ struct DecodeOut {
 
 /// Decodes a plain or encrypted Slatepack and returns its slate metadata.
 /// `network` is used when `handle` is 0.
+// # Safety
+// Every pointer argument must be NULL or point to a NUL-terminated string
+// that stays valid and unchanged until the call returns.
 #[no_mangle]
-pub extern "C" fn grin_slatepack_decode(
+pub unsafe extern "C" fn grin_slatepack_decode(
     handle: u64,
     network: u8,
     armored_slatepack: *const c_char,

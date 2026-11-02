@@ -24,8 +24,11 @@ struct VerifyOut {
 }
 
 /// Exports the payment proof of a transaction by id or slate id.
+// # Safety
+// Every pointer argument must be NULL or point to a NUL-terminated string
+// that stays valid and unchanged until the call returns.
 #[no_mangle]
-pub extern "C" fn grin_payment_proof_export(
+pub unsafe extern "C" fn grin_payment_proof_export(
     handle: u64,
     tx_id: i64,
     slate_id: *const c_char,
@@ -47,8 +50,11 @@ pub extern "C" fn grin_payment_proof_export(
 }
 
 /// Verifies a payment proof and returns `{"is_sender", "is_recipient"}`.
+// # Safety
+// Every pointer argument must be NULL or point to a NUL-terminated string
+// that stays valid and unchanged until the call returns.
 #[no_mangle]
-pub extern "C" fn grin_payment_proof_verify(
+pub unsafe extern "C" fn grin_payment_proof_verify(
     handle: u64,
     proof_json: *const c_char,
 ) -> GrinFfiResult {

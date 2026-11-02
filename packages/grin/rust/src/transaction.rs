@@ -631,8 +631,11 @@ impl SendArgs {
 }
 
 /// Builds and locks an S1 and returns it as a Slatepack.
+// # Safety
+// Every pointer argument must be NULL or point to a NUL-terminated string
+// that stays valid and unchanged until the call returns.
 #[no_mangle]
-pub extern "C" fn grin_tx_init_send(handle: u64, args_json: *const c_char) -> GrinFfiResult {
+pub unsafe extern "C" fn grin_tx_init_send(handle: u64, args_json: *const c_char) -> GrinFfiResult {
     ffi_guard! {
         let session = get_session(handle)?;
         let args: SendArgs = parse_args(args_json, "args_json")?;
@@ -686,8 +689,11 @@ struct SendHttpOut {
 }
 
 /// Synchronous send to a slatepack address (over Tor) or an http(s) URL.
+// # Safety
+// Every pointer argument must be NULL or point to a NUL-terminated string
+// that stays valid and unchanged until the call returns.
 #[no_mangle]
-pub extern "C" fn grin_tx_send_http(handle: u64, args_json: *const c_char) -> GrinFfiResult {
+pub unsafe extern "C" fn grin_tx_send_http(handle: u64, args_json: *const c_char) -> GrinFfiResult {
     ffi_guard! {
         let session = get_session(handle)?;
         let args: SendHttpArgs = parse_args(args_json, "args_json")?;
@@ -783,8 +789,11 @@ pub extern "C" fn grin_tx_send_http(handle: u64, args_json: *const c_char) -> Gr
 }
 
 /// Receives an S1 Slatepack and returns the S2 Slatepack.
+// # Safety
+// Every pointer argument must be NULL or point to a NUL-terminated string
+// that stays valid and unchanged until the call returns.
 #[no_mangle]
-pub extern "C" fn grin_tx_receive_slatepack(
+pub unsafe extern "C" fn grin_tx_receive_slatepack(
     handle: u64,
     armored_s1: *const c_char,
     message: *const c_char,
@@ -816,8 +825,11 @@ pub extern "C" fn grin_tx_receive_slatepack(
 }
 
 /// Finalizes an S2 Slatepack into S3, optionally broadcasting it.
+// # Safety
+// Every pointer argument must be NULL or point to a NUL-terminated string
+// that stays valid and unchanged until the call returns.
 #[no_mangle]
-pub extern "C" fn grin_tx_finalize_slatepack(
+pub unsafe extern "C" fn grin_tx_finalize_slatepack(
     handle: u64,
     armored_s2: *const c_char,
     broadcast: bool,
@@ -864,8 +876,14 @@ impl InvoiceArgs {
 }
 
 /// Issues an I1 invoice Slatepack.
+// # Safety
+// Every pointer argument must be NULL or point to a NUL-terminated string
+// that stays valid and unchanged until the call returns.
 #[no_mangle]
-pub extern "C" fn grin_tx_issue_invoice(handle: u64, args_json: *const c_char) -> GrinFfiResult {
+pub unsafe extern "C" fn grin_tx_issue_invoice(
+    handle: u64,
+    args_json: *const c_char,
+) -> GrinFfiResult {
     ffi_guard! {
         let session = get_session(handle)?;
         let args: InvoiceArgs = parse_args(args_json, "args_json")?;
@@ -911,8 +929,11 @@ impl PayInvoiceArgs {
 }
 
 /// Pays an I1 invoice, locks the inputs and returns the I2 Slatepack.
+// # Safety
+// Every pointer argument must be NULL or point to a NUL-terminated string
+// that stays valid and unchanged until the call returns.
 #[no_mangle]
-pub extern "C" fn grin_tx_process_invoice(
+pub unsafe extern "C" fn grin_tx_process_invoice(
     handle: u64,
     armored_i1: *const c_char,
     args_json: *const c_char,
@@ -968,8 +989,11 @@ pub extern "C" fn grin_tx_process_invoice(
 }
 
 /// Finalizes an I2 Slatepack into I3, optionally broadcasting it.
+// # Safety
+// Every pointer argument must be NULL or point to a NUL-terminated string
+// that stays valid and unchanged until the call returns.
 #[no_mangle]
-pub extern "C" fn grin_tx_finalize_invoice(
+pub unsafe extern "C" fn grin_tx_finalize_invoice(
     handle: u64,
     armored_i2: *const c_char,
     broadcast: bool,
@@ -1026,8 +1050,11 @@ fn repost_entry(
 /// Re-broadcasts a finalized, unconfirmed transaction.
 // (Plain comment: doc comments here are copied into include/grin_ffi.h.)
 // A cancelled transaction is refused with Transaction.
+// # Safety
+// Every pointer argument must be NULL or point to a NUL-terminated string
+// that stays valid and unchanged until the call returns.
 #[no_mangle]
-pub extern "C" fn grin_tx_repost(
+pub unsafe extern "C" fn grin_tx_repost(
     handle: u64,
     tx_id: i64,
     slate_id: *const c_char,
@@ -1078,8 +1105,11 @@ pub extern "C" fn grin_tx_repost(
 }
 
 /// Cancels a transaction by id or slate id and unlocks its inputs.
+// # Safety
+// Every pointer argument must be NULL or point to a NUL-terminated string
+// that stays valid and unchanged until the call returns.
 #[no_mangle]
-pub extern "C" fn grin_tx_cancel(
+pub unsafe extern "C" fn grin_tx_cancel(
     handle: u64,
     tx_id: i64,
     slate_id: *const c_char,

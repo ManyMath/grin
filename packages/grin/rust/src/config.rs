@@ -228,7 +228,7 @@ pub fn parse_socks_proxy(input: &str) -> Result<SocketAddr, GrinError> {
 pub enum FfiNodeClient {
     Http(HTTPNodeClient),
     #[cfg(feature = "test-utils")]
-    Local(grin_wallet_impls::test_framework::LocalWalletClient),
+    Local(crate::test_support::TestNodeClient),
 }
 
 macro_rules! delegate {

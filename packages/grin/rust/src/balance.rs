@@ -88,8 +88,11 @@ pub extern "C" fn grin_wallet_get_balance(
 
 /// Checks a node without a wallet: `get_version` then `get_tip`. Neither call
 /// reads the chain type, so this needs no network parameter.
+// # Safety
+// Every pointer argument must be NULL or point to a NUL-terminated string
+// that stays valid and unchanged until the call returns.
 #[no_mangle]
-pub extern "C" fn grin_node_test_connection(
+pub unsafe extern "C" fn grin_node_test_connection(
     node_url: *const c_char,
     api_secret: *const c_char,
     socks_proxy: *const c_char,

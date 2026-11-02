@@ -250,8 +250,11 @@ fn wallet_not_found(wallet_dir: &str) -> GrinError {
 
 /// Creates a wallet in `<wallet_dir>/wallet_data` and opens it. `mnemonic`
 /// may be NULL to generate a new 24-word seed. Returns `{"handle": u64}`.
+// # Safety
+// Every pointer argument must be NULL or point to a NUL-terminated string
+// that stays valid and unchanged until the call returns.
 #[no_mangle]
-pub extern "C" fn grin_wallet_create(
+pub unsafe extern "C" fn grin_wallet_create(
     config_json: *const c_char,
     mnemonic: *const c_char,
     password: *const c_char,
@@ -324,8 +327,11 @@ pub extern "C" fn grin_wallet_create(
 }
 
 /// Opens an existing wallet. Returns `{"handle": u64}`.
+// # Safety
+// Every pointer argument must be NULL or point to a NUL-terminated string
+// that stays valid and unchanged until the call returns.
 #[no_mangle]
-pub extern "C" fn grin_wallet_open(
+pub unsafe extern "C" fn grin_wallet_open(
     config_json: *const c_char,
     password: *const c_char,
 ) -> GrinFfiResult {
@@ -373,8 +379,12 @@ pub extern "C" fn grin_wallet_close(handle: u64) -> GrinFfiResult {
 
 /// `NativeFinalizer` callback: `token` is the handle cast to a pointer.
 /// Never fails and never unwinds.
+// # Safety
+// `token` must be a handle cast to a pointer, or NULL. It is only read as
+// an integer and never dereferenced; the function is unsafe because it
+// takes a raw pointer from C like the other entry points.
 #[no_mangle]
-pub extern "C" fn grin_wallet_close_finalizer(token: *mut c_void) {
+pub unsafe extern "C" fn grin_wallet_close_finalizer(token: *mut c_void) {
     let handle = token as usize as u64;
     if let Err(payload) = catch_unwind(AssertUnwindSafe(|| {
         if let Some(session) = remove_session(handle) {
@@ -392,8 +402,14 @@ pub extern "C" fn grin_wallet_close_finalizer(token: *mut c_void) {
 // (Plain comment: doc comments here are copied into include/grin_ffi.h.)
 // With the directory missing, a handle whose own data directory is gone too
 // is taken to be this wallet's and is closed.
+// # Safety
+// Every pointer argument must be NULL or point to a NUL-terminated string
+// that stays valid and unchanged until the call returns.
 #[no_mangle]
-pub extern "C" fn grin_wallet_delete(wallet_dir: *const c_char, handle: u64) -> GrinFfiResult {
+pub unsafe extern "C" fn grin_wallet_delete(
+    wallet_dir: *const c_char,
+    handle: u64,
+) -> GrinFfiResult {
     ffi_guard! {
         let wallet_dir = read_str(wallet_dir, "wallet_dir")?;
         if wallet_dir.trim().is_empty() {
@@ -432,8 +448,11 @@ pub extern "C" fn grin_wallet_delete(wallet_dir: *const c_char, handle: u64) -> 
 }
 
 /// Re-encrypts `wallet.seed` with a new password.
+// # Safety
+// Every pointer argument must be NULL or point to a NUL-terminated string
+// that stays valid and unchanged until the call returns.
 #[no_mangle]
-pub extern "C" fn grin_wallet_change_password(
+pub unsafe extern "C" fn grin_wallet_change_password(
     handle: u64,
     old_pw: *const c_char,
     new_pw: *const c_char,
@@ -460,8 +479,14 @@ pub extern "C" fn grin_wallet_change_password(
 }
 
 /// Returns `{"mnemonic": "<words>"}` after checking the password.
+// # Safety
+// Every pointer argument must be NULL or point to a NUL-terminated string
+// that stays valid and unchanged until the call returns.
 #[no_mangle]
-pub extern "C" fn grin_wallet_get_mnemonic(handle: u64, password: *const c_char) -> GrinFfiResult {
+pub unsafe extern "C" fn grin_wallet_get_mnemonic(
+    handle: u64,
+    password: *const c_char,
+) -> GrinFfiResult {
     ffi_guard! {
         let session = get_session(handle)?;
         let password = read_secret(password, "password")?;
@@ -477,8 +502,11 @@ pub extern "C" fn grin_wallet_get_mnemonic(handle: u64, password: *const c_char)
 
 /// Points the wallet at another node (and optional SOCKS proxy) without
 /// reopening the database. `api_secret` and `socks_proxy` may be NULL.
+// # Safety
+// Every pointer argument must be NULL or point to a NUL-terminated string
+// that stays valid and unchanged until the call returns.
 #[no_mangle]
-pub extern "C" fn grin_wallet_update_network(
+pub unsafe extern "C" fn grin_wallet_update_network(
     handle: u64,
     node_url: *const c_char,
     api_secret: *const c_char,
@@ -536,8 +564,11 @@ pub extern "C" fn grin_mnemonic_generate(word_count: u32) -> GrinFfiResult {
 
 /// Returns `{"valid": bool, "word_count": u32}`. A bad mnemonic is not an
 /// error, only `valid: false`.
+// # Safety
+// Every pointer argument must be NULL or point to a NUL-terminated string
+// that stays valid and unchanged until the call returns.
 #[no_mangle]
-pub extern "C" fn grin_mnemonic_validate(mnemonic: *const c_char) -> GrinFfiResult {
+pub unsafe extern "C" fn grin_mnemonic_validate(mnemonic: *const c_char) -> GrinFfiResult {
     ffi_guard! {
         let words = read_secret(mnemonic, "mnemonic")?;
         let word_count = u32::try_from(words.split_whitespace().count()).unwrap_or(u32::MAX);

@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:code_assets/code_assets.dart';
+import 'package:hooks/hooks.dart' show build;
 import 'package:native_prebuilt_hook/native_prebuilt_hook.dart';
 import 'package:native_toolchain_rust/native_toolchain_rust.dart';
 
@@ -8,25 +9,40 @@ import 'package:native_toolchain_rust/native_toolchain_rust.dart';
 /// pinned prebuilt (default once a release exists), a verified Nix source
 /// build, an unverified Nix dev build, or an unverified cargo build with the
 /// host Rust toolchain. See "Native library" in the README.
-Future<void> main(List<String> args) => runNativeBuildHook(
-  args,
-  const NativeLibrarySpec(
-    packageName: 'grin',
-    libraryBaseName: 'grin_ffi',
-    // lib/src/ffi/bindings.g.dart binds its @Native functions to this asset.
-    bindingsAssetName: 'src/ffi/bindings.g.dart',
-    // Read by nix/build-apple.sh; the hook sets it, users do not.
-    appleAnyXcodeVariable: 'GRIN_FFI_ANY_XCODE',
-    // Rerun source and dev builds when what the Nix build reads changes.
-    nativeSources: [
-      'rust',
-      'flake.nix',
-      'flake.lock',
-      'nix',
-      'build-config.json',
-    ],
-    cargoBuild: _cargoBuild,
-  ),
+Future<void> main(List<String> args) => build(args, (input, output) async {
+  // `test_utils` only means something to the cargo mode below. Say so when
+  // a consumer sets it with another mode instead of silently ignoring it.
+  final testUtils = parseBoolUserDefine(
+    'test_utils',
+    input.userDefines['test_utils'],
+  );
+  final mode = input.userDefines['build'];
+  if (testUtils && mode != 'cargo') {
+    stderr.writeln(
+      'grin: test_utils is set but the build mode is '
+      '${mode ?? 'unset (prebuilt, dev or cargo as the hook picks)'}; '
+      'only the cargo mode builds the grin_test_* functions.',
+    );
+  }
+  await buildNativeLibrary(input, output, _spec);
+});
+
+const _spec = NativeLibrarySpec(
+  packageName: 'grin',
+  libraryBaseName: 'grin_ffi',
+  // lib/src/ffi/bindings.g.dart binds its @Native functions to this asset.
+  bindingsAssetName: 'src/ffi/bindings.g.dart',
+  // Read by nix/build-apple.sh; the hook sets it, users do not.
+  appleAnyXcodeVariable: 'GRIN_FFI_ANY_XCODE',
+  // Rerun source and dev builds when what the Nix build reads changes.
+  nativeSources: [
+    'rust',
+    'flake.nix',
+    'flake.lock',
+    'nix',
+    'build-config.json',
+  ],
+  cargoBuild: _cargoBuild,
 );
 
 /// `build: cargo`, and the fallback where no prebuilt exists and Nix cannot
