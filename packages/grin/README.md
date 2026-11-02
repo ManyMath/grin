@@ -60,8 +60,48 @@ Things to know:
   lock, so they answer while a scan runs. A scan that has started cannot be
   interrupted; see the notes in `docs/ffi-json.md`.
 - Restoring from a mnemonic needs a `scan()` to find the wallet's outputs.
-- Transactions, Slatepacks, invoices and payment proofs are not in the client
-  yet.
+- `initSend` and `processInvoice` lock the wallet's inputs when they return.
+  Cancel a transaction that will not be completed with `cancelTransaction`.
+  `sendHttp` locks only after the recipient's wallet has answered.
+- Do not repost a confirmed transaction, and do not run two node calls on one
+  wallet from outside the client: the client queues its own calls.
+
+## Sending with Slatepacks
+
+A send is three steps, two on the sender's wallet and one on the recipient's.
+The Slatepacks travel between the wallets by any channel you like.
+
+```dart
+// Sender: build the S1, encrypted to the recipient's address. Passing the
+// recipient's address also requests a payment proof.
+final s1 = await sender.initSend(
+  GrinSendArgs(
+    amount: parseGrin('1.5'),
+    recipientAddress: recipientAddress.slatepackAddress,
+  ),
+);
+// Hand s1.armoredSlatepack to the recipient.
+
+// Recipient: add their output and signature.
+final s2 = await recipient.receiveSlatepack(s1.armoredSlatepack);
+// Hand s2.armoredSlatepack back to the sender.
+
+// Sender: finish the transaction and broadcast it.
+final done = await sender.finalizeSlatepack(s2.armoredSlatepack);
+print('${done.slateId} posted: ${done.posted}');
+```
+
+`decodeSlatepack` shows what a Slatepack contains before you act on it, and
+`getTransactions` lists the history with the latest Slatepack of each entry.
+`sendHttp` does the whole exchange in one call when the recipient's wallet is
+listening on a URL or a Tor address.
+
+An invoice runs the other way. The payee calls `issueInvoice` and hands the I1
+to the payer. The payer calls `processInvoice`, which selects and locks the
+inputs, and hands the I2 back. The payee calls `finalizeInvoice` to broadcast.
+`exportPaymentProof` returns the sender's proof of a finalized send, and
+`verifyPaymentProof` tells either wallet whether it is the proof's sender or
+recipient.
 
 ## Tests
 

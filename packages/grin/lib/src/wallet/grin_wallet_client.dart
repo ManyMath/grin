@@ -13,11 +13,21 @@ import '../models/grin_address_info.dart';
 import '../models/grin_address_validation.dart';
 import '../models/grin_balance.dart';
 import '../models/grin_chain_tip.dart';
+import '../models/grin_fee_estimate.dart';
+import '../models/grin_finalize_result.dart';
+import '../models/grin_invoice_args.dart';
 import '../models/grin_mnemonic_validation.dart';
 import '../models/grin_network.dart';
 import '../models/grin_node_info.dart';
+import '../models/grin_payment_proof.dart';
 import '../models/grin_scan_progress.dart';
 import '../models/grin_scan_result.dart';
+import '../models/grin_send_args.dart';
+import '../models/grin_send_result.dart';
+import '../models/grin_slate_info.dart';
+import '../models/grin_slatepack.dart';
+import '../models/grin_tx_list.dart';
+import '../models/grin_tx_log_entry.dart';
 import '../models/grin_wallet_config.dart';
 import 'grin_wallet_event.dart';
 
@@ -406,12 +416,291 @@ class GrinWalletClient implements Finalizable {
     );
   }
 
-  // Phase 1b, not part of this class yet:
-  //   estimateFee, getTransactions
-  //   decodeSlatepack, initSend, sendHttp, receiveSlatepack, finalizeSlatepack
-  //   issueInvoice, processInvoice, finalizeInvoice
-  //   repost, cancelTransaction
-  //   exportPaymentProof, verifyPaymentProof
+  /// Computes the fee and the inputs a send of [amount] would use, without
+  /// saving or locking anything.
+  ///
+  /// Refreshes the wallet's outputs from the node first, then selects inputs
+  /// exactly as `initSend` would. With [amountIncludesFee] the fee is taken
+  /// out of [amount], otherwise it is added on top. [selectionStrategyIsAll]
+  /// spends every spendable output (up to 500) instead of only as many of
+  /// the smallest as needed.
+  ///
+  /// Throws [ArgumentError] when [amount] is negative or does not fit the
+  /// native 64-bit argument (values from 2^63 up are refused, which no real
+  /// balance reaches). Throws [GrinInvalidArgumentException] for an amount of
+  /// 0, [GrinInsufficientFundsException] when the funds do not cover it and
+  /// [GrinTransactionException] when [amountIncludesFee] and the amount is
+  /// below the fee.
+  Future<GrinFeeEstimate> estimateFee({
+    required BigInt amount,
+    int minimumConfirmations = 10,
+    bool selectionStrategyIsAll = false,
+    bool amountIncludesFee = false,
+  }) {
+    _ensureOpen();
+    final handle = _handle;
+    final nativeAmount = amountToNative(amount);
+    return _enqueue(
+      () => _estimateFee(
+        handle,
+        nativeAmount,
+        minimumConfirmations,
+        selectionStrategyIsAll,
+        amountIncludesFee,
+      ),
+    );
+  }
+
+  /// The wallet's transaction log, joined with the Slatepack and
+  /// counterparty data the library keeps for each transaction.
+  ///
+  /// With [refreshFromNode] the outputs and transaction states are updated
+  /// from the node first. If the node cannot be reached, the stored history
+  /// comes back with `refreshedFromNode` false. Entries are in log order.
+  Future<GrinTxList> getTransactions({bool refreshFromNode = true}) {
+    _ensureOpen();
+    final handle = _handle;
+    return _enqueue(() => _getTransactions(handle, refreshFromNode));
+  }
+
+  /// Reads a Slatepack with this wallet's keys, without changing anything.
+  ///
+  /// An encrypted Slatepack is decrypted with the wallet's address key at
+  /// [secretIndex]. Leading and trailing whitespace is ignored. Throws
+  /// [GrinSlateException] when the text cannot be parsed or decrypted. Use
+  /// [decodeSlatepackWithoutWallet] when no wallet is at hand.
+  Future<GrinSlateInfo> decodeSlatepack(String armored, {int secretIndex = 0}) {
+    _ensureOpen();
+    if (secretIndex < 0 || secretIndex > 0xFFFFFFFF) {
+      throw ArgumentError.value(secretIndex, 'secretIndex', 'must fit a u32');
+    }
+    final handle = _handle;
+    final networkValue = network.value;
+    return _enqueue(
+      () => _decodeSlatepack(handle, networkValue, armored, secretIndex),
+    );
+  }
+
+  /// Reads an unencrypted Slatepack for [network] without a wallet.
+  ///
+  /// An encrypted Slatepack throws [GrinSlateException], because only a
+  /// wallet can decrypt it.
+  static Future<GrinSlateInfo> decodeSlatepackWithoutWallet(
+    String armored,
+    GrinNetwork network,
+  ) => _decodeSlatepack(0, network.value, armored, 0);
+
+  /// Starts a send and returns the S1 Slatepack to hand to the recipient.
+  ///
+  /// Expects no earlier state. Locks the inputs now, unless
+  /// [GrinSendArgs.lateLock] is set, so the funds are unavailable until the
+  /// send is finalized or cancelled; cancel one that will not be completed
+  /// with [cancelTransaction]. With [GrinSendArgs.recipientAddress] the S1 is
+  /// encrypted to that address and a payment proof is requested.
+  ///
+  /// Throws [ArgumentError] for an amount that does not fit the native
+  /// argument, [GrinInvalidArgumentException], [GrinJsonException],
+  /// [GrinInvalidAddressException], [GrinInsufficientFundsException],
+  /// [GrinTransactionException] or [GrinSlateException].
+  Future<GrinSlatepack> initSend(GrinSendArgs args) {
+    _ensureOpen();
+    final handle = _handle;
+    final argsJson = jsonEncode(args.toJson());
+    return _enqueue(() => _initSend(handle, argsJson));
+  }
+
+  /// Sends directly to the recipient's wallet over HTTP or Tor and finalizes
+  /// the transaction in one call.
+  ///
+  /// Expects no earlier state. The inputs are locked only after the recipient
+  /// has answered, so a failed exchange leaves nothing locked and nothing in
+  /// the history. A target that resolves to `.onion` needs a SOCKS proxy in
+  /// the wallet's network settings (see [updateNetwork]). With
+  /// [GrinHttpSendArgs.post] the transaction is broadcast.
+  ///
+  /// Throws [GrinHttpException] when the other wallet cannot be reached or
+  /// refuses the slate, and [GrinNodeException] (with `slate_id` in its
+  /// details) when the transaction was finalized but the broadcast failed;
+  /// use [repost] for that one. Other errors are as for [initSend].
+  Future<GrinSendResult> sendHttp(GrinHttpSendArgs args) {
+    _ensureOpen();
+    final handle = _handle;
+    final argsJson = jsonEncode(args.toJson());
+    return _enqueue(() => _sendHttp(handle, argsJson));
+  }
+
+  /// Answers an S1 Slatepack and returns the S2 to hand back to the sender.
+  ///
+  /// Expects an S1, plain or encrypted to this wallet. Adds this wallet's
+  /// output and signature, so a new received transaction appears in the log.
+  /// When the S1 names its sender, the S2 is encrypted to it. Locks no
+  /// inputs.
+  ///
+  /// Throws [GrinSlateException] when the text is not an S1 or cannot be
+  /// decrypted, and [GrinTransactionException] when this wallet has already
+  /// received it or it has expired.
+  Future<GrinSlatepack> receiveSlatepack(String armoredS1) {
+    _ensureOpen();
+    final handle = _handle;
+    return _enqueue(() => _receiveSlatepack(handle, armoredS1));
+  }
+
+  /// Finishes a send: takes the S2 and returns the final transaction.
+  ///
+  /// Expects the S2 of a send this wallet started with [initSend], whose
+  /// inputs are already locked (or locks them now with
+  /// [GrinSendArgs.lateLock]). With [broadcast] the transaction is posted to
+  /// the node; [fluff] skips the Dandelion stem phase. Without it the
+  /// transaction is stored and [repost] can broadcast it later.
+  ///
+  /// Throws [GrinSlateException] when the text is not an S2,
+  /// [GrinNotFoundException] when this wallet has no open transaction for the
+  /// slate (unknown, or already finalized), [GrinTransactionException] for a
+  /// bad signature, a payment proof mismatch or an expired transaction, and
+  /// [GrinNodeException] (with `slate_id` in its details) when the broadcast
+  /// fails after the transaction was finalized.
+  Future<GrinFinalizeResult> finalizeSlatepack(
+    String armoredS2, {
+    bool broadcast = true,
+    bool fluff = false,
+  }) {
+    _ensureOpen();
+    final handle = _handle;
+    return _enqueue(
+      () => _finalizeSlatepack(handle, armoredS2, broadcast, fluff),
+    );
+  }
+
+  /// Requests a payment: returns the I1 Slatepack to hand to the payer.
+  ///
+  /// Expects no earlier state. Adds a received transaction to the log at
+  /// once, which [cancelTransaction] can remove if the payer never answers.
+  /// Locks no inputs. With [GrinInvoiceArgs.recipientAddress] the I1 is
+  /// encrypted to the payer.
+  ///
+  /// Throws [ArgumentError] for an amount that does not fit the native
+  /// argument, [GrinInvalidArgumentException], [GrinJsonException],
+  /// [GrinInvalidAddressException] or [GrinTransactionException].
+  Future<GrinSlatepack> issueInvoice(GrinInvoiceArgs args) {
+    _ensureOpen();
+    final handle = _handle;
+    final argsJson = jsonEncode(args.toJson());
+    return _enqueue(() => _issueInvoice(handle, argsJson));
+  }
+
+  /// Pays an invoice: returns the I2 Slatepack to hand back to the payee.
+  ///
+  /// Expects an I1. Selects inputs, signs, and locks the inputs in the same
+  /// call, so the funds are unavailable until the invoice is finalized or the
+  /// transaction is cancelled with [cancelTransaction]. The I2 is encrypted
+  /// to the payee when the I1 named one.
+  ///
+  /// Throws [GrinSlateException] when the text is not an I1,
+  /// [GrinInsufficientFundsException], and [GrinTransactionException] when
+  /// the invoice was already paid or cancelled, or has expired.
+  Future<GrinSlatepack> processInvoice(
+    String armoredI1,
+    GrinProcessInvoiceArgs args,
+  ) {
+    _ensureOpen();
+    final handle = _handle;
+    final argsJson = jsonEncode(args.toJson());
+    return _enqueue(() => _processInvoice(handle, armoredI1, argsJson));
+  }
+
+  /// Finishes an invoice: takes the I2 and returns the final transaction.
+  ///
+  /// Expects the I2 of an invoice this wallet issued with [issueInvoice].
+  /// Locks nothing new (the payer's inputs were locked by [processInvoice]).
+  /// [broadcast] and [fluff] work as in [finalizeSlatepack], and so do the
+  /// errors, with [GrinSlateException] for anything that is not an I2.
+  Future<GrinFinalizeResult> finalizeInvoice(
+    String armoredI2, {
+    bool broadcast = true,
+    bool fluff = false,
+  }) {
+    _ensureOpen();
+    final handle = _handle;
+    return _enqueue(
+      () => _finalizeInvoice(handle, armoredI2, broadcast, fluff),
+    );
+  }
+
+  /// Broadcasts the stored finalized transaction again.
+  ///
+  /// Name the transaction by [txId] (the `id` of a [GrinTxLogEntry]), by
+  /// [slateId], or both; at least one is required, otherwise this throws
+  /// [GrinInvalidArgumentException]. When both are given, [txId] is looked
+  /// up first and [slateId] is the fallback. A negative [txId] counts as
+  /// absent. The transaction is validated before it is posted.
+  ///
+  /// Only a transaction that is finalized and not yet confirmed can be
+  /// reposted; never repost a confirmed one. Throws [GrinNotFoundException]
+  /// when there is no such transaction, nothing is stored for it or the
+  /// stored copy is not finalized, and [GrinNodeException] when the node
+  /// refuses it. Changes no wallet state.
+  Future<void> repost({int? txId, String? slateId, bool fluff = false}) {
+    _ensureOpen();
+    final handle = _handle;
+    final nativeTxId = txId ?? -1;
+    return _enqueue(() => _repost(handle, nativeTxId, slateId, fluff));
+  }
+
+  /// Cancels an unconfirmed sent, received or reverted transaction.
+  ///
+  /// Name the transaction by [txId], by [slateId], or both (both must then
+  /// match the same transaction); at least one is required, otherwise this
+  /// throws [GrinInvalidArgumentException]. A negative [txId] counts as
+  /// absent. Inputs the transaction locked become spendable again and its
+  /// new outputs are dropped; the log entry becomes
+  /// [GrinTxType.txSentCancelled] or [GrinTxType.txReceivedCancelled].
+  ///
+  /// The wallet refreshes from the node first and refuses to cancel without
+  /// it, so an unreachable node throws [GrinNodeException]. Throws
+  /// [GrinNotFoundException] for an unknown transaction and
+  /// [GrinTransactionException] when it is confirmed, a coinbase or already
+  /// cancelled.
+  Future<void> cancelTransaction({int? txId, String? slateId}) {
+    _ensureOpen();
+    final handle = _handle;
+    final nativeTxId = txId ?? -1;
+    return _enqueue(() => _cancelTransaction(handle, nativeTxId, slateId));
+  }
+
+  /// Exports the payment proof of a finalized send that asked for one.
+  ///
+  /// Name the transaction by [txId], by [slateId], or both (both must then
+  /// match). Uses the stored history and does not contact the node. Only the
+  /// sender has a proof, and only when it passed a recipient address to
+  /// [initSend]. Throws [GrinNotFoundException] when there is no such
+  /// transaction, no proof, or the transaction is not finalized yet, and
+  /// [GrinInvalidArgumentException] when neither identifier is given.
+  Future<GrinPaymentProof> exportPaymentProof({int? txId, String? slateId}) {
+    _ensureOpen();
+    final handle = _handle;
+    final nativeTxId = txId ?? -1;
+    return _enqueue(() => _exportPaymentProof(handle, nativeTxId, slateId));
+  }
+
+  /// Checks a payment proof and says whether this wallet is its sender or
+  /// recipient.
+  ///
+  /// Looks up the kernel on the chain through the wallet's node and checks
+  /// both signatures, then compares the addresses with this wallet's index 0
+  /// address. Both flags false means the proof is valid but belongs to two
+  /// other wallets. The addresses must be for the wallet's network.
+  ///
+  /// Throws [GrinTransactionException] when a signature does not verify or
+  /// the kernel is not on the chain, [GrinJsonException] when the proof is
+  /// malformed and [GrinNodeException] when the node cannot be reached.
+  Future<GrinPaymentProofVerification> verifyPaymentProof(
+    GrinPaymentProof proof,
+  ) {
+    _ensureOpen();
+    final handle = _handle;
+    final proofJson = proof.toJsonString();
+    return _enqueue(() => _verifyPaymentProof(handle, proofJson));
+  }
 
   /// Closes the wallet.
   ///
@@ -539,6 +828,242 @@ class GrinWalletClient implements Finalizable {
           toCStringOrNull(socksProxy, arena),
         ),
       );
+    });
+  });
+
+  static Future<GrinFeeEstimate> _estimateFee(
+    int handle,
+    int amount,
+    int minConfirms,
+    bool selectionStrategyIsAll,
+    bool amountIncludesFee,
+  ) => Isolate.run(() {
+    final json = decodeJsonObject(
+      unwrapFfiResult(
+        bindings.grin_tx_estimate_fee(
+          handle,
+          amount,
+          minConfirms,
+          selectionStrategyIsAll,
+          amountIncludesFee,
+        ),
+      ),
+    );
+    return GrinFeeEstimate.fromJson(json);
+  });
+
+  static Future<GrinTxList> _getTransactions(
+    int handle,
+    bool refreshFromNode,
+  ) => Isolate.run(() {
+    final json = decodeJsonObject(
+      unwrapFfiResult(bindings.grin_txs_get(handle, refreshFromNode)),
+    );
+    return GrinTxList.fromJson(json);
+  });
+
+  static Future<GrinSlateInfo> _decodeSlatepack(
+    int handle,
+    int networkValue,
+    String armored,
+    int secretIndex,
+  ) => Isolate.run(() {
+    return usingSecretArena((arena) {
+      final json = decodeJsonObject(
+        unwrapFfiResult(
+          bindings.grin_slatepack_decode(
+            handle,
+            networkValue,
+            toCString(armored, arena),
+            secretIndex,
+          ),
+        ),
+      );
+      return GrinSlateInfo.fromJson(json);
+    });
+  });
+
+  static Future<GrinSlatepack> _initSend(int handle, String argsJson) =>
+      Isolate.run(() {
+        return usingSecretArena((arena) {
+          final json = decodeJsonObject(
+            unwrapFfiResult(
+              bindings.grin_tx_init_send(handle, toCString(argsJson, arena)),
+            ),
+          );
+          return GrinSlatepack.fromJson(json);
+        });
+      });
+
+  static Future<GrinSendResult> _sendHttp(int handle, String argsJson) =>
+      Isolate.run(() {
+        return usingSecretArena((arena) {
+          final json = decodeJsonObject(
+            unwrapFfiResult(
+              bindings.grin_tx_send_http(handle, toCString(argsJson, arena)),
+            ),
+          );
+          return GrinSendResult.fromJson(json);
+        });
+      });
+
+  static Future<GrinSlatepack> _receiveSlatepack(
+    int handle,
+    String armoredS1,
+  ) => Isolate.run(() {
+    return usingSecretArena((arena) {
+      final json = decodeJsonObject(
+        unwrapFfiResult(
+          bindings.grin_tx_receive_slatepack(
+            handle,
+            toCString(armoredS1, arena),
+            nullptr,
+          ),
+        ),
+      );
+      return GrinSlatepack.fromJson(json);
+    });
+  });
+
+  static Future<GrinFinalizeResult> _finalizeSlatepack(
+    int handle,
+    String armoredS2,
+    bool broadcast,
+    bool fluff,
+  ) => Isolate.run(() {
+    return usingSecretArena((arena) {
+      final json = decodeJsonObject(
+        unwrapFfiResult(
+          bindings.grin_tx_finalize_slatepack(
+            handle,
+            toCString(armoredS2, arena),
+            broadcast,
+            fluff,
+          ),
+        ),
+      );
+      return GrinFinalizeResult.fromJson(json);
+    });
+  });
+
+  static Future<GrinSlatepack> _issueInvoice(int handle, String argsJson) =>
+      Isolate.run(() {
+        return usingSecretArena((arena) {
+          final json = decodeJsonObject(
+            unwrapFfiResult(
+              bindings.grin_tx_issue_invoice(
+                handle,
+                toCString(argsJson, arena),
+              ),
+            ),
+          );
+          return GrinSlatepack.fromJson(json);
+        });
+      });
+
+  static Future<GrinSlatepack> _processInvoice(
+    int handle,
+    String armoredI1,
+    String argsJson,
+  ) => Isolate.run(() {
+    return usingSecretArena((arena) {
+      final json = decodeJsonObject(
+        unwrapFfiResult(
+          bindings.grin_tx_process_invoice(
+            handle,
+            toCString(armoredI1, arena),
+            toCString(argsJson, arena),
+          ),
+        ),
+      );
+      return GrinSlatepack.fromJson(json);
+    });
+  });
+
+  static Future<GrinFinalizeResult> _finalizeInvoice(
+    int handle,
+    String armoredI2,
+    bool broadcast,
+    bool fluff,
+  ) => Isolate.run(() {
+    return usingSecretArena((arena) {
+      final json = decodeJsonObject(
+        unwrapFfiResult(
+          bindings.grin_tx_finalize_invoice(
+            handle,
+            toCString(armoredI2, arena),
+            broadcast,
+            fluff,
+          ),
+        ),
+      );
+      return GrinFinalizeResult.fromJson(json);
+    });
+  });
+
+  static Future<void> _repost(
+    int handle,
+    int txId,
+    String? slateId,
+    bool fluff,
+  ) => Isolate.run(() {
+    usingSecretArena((arena) {
+      unwrapFfiResult(
+        bindings.grin_tx_repost(
+          handle,
+          txId,
+          toCStringOrNull(slateId, arena),
+          fluff,
+        ),
+      );
+    });
+  });
+
+  static Future<void> _cancelTransaction(
+    int handle,
+    int txId,
+    String? slateId,
+  ) => Isolate.run(() {
+    usingSecretArena((arena) {
+      unwrapFfiResult(
+        bindings.grin_tx_cancel(handle, txId, toCStringOrNull(slateId, arena)),
+      );
+    });
+  });
+
+  static Future<GrinPaymentProof> _exportPaymentProof(
+    int handle,
+    int txId,
+    String? slateId,
+  ) => Isolate.run(() {
+    return usingSecretArena((arena) {
+      final json = decodeJsonObject(
+        unwrapFfiResult(
+          bindings.grin_payment_proof_export(
+            handle,
+            txId,
+            toCStringOrNull(slateId, arena),
+          ),
+        ),
+      );
+      return GrinPaymentProof.fromJson(json);
+    });
+  });
+
+  static Future<GrinPaymentProofVerification> _verifyPaymentProof(
+    int handle,
+    String proofJson,
+  ) => Isolate.run(() {
+    return usingSecretArena((arena) {
+      final json = decodeJsonObject(
+        unwrapFfiResult(
+          bindings.grin_payment_proof_verify(
+            handle,
+            toCString(proofJson, arena),
+          ),
+        ),
+      );
+      return GrinPaymentProofVerification.fromJson(json);
     });
   });
 
