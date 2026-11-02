@@ -270,12 +270,15 @@ Future<void> nix({required bool localInputs}) async {
   final outDir = Directory('$root/build/nix')..createSync(recursive: true);
   final files = <String, String>{};
   for (final target in _nixTargets) {
+    // An out-link under build/nix keeps the artifact out of the garbage
+    // collector's reach until the next run.
     final printed = await _capture(
       'nix',
       [
         'build',
         '$flake#$target',
-        '--no-link',
+        '--out-link',
+        '${outDir.path}/$target',
         '--print-out-paths',
         ...overrides,
       ],
