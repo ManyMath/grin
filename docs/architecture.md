@@ -1340,7 +1340,14 @@ Apple hosts, run on m3max-mbp (macOS 26, Xcode 27.0.1, rustup 1.94.0) with `tool
 
 Two things were learned there and fixed: the iOS device link needs the deployment floors (`IPHONEOS_DEPLOYMENT_TARGET=13.0`, which the hook already passes; the script now does too), and inside an Xcode build the hook's cargo mode must build with `strip = none` on Apple, because under Xcode's PATH the stripped host proc-macro dylibs stop loading (reproduced with that PATH alone; `CARGO_PROFILE_RELEASE_STRIP=none` in `hook/build.dart`). The flake's Apple shell (`nix develop .#apple` in dev mode) started building but failed in `libz-sys`'s build script with `'stddef.h' file not found`, a kit-side Apple environment problem that the kit's own README also lists as unrechecked; the reference Apple dylibs therefore remain unverified.
 
-Not verified here: the kit's Nix Apple reference build (above), any sync or send against a real node (no public Grin testnet node answered), the Tor path of `grin_tx_send_http` beyond its proxy checks, and the GC-finalizer path of `GrinWalletClient` beyond the Rust-side simulation with a retained session.
+Windows host, run on desktop-pmacb92 (Windows 10, rustup with the MSVC toolchain; Rust 1.94.0 installed by rust-toolchain.toml) with `tool/verify-windows.ps1` from a clone made out of git bundles copied over scp (git over ssh from that host prompts for a key passphrase):
+
+| Gate | Output |
+|---|---|
+| cargo release build with the host toolchain (commit `99349ba` plus the script fix `eead835`) | `exports grin_ffi.dll: 35 standard, 0 test symbols` |
+| `flutter build windows` (example) | not run: that machine's Flutter carries a Dart SDK below the `^3.13.0` the workspace requires (`Because grin_workspace requires SDK version ^3.13.0, version solving failed`) |
+
+Not verified here: the Windows example app build (above), the kit's Nix Apple reference build (above), any sync or send against a real node (no public Grin testnet node answered), the Tor path of `grin_tx_send_http` beyond its proxy checks, and the GC-finalizer path of `GrinWalletClient` beyond the Rust-side simulation with a retained session.
 
 Process note: while testing the brief's Cargo `[patch]` wiring, one command ran without the ssh guard and cargo opened an ssh connection to git.cypherstack.com, which answered that `sneurlax/grin-wallet` does not exist there. Nothing was fetched or pushed. Every later cargo, pub and nix command ran with `GIT_SSH_COMMAND=/bin/false`, and tool/local-fork-env.sh sets it as well.
 
