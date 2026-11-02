@@ -1345,9 +1345,9 @@ Windows host, run on desktop-pmacb92 (Windows 10, rustup with the MSVC toolchain
 | Gate | Output |
 |---|---|
 | cargo release build with the host toolchain (commit `99349ba` plus the script fix `eead835`) | `exports grin_ffi.dll: 35 standard, 0 test symbols` |
-| `flutter build windows` (example) | not run: that machine's Flutter carries a Dart SDK below the `^3.13.0` the workspace requires (`Because grin_workspace requires SDK version ^3.13.0, version solving failed`) |
+| `flutter build windows` (example, through the hook's cargo mode) | `Built build\windows\x64\runner\Release\grin_flutter_example.exe`, with `grin_ffi.dll` in the bundle. That machine's installed Flutter has a Dart SDK below the `^3.13.0` the workspace requires, so a scratch Flutter stable checkout (Dart 3.13.7) was used, with the kit cloned from a bundle and the usual `pubspec_overrides.yaml` |
 
-Not verified here: the Windows example app build (above), the kit's Nix Apple reference build (above), any sync or send against a real node (no public Grin testnet node answered), the Tor path of `grin_tx_send_http` beyond its proxy checks, and the GC-finalizer path of `GrinWalletClient` beyond the Rust-side simulation with a retained session.
+Not verified here: the kit's Nix Apple reference build (above; the kit's `build-apple.sh` unsets `SDKROOT` and relies on the `/usr/bin/cc` shim, and inside its Nix shell clang's resource `stddef.h` finds no SDK header behind its `#include_next`), any sync or send against a real node (no public Grin testnet node answered), the Tor path of `grin_tx_send_http` beyond its proxy checks, and the GC-finalizer path of `GrinWalletClient` beyond the Rust-side simulation with a retained session.
 
 Process note: while testing the brief's Cargo `[patch]` wiring, one command ran without the ssh guard and cargo opened an ssh connection to git.cypherstack.com, which answered that `sneurlax/grin-wallet` does not exist there. Nothing was fetched or pushed. Every later cargo, pub and nix command ran with `GIT_SSH_COMMAND=/bin/false`, and tool/local-fork-env.sh sets it as well.
 
