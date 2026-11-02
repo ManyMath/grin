@@ -21,13 +21,14 @@ echo "== building grin (node) and grin-wallet (cli) from $fork"
 node=$work/target-node/release/grin
 cli=$work/target-wallet/release/grin-wallet
 
+# exec inside the subshells, so these pids are the binaries themselves.
 pids=()
 cleanup() { for p in "${pids[@]:-}"; do kill "$p" 2>/dev/null || true; done; }
 trap cleanup EXIT
 
 echo "== miner wallet and listener (foreign API on 127.0.0.1:23415)"
 (cd "$work" && "$cli" --usernet -t "$work/walletA" -p regtest init >/dev/null 2>&1)
-(cd "$work/walletA" && "$cli" --usernet -t "$work/walletA" -p regtest listen >"$work/walletA-listen.log" 2>&1) &
+(cd "$work/walletA" && exec "$cli" --usernet -t "$work/walletA" -p regtest listen >"$work/walletA-listen.log" 2>&1) &
 pids+=($!)
 
 echo "== usernet node with the test miner (foreign API on 127.0.0.1:23413)"
@@ -40,7 +41,7 @@ sed -i.bak \
   -e 's|^log_to_stdout = true|log_to_stdout = false|' \
   -e "s|^log_file_path = .*|log_file_path = \"$work/node/grin-server.log\"|" \
   "$work/node/grin-server.toml"
-(cd "$work/node" && "$node" --usernet server run >"$work/node/stdout.log" 2>&1) &
+(cd "$work/node" && exec "$node" --usernet server run >"$work/node/stdout.log" 2>&1) &
 pids+=($!)
 
 echo "== SOCKS5 proxy on 127.0.0.1:1080"
