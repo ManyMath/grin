@@ -10,6 +10,10 @@ enum GrinAddressKind {
 
   /// An `http://` or `https://` URL.
   http,
+
+  /// A kind this version of the package does not know. The other fields
+  /// are still read.
+  unknown,
 }
 
 /// The result of validating an address for a network.
@@ -25,12 +29,12 @@ final class GrinAddressValidation {
   /// Reads the native `grin_address_validate` document.
   factory GrinAddressValidation.fromJson(Map<String, Object?> json) {
     final kindName = readString(json['kind'], 'kind');
-    final kind = GrinAddressKind.values.where((k) => k.name == kindName);
-    if (kind.isEmpty) {
-      throw FormatException('unknown address kind', kindName);
-    }
+    final kind = GrinAddressKind.values.firstWhere(
+      (k) => k.name == kindName,
+      orElse: () => GrinAddressKind.unknown,
+    );
     return GrinAddressValidation(
-      kind: kind.first,
+      kind: kind,
       slatepackAddress: readOptionalString(
         json['slatepack_address'],
         'slatepack_address',

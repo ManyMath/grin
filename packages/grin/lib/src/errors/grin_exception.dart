@@ -73,6 +73,17 @@ sealed class GrinException implements Exception {
     return value is String ? value : null;
   }
 
+  /// The id of the slate the failed call was working on, if the library
+  /// reports one in [details].
+  ///
+  /// A call can fail after the transaction was finalized, for example when
+  /// the broadcast is refused. This is the id to pass to `repost` or
+  /// `cancelTransaction` then. Null when the error carries none.
+  String? get slateId {
+    final Object? value = details?['slate_id'];
+    return value is String ? value : null;
+  }
+
   @override
   String toString() => '$runtimeType($code): $message';
 }

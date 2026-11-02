@@ -46,6 +46,14 @@ Future<void> _cargoBuild(BuildInput input, BuildOutputBuilder output) async {
     input.userDefines['test_utils'],
   );
   final environment = <String, String>{
+    // Cargo reads this variable for git dependencies. rust/.cargo/config.toml
+    // would set the same thing, but cargo looks for config files from its
+    // working directory and the hook runs from elsewhere, so it is not seen.
+    // The hooks runner filters the environment, so no ssh agent
+    // (SSH_AUTH_SOCK) is reachable from here: the git database must already
+    // hold the fork's rev, or the fork must be fetchable with a default ssh
+    // key. The prebuilt, source and dev modes do not need to fetch it.
+    'CARGO_NET_GIT_FETCH_WITH_CLI': 'true',
     if (config.targetOS == OS.macOS)
       'MACOSX_DEPLOYMENT_TARGET': '${config.macOS.targetVersion}.0',
     if (config.targetOS == OS.iOS)

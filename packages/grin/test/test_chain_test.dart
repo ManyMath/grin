@@ -105,4 +105,19 @@ void main() {
     await wallet.close();
     expect(() => GrinTestChain.mineBlocks(wallet, 1), throwsStateError);
   });
+
+  test('mineBlocks refuses a count below 1', () async {
+    final root = await makeTempDir('grin_chain_');
+    final chainDir = Directory(p.join(root.path, 'chain'))..createSync();
+    final walletDir = Directory(p.join(root.path, 'w'))..createSync();
+    final wallet = await GrinTestChain.createWallet(
+      chainDir: chainDir.path,
+      walletDir: walletDir.path,
+      clientId: 'erin',
+      password: 'pw',
+    );
+    addTearDown(wallet.close);
+    expect(() => GrinTestChain.mineBlocks(wallet, 0), throwsArgumentError);
+    expect(() => GrinTestChain.mineBlocks(wallet, -1), throwsArgumentError);
+  });
 }

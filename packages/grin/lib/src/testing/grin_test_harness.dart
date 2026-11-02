@@ -54,8 +54,8 @@ abstract final class GrinTestChain {
           return readInt(json['handle'], 'handle');
         });
       });
-    } on ArgumentError catch (error) {
-      throw _missingSymbol(error);
+    } on ArgumentError catch (error, stackTrace) {
+      _missingSymbol(error, stackTrace);
     }
     return GrinWalletClient.fromHandle(
       handle: handle,
@@ -67,14 +67,19 @@ abstract final class GrinTestChain {
   /// Mines [count] blocks whose coinbase pays [wallet], and returns the
   /// chain height afterwards. Runs in the wallet's operation queue.
   ///
-  /// [wallet] must come from [createWallet].
+  /// [count] must be at least 1; a smaller value throws [ArgumentError]
+  /// (the native argument is unsigned, so a negative count would mine for
+  /// ever). [wallet] must come from [createWallet].
   static Future<int> mineBlocks(GrinWalletClient wallet, int count) {
+    if (count < 1) {
+      throw ArgumentError.value(count, 'count', 'must be at least 1');
+    }
     final handle = wallet.nativeHandle;
     return wallet.runQueued(() async {
       try {
         return await _mine(handle, count);
-      } on ArgumentError catch (error) {
-        throw _missingSymbol(error);
+      } on ArgumentError catch (error, stackTrace) {
+        _missingSymbol(error, stackTrace);
       }
     });
   }
@@ -93,21 +98,26 @@ abstract final class GrinTestChain {
   static void testPanic() {
     try {
       unwrapFfiResult(bindings.grin_test_panic());
-    } on ArgumentError catch (error) {
-      throw _missingSymbol(error);
+    } on ArgumentError catch (error, stackTrace) {
+      _missingSymbol(error, stackTrace);
     }
   }
 
-  static Object _missingSymbol(ArgumentError error) {
+  /// Rethrows [error] with its own [stackTrace], turned into a [StateError]
+  /// when it is the failed lookup of a `grin_test_*` symbol.
+  static Never _missingSymbol(ArgumentError error, StackTrace stackTrace) {
     // The text of the lookup failure names the missing symbol; any other
     // ArgumentError is a different problem and must not be disguised.
     if (!'${error.message}'.contains("native function 'grin_test_")) {
-      return error;
+      Error.throwWithStackTrace(error, stackTrace);
     }
-    return StateError(
-      'The native grin library has no grin_test_* functions. Build it with '
-      'the test_utils user-define (hooks.user_defines.grin.test_utils: true '
-      'together with build: cargo). Details: ${error.message}',
+    Error.throwWithStackTrace(
+      StateError(
+        'The native grin library has no grin_test_* functions. Build it with '
+        'the test_utils user-define (hooks.user_defines.grin.test_utils: true '
+        'together with build: cargo). Details: ${error.message}',
+      ),
+      stackTrace,
     );
   }
 }

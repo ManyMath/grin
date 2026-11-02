@@ -127,12 +127,14 @@ void main() {
       );
     });
 
-    test('GrinAddressValidation rejects an unknown kind', () {
+    test('GrinAddressValidation maps an unknown kind to unknown', () {
       expect(
-        () => GrinAddressValidation.fromJson({
-          'kind': 'carrier pigeon',
-          'url': 'x',
-        }),
+        GrinAddressValidation.fromJson({'kind': 'carrier pigeon', 'url': 'x'})
+            .kind,
+        GrinAddressKind.unknown,
+      );
+      expect(
+        () => GrinAddressValidation.fromJson({'kind': 5, 'url': 'x'}),
         throwsFormatException,
       );
     });

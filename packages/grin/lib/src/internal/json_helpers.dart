@@ -15,14 +15,22 @@ Map<String, Object?> decodeJsonObject(String? text) {
 /// Reads an unsigned integer amount (nanogrin) as a [BigInt].
 ///
 /// Accepts a JSON integer, or a decimal string for values the JSON decoder
-/// could not hold in a 64-bit integer.
+/// could not hold in a 64-bit integer. A negative value is a
+/// [FormatException].
 BigInt readBigInt(Object? value, String key) {
-  if (value is int) return BigInt.from(value);
-  if (value is String) {
-    final parsed = BigInt.tryParse(value);
-    if (parsed != null) return parsed;
+  final BigInt? parsed = switch (value) {
+    int() => BigInt.from(value),
+    String() => BigInt.tryParse(value),
+    _ => null,
+  };
+  if (parsed == null) {
+    throw FormatException('"$key" is not an integer', value);
   }
-  throw FormatException('"$key" is not an integer', value);
+  // Amounts and heights are unsigned in the native library.
+  if (parsed.isNegative) {
+    throw FormatException('"$key" is negative', value);
+  }
+  return parsed;
 }
 
 /// Reads a JSON integer that fits an [int].
@@ -121,4 +129,46 @@ int amountToNative(BigInt amount, [String name = 'amount']) {
     );
   }
   return amount.toUnsigned(64).toInt();
+}
+
+/// Checks that [value] fits a native `u32` argument and returns it.
+///
+/// Dart passes an `int` to a 32-bit parameter by cutting off the high bits,
+/// so an unchecked 2^32 + 5 would arrive as 5. Throws [ArgumentError] unless
+/// [value] is between 0 and 4294967295.
+int requireU32(int value, String name) {
+  if (value < 0 || value > 0xFFFFFFFF) {
+    throw ArgumentError.value(value, name, 'must be between 0 and 4294967295');
+  }
+  return value;
+}
+
+/// Checks that [value] fits a native `u64` argument and returns it.
+///
+/// A Dart `int` is signed, so a negative value would wrap to a huge number
+/// natively. Throws [ArgumentError] for a negative [value]; the largest
+/// value is 2^63 - 1, which is all an `int` can hold.
+int requireU64(int value, String name) {
+  if (value < 0) {
+    throw ArgumentError.value(value, name, 'must not be negative');
+  }
+  return value;
+}
+
+/// Turns an optional transaction id into the native `i64` argument.
+///
+/// The native side reads a negative id as "not given", so null becomes -1.
+/// An explicit negative id is refused instead of being taken for null, since
+/// it would silently fall back to the slate id. Throws [ArgumentError] for a
+/// negative [txId].
+int txIdToNative(int? txId, [String name = 'txId']) {
+  if (txId == null) return -1;
+  if (txId < 0) {
+    throw ArgumentError.value(
+      txId,
+      name,
+      'must not be negative; pass null to leave it out',
+    );
+  }
+  return txId;
 }

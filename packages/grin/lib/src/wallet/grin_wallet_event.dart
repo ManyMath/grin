@@ -22,13 +22,16 @@ final class GrinScanStarted extends GrinWalletEvent {
 /// A scan ended, successfully or not.
 final class GrinScanFinished extends GrinWalletEvent {
   /// Creates the event.
-  const GrinScanFinished({this.result, this.error});
+  const GrinScanFinished({this.result, this.error, this.stackTrace});
 
   /// The result, or null when the scan failed.
   final GrinScanResult? result;
 
   /// The error, or null when the scan succeeded.
   final Object? error;
+
+  /// The stack trace of [error], or null when the scan succeeded.
+  final StackTrace? stackTrace;
 
   @override
   String toString() => 'GrinScanFinished(result: $result, error: $error)';

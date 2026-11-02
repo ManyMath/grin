@@ -179,6 +179,19 @@ The filtered environment also has no `SSH_AUTH_SOCK`: if the flake fetches an
 input over `git+ssh://`, Nix inside the hook cannot use an SSH agent, so the
 key must be usable from `~/.ssh` without one.
 
+### Fetching the fork in cargo mode
+
+The Rust crate depends on a fork of grin-wallet that cargo fetches over
+`ssh://`. The hook passes `CARGO_NET_GIT_FETCH_WITH_CLI=true`, so cargo uses
+the git command line. It cannot rely on `rust/.cargo/config.toml` for that,
+because cargo reads config files from its working directory and the hook does
+not run in the crate. The hooks runner also filters the environment, so no ssh
+agent is reachable from the hook. In `cargo` mode the git database must
+therefore already hold the fork's rev (run `cargo fetch --manifest-path
+rust/Cargo.toml` once in a shell that has your ssh agent), or the fork must be
+fetchable with a default ssh key in `~/.ssh` that needs no passphrase. The
+`prebuilt`, `source` and `dev` modes avoid the problem.
+
 ## Local development overrides
 
 Two things are wired to local checkouts until the repositories they point at

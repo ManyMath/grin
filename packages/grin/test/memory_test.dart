@@ -1,6 +1,7 @@
 import 'dart:ffi';
 
 import 'package:ffi/ffi.dart';
+import 'package:grin/grin.dart' show GrinWalletClient;
 import 'package:grin/src/errors/grin_exception.dart';
 import 'package:grin/src/ffi/bindings.g.dart' as bindings;
 import 'package:grin/src/ffi/memory.dart';
@@ -82,5 +83,43 @@ void main() {
       return unwrapFfiResult(bindings.grin_init_logs(toCString('info', arena)));
     });
     expect(result, isNull);
+  });
+
+  group('a string with U+0000', () {
+    test('is refused by toCString and toCStringOrNull', () {
+      final arena = Arena();
+      addTearDown(arena.releaseAll);
+      expect(() => toCString('a\u0000b', arena), throwsArgumentError);
+      expect(() => toCStringOrNull('\u0000', arena), throwsArgumentError);
+      expect(toCStringOrNull(null, arena), nullptr);
+      expect(toCString('ab', arena).cast<Utf8>().toDartString(), 'ab');
+    });
+
+    test('is refused by the secret variants without leaking the value', () {
+      usingSecretArena((arena) {
+        expect(
+          () => toCStringSecret('hunter2\u0000x', arena),
+          throwsA(
+            isA<ArgumentError>().having(
+              (e) => '${e.message}',
+              'message',
+              isNot(contains('hunter2')),
+            ),
+          ),
+        );
+        expect(
+          () => toCStringSecretOrNull('hunter2\u0000x', arena),
+          throwsArgumentError,
+        );
+        expect(toCStringSecretOrNull(null, arena), nullptr);
+      });
+    });
+
+    test('is refused by the public API before it reaches the library', () {
+      expect(
+        GrinWalletClient.validateMnemonic('abandon\u0000about'),
+        throwsArgumentError,
+      );
+    });
   });
 }

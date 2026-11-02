@@ -252,4 +252,80 @@ void main() {
     await expectLater(wallet.scan(), throwsA(isA<GrinCancelledException>()));
     expect(wallet.scanProgress().cancelRequested, isFalse);
   });
+
+  test('close completes while an events listener is paused', () async {
+    final dir = await makeTempDir();
+    final wallet = await createTestWallet(dir);
+    final seen = <GrinWalletEvent>[];
+    final done = Completer<void>();
+    final subscription = wallet.events.listen(seen.add, onDone: done.complete);
+    addTearDown(subscription.cancel);
+    subscription.pause();
+
+    // A paused listener gets no done event, and close() must not wait for it.
+    await wallet.close().timeout(const Duration(seconds: 10));
+    expect(wallet.isClosed, isTrue);
+    expect(done.isCompleted, isFalse);
+
+    subscription.resume();
+    await done.future.timeout(const Duration(seconds: 10));
+    expect(seen.last, isA<GrinWalletClosed>());
+  });
+
+  test('close can be awaited from inside an await for body', () async {
+    final dir = await makeTempDir();
+    final wallet = await createTestWallet(dir);
+    final scan = wallet.scan().then<Object?>(
+      (r) => r,
+      onError: (Object e) => e,
+    );
+    final closed = Completer<void>();
+    final loop = () async {
+      await for (final event in wallet.events) {
+        if (event is GrinScanFinished) {
+          await wallet.close();
+          closed.complete();
+        }
+      }
+    }();
+    await scan;
+    await closed.future.timeout(const Duration(seconds: 10));
+    await loop.timeout(const Duration(seconds: 10));
+  });
+
+  test('queued operations run in order and an error stays with its '
+      'caller', () async {
+    final dir = await makeTempDir();
+    final wallet = await createTestWallet(dir);
+    final gate = Completer<void>();
+    final order = <String>[];
+
+    final first = wallet.runQueued(() async {
+      await gate.future;
+      order.add('first');
+      return 1;
+    });
+    final second = wallet.runQueued<int>(() async {
+      order.add('second');
+      throw StateError('second failed');
+    });
+    final third = wallet.runQueued(() async {
+      order.add('third');
+      return 3;
+    });
+    final secondCheck = expectLater(second, throwsStateError);
+
+    // Nothing behind the first operation may start before it finishes.
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    expect(order, isEmpty);
+
+    gate.complete();
+    expect(await first, 1);
+    await secondCheck;
+    expect(await third, 3);
+    expect(order, ['first', 'second', 'third']);
+
+    // The queue is still usable after the failure.
+    expect(await wallet.runQueued(() async => 4), 4);
+  });
 }

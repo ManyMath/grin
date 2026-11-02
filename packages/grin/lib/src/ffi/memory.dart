@@ -80,9 +80,26 @@ T usingSecretArena<T>(T Function(Arena arena) body) {
   }
 }
 
+/// Throws [ArgumentError] if [value] has a NUL character.
+///
+/// The native side reads every string up to its first NUL, so a string with
+/// one inside would be cut short without any error. The message never holds
+/// the value, because it may be a password.
+void _rejectNul(String value) {
+  if (value.contains('\u0000')) {
+    throw ArgumentError(
+      'a string passed to the native library must not contain U+0000',
+    );
+  }
+}
+
 /// Copies [value] to a NUL-terminated UTF-8 string owned by [arena].
-Pointer<Char> toCString(String value, Allocator arena) =>
-    value.toNativeUtf8(allocator: arena).cast<Char>();
+///
+/// Throws [ArgumentError] if [value] contains U+0000.
+Pointer<Char> toCString(String value, Allocator arena) {
+  _rejectNul(value);
+  return value.toNativeUtf8(allocator: arena).cast<Char>();
+}
 
 /// Like [toCString], or a null pointer when [value] is null.
 Pointer<Char> toCStringOrNull(String? value, Allocator arena) =>
@@ -93,7 +110,10 @@ Pointer<Char> toCStringOrNull(String? value, Allocator arena) =>
 /// [arena] should come from [usingSecretArena], which zeroes the copy on
 /// release. The temporary UTF-8 bytes made on the way are zeroed here. The
 /// Dart [String] itself cannot be wiped.
+///
+/// Throws [ArgumentError] if [value] contains U+0000.
 Pointer<Char> toCStringSecret(String value, Allocator arena) {
+  _rejectNul(value);
   final bytes = utf8.encode(value);
   try {
     final pointer = arena.allocate<Uint8>(bytes.length + 1);
