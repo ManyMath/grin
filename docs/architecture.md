@@ -1308,7 +1308,7 @@ Each entry records a choice made while building, the evidence behind it, and how
 
 ## 13. Verification record (2026-11-01, Linux x86_64 build machine)
 
-What ran, through `dart run tool/ci.dart --local-inputs` after the review fixes (commit `4accb74`), plus the fork gates. Lines are the tools' own output.
+What ran, through `dart run tool/ci.dart --local-inputs` on the final tree (commit `3bf7bac`), plus the fork gates. Lines are the tools' own output.
 
 | Gate | Output |
 |---|---|
@@ -1318,12 +1318,12 @@ What ran, through `dart run tool/ci.dart --local-inputs` after the review fixes 
 | fork: `cargo check -p grin_wallet_impls --no-default-features` | `error: grin_wallet_impls needs a TLS backend: enable the `rustls` or `native-tls` feature` (expected) |
 | rust-dups (`cargo tree -d`) | `no duplicated grin or secp crates` |
 | rust-fmt, rust-clippy (with and without test-utils, `-D warnings`) | ok |
-| rust-test (`cargo test -p grin-ffi --features test-utils --locked`) | `37 passed` (unit), `12 passed` (ffi_e2e_test), `7 passed` (ffi_tx_test), `4 passed` (header_test: C11 and C++11 with -Wall -Wextra -pedantic, committed header equals the generated one) |
+| rust-test (`cargo test -p grin-ffi --features test-utils --locked`) | `39 passed` (unit), `14 passed` (ffi_e2e_test), `8 passed` (ffi_tx_test), `4 passed` (header_test: C11 and C++11 with -Wall -Wextra -pedantic, committed header equals the generated one) |
 | rust-release (host) | `nm libgrin_ffi.so: 35 standard, 0 test symbols` |
 | android (cargo-ndk, NDK 28.2.13676358, API 24; aarch64, armv7, x86_64) | `nm libgrin_ffi.so: 35 standard, 0 test symbols` for each |
 | bindings (`tool/regen_bindings.dart --check`) | `regen_bindings --check: no diff` |
 | dart-analyze (`--fatal-infos`), dart-format | `No issues found!`, `Formatted 51 files (0 changed)` |
-| dart-test (`packages/grin`, test_utils on) | `00:17 +118: All tests passed!` |
+| dart-test (`packages/grin`, test_utils on) | `00:18 +120: All tests passed!` |
 | flutter-analyze (package and example), flutter-test | `No issues found!`, `00:00 +8: All tests passed!` |
 | flutter-build | `Built build/linux/x64/release/bundle/grin_flutter_example`, `Built build/app/outputs/flutter-apk/app-release.apk (27.8MB)` |
 | example integration test (`xvfb-run -a flutter test integration_test -d linux`) | `All tests passed!` (mnemonic and address through the real library) |
@@ -1335,7 +1335,7 @@ Not verified here: macOS and iOS builds (no Apple SDK; the flake's `apple` shell
 
 Process note: while testing the brief's Cargo `[patch]` wiring, one command ran without the ssh guard and cargo opened an ssh connection to git.cypherstack.com, which answered that `sneurlax/grin-wallet` does not exist there. Nothing was fetched or pushed. Every later cargo, pub and nix command ran with `GIT_SSH_COMMAND=/bin/false`, and tool/local-fork-env.sh sets it as well.
 
-Independent review: two Opus reviewers read grin-ffi and GrinWalletClient without the authors' conclusions. grin-ffi: no blockers, six should-fix items (sidecar overwrite on read errors, password error mapping, a self-comparing header test, `null` optional args, scan cancellation, a secret-leaking reallocation), all fixed in `4accb74` together with twelve of the nits. GrinWalletClient: one blocker (`close()` could hang behind a paused `events` listener), seven should-fix items, all fixed in `dc67ca9` and `4accb74`; the remaining nits are recorded in the review reports under the session scratchpad and summarized in the project report.
+Independent review: two Opus reviewers read grin-ffi and GrinWalletClient without the authors' conclusions. grin-ffi: no blockers, six should-fix items (sidecar overwrite on read errors, password error mapping, a self-comparing header test, `null` optional args, scan cancellation, a secret-leaking reallocation), all fixed in `4accb74` together with most of the nits; the rest followed in `3bf7bac`. GrinWalletClient: one blocker (`close()` could hang behind a paused `events` listener), seven should-fix items, all fixed in `dc67ca9` and `4accb74`, and the nits in `3bf7bac`. The items left unchanged on purpose are listed in D9.
 
 ### D9. Review items left as they are, and why
 
