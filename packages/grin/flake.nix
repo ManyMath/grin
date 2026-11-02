@@ -110,6 +110,16 @@
         # used for mobile LMDB (POSIX mutexes without robust-mutex support).
         families.apple = {
           extraCflags = [ "-DMDB_USE_POSIX_MUTEX=1" "-DMDB_USE_ROBUST=0" ];
+          # The kit's rustc wrapper tells cargo the host is
+          # x86_64-unknown-linux-musl, so host build scripts (libz-sys, pulled
+          # in by grin_util's `built` build-dependency) ask cc-rs for that
+          # target. On a Mac they run natively, so give that fake host a
+          # compiler that drops the target flags and uses the system one.
+          env = {
+            CC_x86_64_unknown_linux_musl = "${./nix/host-cc.sh}";
+            CXX_x86_64_unknown_linux_musl = "${./nix/host-cxx.sh}";
+            AR_x86_64_unknown_linux_musl = "/usr/bin/ar";
+          };
         };
       };
       systems = kit.lib.defaultSystems;
