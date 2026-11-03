@@ -71,7 +71,7 @@ class _WalletPageState extends State<WalletPage> {
       }
       _client = client;
       _observer = GrinLifecycleObserver(
-        client: client,
+        wallet: client,
         onError: (e) => debugPrint('cancelScan failed: $e'),
       );
       final words = (await client.getMnemonic(_password)).split(' ');

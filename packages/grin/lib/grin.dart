@@ -1,4 +1,5 @@
-/// The backend-neutral Grin wallet API: models, exceptions, units and events.
+/// The backend-neutral Grin wallet API: the [GrinWallet] and
+/// [GrinWalletBackend] interfaces, models, exceptions, units and events.
 ///
 /// This package has no native code. Apps depend on a backend package, such
 /// as grin_native, which implements the wallet over the grin-ffi library and
@@ -28,4 +29,6 @@ export 'src/models/grin_tx_list.dart';
 export 'src/models/grin_tx_log_entry.dart';
 export 'src/models/grin_units.dart';
 export 'src/models/grin_wallet_config.dart';
+export 'src/wallet/grin_wallet.dart';
+export 'src/wallet/grin_wallet_backend.dart';
 export 'src/wallet/grin_wallet_event.dart';

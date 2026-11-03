@@ -3,24 +3,24 @@ import 'package:grin_native/grin_native.dart';
 
 /// Cancels a running scan when the app goes to the background.
 ///
-/// It listens to [AppLifecycleListener] and calls
-/// [GrinWalletClient.cancelScan] when the app becomes `paused` or `detached`,
-/// as configured. Call [dispose] before closing the client.
+/// It listens to [AppLifecycleListener] and calls [GrinWallet.cancelScan]
+/// when the app becomes `paused` or `detached`, as configured. Call [dispose]
+/// before closing the wallet.
 ///
 /// The native scan cannot be interrupted between its batches of blocks, so
 /// the cancel takes effect when the running batch ends. See
-/// [GrinWalletClient.cancelScan].
+/// [GrinWallet.cancelScan].
 class GrinLifecycleObserver {
-  /// Watches [client]. [onError] receives every error from `cancelScan`
-  /// except the [StateError] of a closed client, which is ignored.
+  /// Watches [wallet]. [onError] receives every error from `cancelScan`
+  /// except the [StateError] of a closed wallet, which is ignored.
   GrinLifecycleObserver({
-    required GrinWalletClient client,
+    required GrinWallet wallet,
     bool cancelScanOnPause = true,
     bool cancelScanOnDetach = true,
     void Function(Object error)? onError,
     bool autoStart = true,
   }) : this.custom(
-         cancelScan: client.cancelScan,
+         cancelScan: wallet.cancelScan,
          cancelScanOnPause: cancelScanOnPause,
          cancelScanOnDetach: cancelScanOnDetach,
          onError: onError,
@@ -28,7 +28,7 @@ class GrinLifecycleObserver {
        );
 
   /// Same as the default constructor with a plain callback instead of a
-  /// client. Tests use it to run without the native library.
+  /// wallet. Tests use it to run without the native library.
   GrinLifecycleObserver.custom({
     required this._cancelScan,
     this._cancelScanOnPause = true,
@@ -72,7 +72,7 @@ class GrinLifecycleObserver {
     try {
       _cancelScan();
     } on StateError {
-      // The client is closed, so there is no scan to cancel.
+      // The wallet is closed, so there is no scan to cancel.
     } catch (error) {
       _onError?.call(error);
     }

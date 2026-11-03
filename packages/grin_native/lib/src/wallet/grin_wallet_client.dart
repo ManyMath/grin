@@ -9,8 +9,11 @@ import 'package:meta/meta.dart';
 
 import '../ffi/bindings.g.dart' as bindings;
 import '../ffi/memory.dart';
+import 'grin_native_backend.dart';
 
-/// A typed client for one open Grin wallet.
+/// A typed client for one open Grin wallet: the [GrinWallet] of the native
+/// backend. The wallet-less operations are static members here, and
+/// [GrinNativeBackend] offers them as a [GrinWalletBackend].
 ///
 /// The native library is synchronous, so every wallet operation runs in a
 /// short-lived isolate. Operations of one client run one after another in
@@ -41,7 +44,7 @@ import '../ffi/memory.dart';
 /// closed by a native finalizer when it is garbage collected, but the
 /// directory may stay busy until any operation still running has returned.
 /// Its [events] stream is then closed too, without [GrinWalletClosed].
-class GrinWalletClient implements Finalizable {
+class GrinWalletClient implements GrinWallet, Finalizable {
   /// Wraps a native wallet [handle].
   ///
   /// Only for code that obtains a handle by other means, such as the test
@@ -294,10 +297,10 @@ class GrinWalletClient implements Finalizable {
 
   // Instance members --------------------------------------------------------
 
-  /// The directory the wallet was opened from, as it was given.
+  @override
   final String walletDir;
 
-  /// The chain the wallet is on.
+  @override
   final GrinNetwork network;
 
   final int _handle;
@@ -311,12 +314,10 @@ class GrinWalletClient implements Finalizable {
   /// operation has settled.
   Future<void> _tail = Future<void>.value();
 
-  /// Whether [close] has been called.
+  @override
   bool get isClosed => _closed;
 
-  /// Events of this client. A broadcast stream: listen before the action
-  /// whose events you want. It ends after [GrinWalletClosed], or without it
-  /// when the native close in [close] failed.
+  @override
   Stream<GrinWalletEvent> get events => _events.stream;
 
   /// The native handle. For the test harness only.
@@ -367,9 +368,7 @@ class GrinWalletClient implements Finalizable {
   /// this client.
   void _keepAlive() {}
 
-  /// The address at derivation [index].
-  ///
-  /// Throws [ArgumentError] unless [index] is between 0 and 4294967295.
+  @override
   Future<GrinAddressInfo> getAddress({int index = 0}) {
     _ensureOpen();
     final nativeIndex = requireU32(index, 'index');
@@ -377,20 +376,14 @@ class GrinWalletClient implements Finalizable {
     return _enqueue(() => _getAddress(handle, nativeIndex));
   }
 
-  /// The tip of the chain according to the wallet's node.
+  @override
   Future<GrinChainTip> getChainHeight() {
     _ensureOpen();
     final handle = _handle;
     return _enqueue(() => _getChainHeight(handle));
   }
 
-  /// The balance.
-  ///
-  /// With [refreshFromNode] the wallet first updates its outputs and
-  /// transactions from the node. If the node cannot be reached, the stored
-  /// state comes back with `refreshedFromNode` false. [minimumConfirmations]
-  /// is the depth an output needs to count as spendable, and must not be
-  /// negative ([ArgumentError]).
+  @override
   Future<GrinBalance> getBalance({
     bool refreshFromNode = true,
     int minimumConfirmations = 10,
@@ -406,14 +399,7 @@ class GrinWalletClient implements Finalizable {
     );
   }
 
-  /// Scans the chain from [startHeight] (0 means from the first block) and
-  /// repairs the wallet's outputs. Transaction history is kept.
-  ///
-  /// It can take long. Poll [scanProgress] meanwhile. [cancelScan] stops it
-  /// at the end of the batch being scanned, and this call then throws
-  /// [GrinCancelledException]. Emits [GrinScanStarted] and
-  /// [GrinScanFinished]. Throws [ArgumentError] for a negative
-  /// [startHeight].
+  @override
   Future<GrinScanResult> scan({
     int startHeight = 0,
     bool deleteUnconfirmed = false,
@@ -443,10 +429,7 @@ class GrinWalletClient implements Finalizable {
     });
   }
 
-  /// The progress of the current or most recent scan.
-  ///
-  /// A direct call that is not queued and takes no wallet lock, so it
-  /// answers while a scan runs.
+  @override
   GrinScanProgress scanProgress() {
     _ensureOpen();
     return GrinScanProgress.fromJson(
@@ -456,45 +439,27 @@ class GrinWalletClient implements Finalizable {
     );
   }
 
-  /// Asks a running scan to stop. A direct call that is not queued.
-  ///
-  /// The native scan checks for a cancel between its batches of 10,001
-  /// blocks, so a running [scan] stops at the next batch boundary and its
-  /// future completes with [GrinCancelledException], whose `details` carry
-  /// the last saved `scanned_height`. With no scan running this does
-  /// nothing; the next scan runs normally.
+  @override
   void cancelScan() {
     _ensureOpen();
     unwrapFfiResult(bindings.grin_wallet_scan_cancel(_handle));
   }
 
-  /// Re-encrypts the wallet seed with [newPassword].
-  ///
-  /// Throws [GrinInvalidPasswordException] if [oldPassword] is wrong.
+  @override
   Future<void> changePassword(String oldPassword, String newPassword) {
     _ensureOpen();
     final handle = _handle;
     return _enqueue(() => _changePassword(handle, oldPassword, newPassword));
   }
 
-  /// The recovery phrase, after checking [password].
-  ///
-  /// Throws [GrinInvalidPasswordException] if the password is wrong. The
-  /// returned string cannot be wiped from memory, so keep it as briefly as
-  /// you can.
+  @override
   Future<String> getMnemonic(String password) {
     _ensureOpen();
     final handle = _handle;
     return _enqueue(() => _getMnemonic(handle, password));
   }
 
-  /// Points the wallet at another node, and optionally a SOCKS proxy,
-  /// without reopening the database. Nothing contacts the node.
-  ///
-  /// Like every operation it runs in the queue, so it starts only after the
-  /// operations before it. To apply it during a long scan, call [cancelScan]
-  /// first; the scan then stops at its next batch boundary. See section 8 of
-  /// docs/ffi-json.md.
+  @override
   Future<void> updateNetwork({
     required String nodeUrl,
     String? apiSecret,
@@ -507,22 +472,7 @@ class GrinWalletClient implements Finalizable {
     );
   }
 
-  /// Computes the fee and the inputs a send of [amount] would use, without
-  /// saving or locking anything.
-  ///
-  /// Refreshes the wallet's outputs from the node first, then selects inputs
-  /// exactly as `initSend` would. With [amountIncludesFee] the fee is taken
-  /// out of [amount], otherwise it is added on top. [selectionStrategyIsAll]
-  /// spends every spendable output (up to 500) instead of only as many of
-  /// the smallest as needed.
-  ///
-  /// Throws [ArgumentError] when [amount] is negative or does not fit the
-  /// native 64-bit argument (values from 2^63 up are refused, which no real
-  /// balance reaches), or when [minimumConfirmations] is negative. Throws
-  /// [GrinInvalidArgumentException] for an amount of
-  /// 0, [GrinInsufficientFundsException] when the funds do not cover it and
-  /// [GrinTransactionException] when [amountIncludesFee] and the amount is
-  /// below the fee.
+  @override
   Future<GrinFeeEstimate> estimateFee({
     required BigInt amount,
     int minimumConfirmations = 10,
@@ -547,25 +497,14 @@ class GrinWalletClient implements Finalizable {
     );
   }
 
-  /// The wallet's transaction log, joined with the Slatepack and
-  /// counterparty data the library keeps for each transaction.
-  ///
-  /// With [refreshFromNode] the outputs and transaction states are updated
-  /// from the node first. If the node cannot be reached, the stored history
-  /// comes back with `refreshedFromNode` false. Entries are in log order.
+  @override
   Future<GrinTxList> getTransactions({bool refreshFromNode = true}) {
     _ensureOpen();
     final handle = _handle;
     return _enqueue(() => _getTransactions(handle, refreshFromNode));
   }
 
-  /// Reads a Slatepack with this wallet's keys, without changing anything.
-  ///
-  /// An encrypted Slatepack is decrypted with the wallet's address key at
-  /// [secretIndex], which must be between 0 and 4294967295 ([ArgumentError]
-  /// otherwise). Leading and trailing whitespace is ignored. Throws
-  /// [GrinSlateException] when the text cannot be parsed or decrypted. Use
-  /// [decodeSlatepackWithoutWallet] when no wallet is at hand.
+  @override
   Future<GrinSlateInfo> decodeSlatepack(String armored, {int secretIndex = 0}) {
     _ensureOpen();
     final nativeSecretIndex = requireU32(secretIndex, 'secretIndex');
@@ -585,18 +524,7 @@ class GrinWalletClient implements Finalizable {
     GrinNetwork network,
   ) => _decodeSlatepack(0, network.value, armored, 0);
 
-  /// Starts a send and returns the S1 Slatepack to hand to the recipient.
-  ///
-  /// Expects no earlier state. Locks the inputs now, unless
-  /// [GrinSendArgs.lateLock] is set, so the funds are unavailable until the
-  /// send is finalized or cancelled; cancel one that will not be completed
-  /// with [cancelTransaction]. With [GrinSendArgs.recipientAddress] the S1 is
-  /// encrypted to that address and a payment proof is requested.
-  ///
-  /// Throws [ArgumentError] for an amount that does not fit the native
-  /// argument, [GrinInvalidArgumentException], [GrinJsonException],
-  /// [GrinInvalidAddressException], [GrinInsufficientFundsException],
-  /// [GrinTransactionException] or [GrinSlateException].
+  @override
   Future<GrinSlatepack> initSend(GrinSendArgs args) {
     _ensureOpen();
     final handle = _handle;
@@ -604,19 +532,7 @@ class GrinWalletClient implements Finalizable {
     return _enqueue(() => _initSend(handle, argsJson));
   }
 
-  /// Sends directly to the recipient's wallet over HTTP or Tor and finalizes
-  /// the transaction in one call.
-  ///
-  /// Expects no earlier state. The inputs are locked only after the recipient
-  /// has answered, so a failed exchange leaves nothing locked and nothing in
-  /// the history. A target that resolves to `.onion` needs a SOCKS proxy in
-  /// the wallet's network settings (see [updateNetwork]). With
-  /// [GrinHttpSendArgs.post] the transaction is broadcast.
-  ///
-  /// Throws [GrinHttpException] when the other wallet cannot be reached or
-  /// refuses the slate, and [GrinNodeException] (with `slate_id` in its
-  /// details) when the transaction was finalized but the broadcast failed;
-  /// use [repost] for that one. Other errors are as for [initSend].
+  @override
   Future<GrinSendResult> sendHttp(GrinHttpSendArgs args) {
     _ensureOpen();
     final handle = _handle;
@@ -624,36 +540,14 @@ class GrinWalletClient implements Finalizable {
     return _enqueue(() => _sendHttp(handle, argsJson));
   }
 
-  /// Answers an S1 Slatepack and returns the S2 to hand back to the sender.
-  ///
-  /// Expects an S1, plain or encrypted to this wallet. Adds this wallet's
-  /// output and signature, so a new received transaction appears in the log.
-  /// When the S1 names its sender, the S2 is encrypted to it. Locks no
-  /// inputs.
-  ///
-  /// Throws [GrinSlateException] when the text is not an S1 or cannot be
-  /// decrypted, and [GrinTransactionException] when this wallet has already
-  /// received it or it has expired.
+  @override
   Future<GrinSlatepack> receiveSlatepack(String armoredS1) {
     _ensureOpen();
     final handle = _handle;
     return _enqueue(() => _receiveSlatepack(handle, armoredS1));
   }
 
-  /// Finishes a send: takes the S2 and returns the final transaction.
-  ///
-  /// Expects the S2 of a send this wallet started with [initSend], whose
-  /// inputs are already locked (or locks them now with
-  /// [GrinSendArgs.lateLock]). With [broadcast] the transaction is posted to
-  /// the node; [fluff] skips the Dandelion stem phase. Without it the
-  /// transaction is stored and [repost] can broadcast it later.
-  ///
-  /// Throws [GrinSlateException] when the text is not an S2,
-  /// [GrinNotFoundException] when this wallet has no open transaction for the
-  /// slate (unknown, or already finalized), [GrinTransactionException] for a
-  /// bad signature, a payment proof mismatch or an expired transaction, and
-  /// [GrinNodeException] (with `slate_id` in its details) when the broadcast
-  /// fails after the transaction was finalized.
+  @override
   Future<GrinFinalizeResult> finalizeSlatepack(
     String armoredS2, {
     bool broadcast = true,
@@ -666,16 +560,7 @@ class GrinWalletClient implements Finalizable {
     );
   }
 
-  /// Requests a payment: returns the I1 Slatepack to hand to the payer.
-  ///
-  /// Expects no earlier state. Adds a received transaction to the log at
-  /// once, which [cancelTransaction] can remove if the payer never answers.
-  /// Locks no inputs. With [GrinInvoiceArgs.recipientAddress] the I1 is
-  /// encrypted to the payer.
-  ///
-  /// Throws [ArgumentError] for an amount that does not fit the native
-  /// argument, [GrinInvalidArgumentException], [GrinJsonException],
-  /// [GrinInvalidAddressException] or [GrinTransactionException].
+  @override
   Future<GrinSlatepack> issueInvoice(GrinInvoiceArgs args) {
     _ensureOpen();
     final handle = _handle;
@@ -683,16 +568,7 @@ class GrinWalletClient implements Finalizable {
     return _enqueue(() => _issueInvoice(handle, argsJson));
   }
 
-  /// Pays an invoice: returns the I2 Slatepack to hand back to the payee.
-  ///
-  /// Expects an I1. Selects inputs, signs, and locks the inputs in the same
-  /// call, so the funds are unavailable until the invoice is finalized or the
-  /// transaction is cancelled with [cancelTransaction]. The I2 is encrypted
-  /// to the payee when the I1 named one.
-  ///
-  /// Throws [GrinSlateException] when the text is not an I1,
-  /// [GrinInsufficientFundsException], and [GrinTransactionException] when
-  /// the invoice was already paid or cancelled, or has expired.
+  @override
   Future<GrinSlatepack> processInvoice(
     String armoredI1,
     GrinProcessInvoiceArgs args,
@@ -703,12 +579,7 @@ class GrinWalletClient implements Finalizable {
     return _enqueue(() => _processInvoice(handle, armoredI1, argsJson));
   }
 
-  /// Finishes an invoice: takes the I2 and returns the final transaction.
-  ///
-  /// Expects the I2 of an invoice this wallet issued with [issueInvoice].
-  /// Locks nothing new (the payer's inputs were locked by [processInvoice]).
-  /// [broadcast] and [fluff] work as in [finalizeSlatepack], and so do the
-  /// errors, with [GrinSlateException] for anything that is not an I2.
+  @override
   Future<GrinFinalizeResult> finalizeInvoice(
     String armoredI2, {
     bool broadcast = true,
@@ -721,19 +592,7 @@ class GrinWalletClient implements Finalizable {
     );
   }
 
-  /// Broadcasts the stored finalized transaction again.
-  ///
-  /// Name the transaction by [txId] (the `id` of a [GrinTxLogEntry]), by
-  /// [slateId], or both; at least one is required, otherwise this throws
-  /// [GrinInvalidArgumentException]. When both are given, [txId] is looked
-  /// up first and [slateId] is the fallback. A negative [txId] throws
-  /// [ArgumentError]; pass null to leave it out. The transaction is validated before it is posted.
-  ///
-  /// Only a transaction that is finalized and not yet confirmed can be
-  /// reposted; never repost a confirmed one. Throws [GrinNotFoundException]
-  /// when there is no such transaction, nothing is stored for it or the
-  /// stored copy is not finalized, and [GrinNodeException] when the node
-  /// refuses it. Changes no wallet state.
+  @override
   Future<void> repost({int? txId, String? slateId, bool fluff = false}) {
     _ensureOpen();
     final handle = _handle;
@@ -741,20 +600,7 @@ class GrinWalletClient implements Finalizable {
     return _enqueue(() => _repost(handle, nativeTxId, slateId, fluff));
   }
 
-  /// Cancels an unconfirmed sent, received or reverted transaction.
-  ///
-  /// Name the transaction by [txId], by [slateId], or both (both must then
-  /// match the same transaction); at least one is required, otherwise this
-  /// throws [GrinInvalidArgumentException]. A negative [txId] throws
-  /// [ArgumentError]; pass null to leave it out. Inputs the transaction locked become spendable again and its
-  /// new outputs are dropped; the log entry becomes
-  /// [GrinTxType.txSentCancelled] or [GrinTxType.txReceivedCancelled].
-  ///
-  /// The wallet refreshes from the node first and refuses to cancel without
-  /// it, so an unreachable node throws [GrinNodeException]. Throws
-  /// [GrinNotFoundException] for an unknown transaction and
-  /// [GrinTransactionException] when it is confirmed, a coinbase or already
-  /// cancelled.
+  @override
   Future<void> cancelTransaction({int? txId, String? slateId}) {
     _ensureOpen();
     final handle = _handle;
@@ -762,15 +608,7 @@ class GrinWalletClient implements Finalizable {
     return _enqueue(() => _cancelTransaction(handle, nativeTxId, slateId));
   }
 
-  /// Exports the payment proof of a finalized send that asked for one.
-  ///
-  /// Name the transaction by [txId], by [slateId], or both (both must then
-  /// match). Uses the stored history and does not contact the node. Only the
-  /// sender has a proof, and only when it passed a recipient address to
-  /// [initSend]. Throws [GrinNotFoundException] when there is no such
-  /// transaction, no proof, or the transaction is not finalized yet,
-  /// [GrinInvalidArgumentException] when neither identifier is given and
-  /// [ArgumentError] for a negative [txId].
+  @override
   Future<GrinPaymentProof> exportPaymentProof({int? txId, String? slateId}) {
     _ensureOpen();
     final handle = _handle;
@@ -778,17 +616,7 @@ class GrinWalletClient implements Finalizable {
     return _enqueue(() => _exportPaymentProof(handle, nativeTxId, slateId));
   }
 
-  /// Checks a payment proof and says whether this wallet is its sender or
-  /// recipient.
-  ///
-  /// Looks up the kernel on the chain through the wallet's node and checks
-  /// both signatures, then compares the addresses with this wallet's index 0
-  /// address. Both flags false means the proof is valid but belongs to two
-  /// other wallets. The addresses must be for the wallet's network.
-  ///
-  /// Throws [GrinTransactionException] when a signature does not verify or
-  /// the kernel is not on the chain, [GrinJsonException] when the proof is
-  /// malformed and [GrinNodeException] when the node cannot be reached.
+  @override
   Future<GrinPaymentProofVerification> verifyPaymentProof(
     GrinPaymentProof proof,
   ) {
@@ -798,27 +626,10 @@ class GrinWalletClient implements Finalizable {
     return _enqueue(() => _verifyPaymentProof(handle, proofJson));
   }
 
-  /// Closes the wallet.
-  ///
-  /// Safe to call more than once: every call returns the same future. In
-  /// order, it
-  /// 1. marks the client closed, so new calls throw [StateError],
-  /// 2. calls [cancelScan], so a running scan stops at its next batch
-  ///    boundary and a scan still waiting in the queue is skipped,
-  /// 3. waits for the operations already queued, ignoring their errors,
-  /// 4. detaches the native finalizer and the [events] finalizer,
-  /// 5. closes the native handle, emits [GrinWalletClosed] if that
-  ///    worked, and then closes the [events] stream.
-  ///
-  /// If the native close fails, the [events] stream is still closed, without
-  /// [GrinWalletClosed], and the returned future completes with the error.
-  ///
-  /// Step 3 can still take up to one scan batch (10,001 blocks and their
-  /// node requests). See section 8 of docs/ffi-json.md.
-  ///
-  /// When the returned future completes, the wallet directory is free to be
-  /// opened again. The [events] stream is closed without waiting for its
-  /// listeners, so a paused listener cannot stall this future.
+  /// Closes the wallet as [GrinWallet.close] describes. Releasing the
+  /// backend's hold means detaching the native finalizer and the [events]
+  /// finalizer; closing the wallet means closing the native handle.
+  @override
   Future<void> close() => _closing ??= _close();
 
   Future<void> _close() async {

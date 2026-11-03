@@ -235,7 +235,7 @@ final class GrinWalletBusyException extends GrinException {
   /// null if the native library did not say.
   ///
   /// This is not the directory the caller passed: it never equals
-  /// `GrinWalletClient.walletDir`, and two different spellings of one
+  /// `GrinWallet.walletDir`, and two different spellings of one
   /// wallet give the same value here. [GrinWalletNotFoundException.walletDir]
   /// and [GrinWalletExistsException.walletDir], by contrast, carry the
   /// directory as the caller gave it.
