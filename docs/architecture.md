@@ -1399,6 +1399,29 @@ Documentation corrections from the same review: the root README no longer says e
 The first full run after the fixes failed one assertion I had written for the new field: the in-process test chain mines a posted transaction into a block at once, so a reposted transaction confirms in the block the post created (6), not in the block mined afterwards (7). The assertion was corrected; the Rust, format and clippy stages were rerun green on their own after that, the other stages being unaffected by a test-file change.
 
 
+### Rerun after the grin and grin_native split (2026-11-03, D12)
+
+Same machine. `dart run tool/ci.dart` on branch `grin-native-split`, compared with a baseline run of the same command on `grin-v1` (536a36a) taken first:
+
+| Stage | Baseline (`grin-v1`) | After the split |
+|---|---|---|
+| rust-dups, rust-fmt, rust-clippy | ok | ok |
+| rust-test | 42, 14, 8, 4 passed | 42, 14, 8, 4 passed |
+| rust-release, android | nm: 35 standard, 0 test symbols on the host and on aarch64, armv7 and x86_64 Android | the same |
+| bindings | no diff | no diff (regenerated once for the new asset id) |
+| dart-analyze | packages/grin: no issues | packages/grin and grin_native lib, test, hook: no issues |
+| dart-test | packages/grin: 119 passed, 2 skipped | packages/grin: 38 passed; packages/grin_native: 84 passed, 2 skipped |
+| web-smoke | (new) | `web_smoke ok` from node |
+| consumer | (new) | no issues; 1 passed |
+| flutter-analyze, flutter-test | no issues; 8 passed | no issues; 8 passed (in the example) |
+| flutter-build | linux bundle and app-release.apk (28.0MB) | the same, bundle `grin_native_example` |
+
+The 119 baseline Dart tests are the 35 that stayed in `grin` (models 9, tx_models 26) and the 84 that moved to `grin_native`, with the same count per file; the 3 new ones are `grin`'s `wallet_interface_test.dart`. The 2 skips are `live_node_test.dart` and `regtest_test.dart`, which need their environment variables. The 8 Flutter tests are the 7 helper tests, now in `example/test/helpers_test.dart`, and the re-export test, now `example/test/widget_test.dart`.
+
+`tool/regtest.sh` passed against the fork at b5d756b: 1 test, 3 proxy connections. After deleting `.dart_tool/hooks_runner`, `dart test` in `packages/grin` passed and no hooks ran at all. A `dart compile js` of a program that imports `package:grin_native` fails with "Dart library 'dart:ffi' is not available on this platform", which is the failure web-smoke exists to catch in `grin`.
+
+Two failures on the first full run were environmental and are fixed: the analysis server crashed sending a memory-usage analytics event without network when `grin_native` was analyzed together with its nested example and consumer packages (dart-analyze now analyzes only `lib`, `test` and `hook` there), and `flutter build linux` refused the CMake cache that `git mv` had carried over from the old example path (the ignored `example/build` directory was deleted).
+
 ### D9. Review items left as they are, and why
 
 Of the review nits (section 13), three were deliberately not changed:
