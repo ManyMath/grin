@@ -16,8 +16,8 @@
 //                    NDK 28.2 through cargo-ndk; nm on each
 //   bindings         tool/regen_bindings.dart --check (header and ffigen output
 //                    are up to date)
-//   dart-analyze     dart analyze --fatal-infos in packages/grin and
-//                    packages/grin_native
+//   dart-analyze     dart analyze --fatal-infos in packages/grin and in
+//                    lib, test and hook of packages/grin_native
 //   dart-format      dart format --set-exit-if-changed on the Dart sources
 //   dart-test        dart test in packages/grin (pure Dart) and
 //                    packages/grin_native (test_utils on)
@@ -207,7 +207,15 @@ Future<void> bindings() =>
 
 Future<void> dartAnalyze() async {
   await _run('dart', ['analyze', '--fatal-infos'], grin);
-  await _run('dart', ['analyze', '--fatal-infos'], grinNative);
+  // Only grin_native's own sources: example/ and test_consumer/ are
+  // packages of their own with their own stages.
+  await _run('dart', [
+    'analyze',
+    '--fatal-infos',
+    'lib',
+    'test',
+    'hook',
+  ], grinNative);
 }
 
 Future<void> dartFormat() => _run('dart', [
