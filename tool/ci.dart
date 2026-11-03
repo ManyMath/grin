@@ -21,6 +21,9 @@
 //   dart-format      dart format --set-exit-if-changed on the Dart sources
 //   dart-test        dart test in packages/grin (pure Dart) and
 //                    packages/grin_native (test_utils on)
+//   web-smoke        dart compile js of packages/grin/tool/web_smoke.dart,
+//                    run with node when it is installed: grin has no native
+//                    dependency
 //   flutter-analyze  flutter analyze in packages/grin_native/example
 //   flutter-test     flutter test in packages/grin_native/example
 //   flutter-build    flutter build linux and apk (arm64) of the example
@@ -65,6 +68,7 @@ Future<void> main(List<String> args) async {
     'dart-analyze': dartAnalyze,
     'dart-format': dartFormat,
     'dart-test': dartTest,
+    'web-smoke': webSmoke,
     'flutter-analyze': flutterAnalyze,
     'flutter-test': flutterTest,
     'flutter-build': flutterBuild,
@@ -217,6 +221,32 @@ Future<void> dartFormat() => _run('dart', [
 Future<void> dartTest() async {
   await _run('dart', ['test'], grin);
   await _run('dart', ['test'], grinNative);
+}
+
+Future<void> webSmoke() async {
+  final out = await Directory.systemTemp.createTemp('grin_web_smoke_');
+  try {
+    final js = '${out.path}/web_smoke.js';
+    await _run('dart', [
+      'compile',
+      'js',
+      '-o',
+      js,
+      'tool/web_smoke.dart',
+    ], grin);
+    final node = await Process.run('which', ['node']);
+    if (node.exitCode != 0) {
+      stdout.writeln('node not found; compiled only');
+      return;
+    }
+    final result = await _capture('node', [js], root);
+    stdout.write(result);
+    if (!result.contains('web_smoke ok')) {
+      throw _GateFailure('web_smoke.js did not print "web_smoke ok"');
+    }
+  } finally {
+    await out.delete(recursive: true);
+  }
 }
 
 Future<void> flutterAnalyze() => _run('flutter', ['analyze'], example);
