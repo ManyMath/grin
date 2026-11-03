@@ -1,22 +1,22 @@
-# Grin Rust FFI (`grin-ffi`), Pure Dart (`grin`), & Flutter (`grin_flutter`) Architecture Plan
+# Grin Rust FFI (`grin-ffi`), Pure Dart Contract (`grin`), & Native Backend (`grin_native`) Architecture Plan
 
 ## 1. Executive Summary & Architectural Decisions
 
 This document defines the clean-room architecture and implementation plan (**Phases 1–4**) for **Grin** in `/home/user/src/grin`, incorporating all review resolutions from Rounds 1 and 2:
 
 1. **Single Monorepo at `/home/user/src/grin`**:
-   - Combines a Cargo workspace (`crates/grin-ffi`) and a **native Dart pub workspace** (`workspace: [packages/grin, packages/grin_flutter, packages/grin_flutter/example]`, **no Melos**).
+   - Combines a Cargo workspace (`crates/grin-ffi`) and a **native Dart pub workspace** (`workspace: [packages/grin, packages/grin_native, packages/grin_native/example, packages/grin_native/test_consumer]`, **no Melos**).
    - All `pubspec.yaml` files declare `publish_to: none`.
 2. **Thin `cypherstack/grin-wallet` Fork (`v5.5.1`) with `HttpSlateSender` Split, `tor` Gating, and `ring`+`webpki-roots` `rustls`**:
    - Rather than copying ~2,000 lines of `node_clients/http.rs` (455 lines), `client_utils/` (595 lines), and `lifecycle/` (873 lines) into `grin-ffi` and owning seed encryption forever, we maintain a minimal fork `cypherstack/grin-wallet` (branched from `mimblewimble/grin-wallet` `v5.5.1`, commit `f097811ee953fc81be4e70435d6ef845b6b2e8c9`, on branch `optional-tor-rustls`, fork commits `64d361f2` and `b5d756bd`, the latter pinned). The fork is a separate repository checked out locally at `/home/user/src/grin-wallet` (outside the monorepo; remote `cypherstack` = `ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git`), and `grin-ffi` consumes it as a git dependency pinned by `rev`.
    - **Ungated `HttpSlateSender` Split**: In upstream `v5.5.1`, `TorSlateSender` ([tor.rs](file:///home/user/src/grin-wallet/impls/src/adapters/tor.rs)) was the only `SlateSender`, so gating all of `adapters/tor.rs` would remove HTTP/SOCKS5 slate sending. The fork extracts the `arti`/process-free logic (`check_other_version`, `post` via `Client` with optional `(SocketAddr, "socks5h://")` proxy, and `impl SlateSender`) into an ungated [`HttpSlateSender`](file:///home/user/src/grin-wallet/impls/src/adapters/http.rs) re-exported from `grin_wallet_impls`, while `TorSlateSender` (gated behind `#[cfg(feature = "tor")]`) delegates its HTTP/JSON-RPC logic to `HttpSlateSender`.
    - **Intentional TLS Stack (`reqwest/rustls-no-provider` + `ring` + `webpki-roots`)**: `reqwest` 0.13.4's default `rustls` feature pulls in `aws-lc-rs` (`aws-lc-sys` C/CMake build step on every target) and `rustls-platform-verifier` (which requires Android JNI initialization and bundled Java components); see `reqwest-0.13.4/Cargo.toml` L169-177 in the cargo registry (`rustls = ["__rustls-aws-lc-rs", "dep:rustls-platform-verifier", "__rustls"]`, `rustls-no-provider = ["dep:rustls-platform-verifier", "__rustls"]`). The fork's `rustls` feature enables `reqwest/rustls-no-provider`, `rustls` (`0.23`, `features = ["ring", "std", "tls12"]`), and `webpki-roots` (`1.0`), wired via `ClientBuilder::tls_backend_preconfigured(tls_config)` (`reqwest-0.13.4/src/async_impl/client.rs` L2192) in [`Client::configure_tls`](file:///home/user/src/grin-wallet/impls/src/client_utils/client.rs#L72-L90). Precisely: this drops `aws-lc-rs` from the graph, but `rustls-no-provider` still links `rustls-platform-verifier`; the preconfigured `ClientConfig` means the verifier is never constructed at runtime, which is what matters on Android (comment at `client.rs` L66-70).
    - **Complete `tor` Dependency Gating**: All `tor/`-only dependencies (`arti-client`, `tor-*`, `fs-mistrust`, `fslock-guard`, `sysinfo`, `timer`, `hyper`, `hyper-util`, `http-body-util`, `bytes`, `ed25519-dalek`, `regex`, `base64`, `url`, `sha2`) are gated under the `tor` feature (which stays in `default = ["tor", "native-tls"]` for upstream compatibility).
-3. **Single Native-Assets Build Hook in `packages/grin` Using `hooks.user_defines.grin`**:
-   - In Dart Native Assets (`code_assets` + `@ffi.Native`), a `@Native` asset (`assetId: 'package:grin/src/ffi/bindings.g.dart'`) **must** be emitted by the `hook/build.dart` of the package that declares it (`input.packageName == 'grin'`).
-   - Therefore, **intentionally differing from the original prompt's framing where the Flutter package provides the native build**, the single `hook/build.dart` lives in `packages/grin`.
-   - The hook is a plain `native_toolchain_rust` `RustBuilder` build of `rust/` with the host toolchain (D1, D11). It reads one user-define under `hooks.user_defines.grin`: `test_utils` (bool), which adds `--features test-utils` for this repository's tests and must stay unset in an app. Prebuilt, hash-verified release artifacts are a later step, planned on [dnix](https://github.com/cypherstack/dnix) rather than native-build-kit (D11). The plan's earlier kit-based design (a `build` user-define with prebuilt, Nix source, Nix dev and cargo modes) was built, verified and then removed on 2026-11-02 at the user's direction.
-   - `packages/grin_flutter` holds Flutter-only glue: default platform wallet directory helper (`path_provider`), an app lifecycle observer (`AppLifecycleListener`), and full re-exports of `package:grin/grin.dart`.
+3. **Single Native-Assets Build Hook in `packages/grin_native` Using `hooks.user_defines.grin_native`**:
+   - In Dart Native Assets (`code_assets` + `@ffi.Native`), a `@Native` asset (`assetId: 'package:grin_native/src/ffi/bindings.g.dart'`) **must** be emitted by the `hook/build.dart` of the package that declares it (`input.packageName == 'grin_native'`).
+   - Therefore, **intentionally differing from the original prompt's framing where the Flutter package provides the native build**, the single `hook/build.dart` lives in the native Dart package, `packages/grin_native` (first built inside `packages/grin`; D12 moved it).
+   - The hook is a plain `native_toolchain_rust` `RustBuilder` build of `rust/` with the host toolchain (D1, D11). It reads one user-define under `hooks.user_defines.grin_native`: `test_utils` (bool), which adds `--features test-utils` for this repository's tests and must stay unset in an app. Prebuilt, hash-verified release artifacts are a later step, planned on [dnix](https://github.com/cypherstack/dnix) rather than native-build-kit (D11). The plan's earlier kit-based design (a `build` user-define with prebuilt, Nix source, Nix dev and cargo modes) was built, verified and then removed on 2026-11-02 at the user's direction.
+   - `packages/grin` is the backend-neutral contract in pure Dart: models, exceptions, units, events and the `GrinWalletApi` and `GrinWalletBackend` interfaces. `grin_native` depends on it and re-exports it in full, so an app lists `grin_native` alone. There is no Flutter package; Flutter apps depend on `grin_native` directly (section 6, D12).
 4. **v1 Transport Scope (Outbound HTTP/Tor + Offline Slatepacks; No Inbound Listener)**:
    - Stack Wallet's `tor_ffi_plugin` (pinned at `e30ed0d386a40ee4a999aeaf57aafd32921d601e` in its pubspec L68-71; `rust/Cargo.toml` L18 at that ref: `arti-client = { version = "0.47.0", features = ["static", "onion-service-client"] }`) enables only the client side of onion services, not `onion-service-service`, so it cannot host an inbound v3 `.onion` hidden service.
    - Therefore, **inbound synchronous Tor/HTTP receive is out of scope for v1** (no `listener.rs` in `grin-ffi`).
@@ -44,64 +44,72 @@ This document defines the clean-room architecture and implementation plan (**Pha
 ## 3. Repository & Workspace Layout (`/home/user/src/grin`)
 
 ```text
-/home/user/src/grin/                     (as built; D6 moved the Cargo workspace under packages/grin)
+/home/user/src/grin/                     (as built; D6 put the Cargo workspace under packages/grin/rust, D12 moved it to packages/grin_native/rust)
 ├── pubspec.yaml                        # Root pub workspace (publish_to: none; workspace: [...]; no Melos)
-│                                       # hooks.user_defines.grin: test_utils: true for in-repo builds
+│                                       # hooks.user_defines.grin_native: test_utils: true for in-repo builds
 ├── pubspec.lock
 ├── analysis_options.yaml               # Shared strict lint rules
 ├── README.md                           # Layout, gates, how the fork is fetched
 ├── docs/
 │   ├── architecture.md                 # This file
-│   └── ffi-json.md                     # JSON contract between grin-ffi and package:grin
+│   └── ffi-json.md                     # JSON contract between grin-ffi and package:grin_native
 ├── tool/
-│   ├── ci.dart                         # Every gate in one command (rust, android, bindings, dart, flutter, nm gate)
+│   ├── ci.dart                         # Every gate in one command (rust, android, bindings, dart, web-smoke, consumer, flutter, nm gate)
 │   ├── regen_bindings.dart             # cargo build with GRIN_FFI_WRITE_HEADER=1 -> ffigen -> dart format; --check
 │   ├── regtest.sh, socks5_test_proxy.py # private chain run (section 13)
 │   └── verify-apple.sh, verify-windows.ps1 # host release builds and the symbol gate on a Mac or on Windows
 └── packages/
-    ├── grin/                           # Pure Dart package (name: grin, publish_to: none)
-    │   ├── pubspec.yaml                # no flutter sdk; native_toolchain_rust 1.0.6
-    │   ├── ffigen.yaml                 # @ffi.Native bindings, asset id package:grin/src/ffi/bindings.g.dart
-    │   ├── hook/
-    │   │   └── build.dart              # RustBuilder build of rust/ (test_utils -> --features test-utils)
-    │   ├── rust/                       # The grin-ffi crate, a single-crate Cargo workspace
-    │   │   ├── Cargo.toml, Cargo.lock, rust-toolchain.toml, .cargo/config.toml
-    │   │   ├── build.rs, cbindgen.toml # Header generation
-    │   │   ├── include/grin_ffi.h      # The committed C header (the ABI contract)
-    │   │   ├── src/                    # lib, error, handle, logging, config, lifecycle, address, balance,
-    │   │   │                           # scan, sidecar, slatepack, transaction, proof, test_support
-    │   │   └── tests/                  # header_test, ffi_e2e_test, ffi_tx_test
+    ├── grin/                           # Pure Dart contract (name: grin, publish_to: none)
+    │   ├── pubspec.yaml                # no runtime dependencies, no flutter sdk, no hook
     │   ├── lib/
-    │   │   ├── grin.dart, testing.dart
-    │   │   └── src/{ffi,errors,internal,models,wallet,testing}/
-    │   ├── test/                       # mnemonic_address, bounds_and_panic, wallet_lifecycle, test_chain,
-    │   │                               # slatepack_e2e, models, tx_models, memory, arguments, live_node, regtest
+    │   │   ├── grin.dart               # models, exceptions, units, events, GrinWalletApi, GrinWalletBackend
+    │   │   ├── codec.dart              # JSON helpers for backend packages; not exported by grin.dart
+    │   │   └── src/{errors,internal,models,wallet}/
+    │   ├── test/                       # models, tx_models, wallet_interface (fakes of both interfaces)
+    │   ├── tool/web_smoke.dart         # compiled to JS by the web-smoke stage of tool/ci.dart
     │   └── README.md
-    └── grin_flutter/                   # Flutter glue (name: grin_flutter, publish_to: none)
-        ├── pubspec.yaml
-        ├── lib/grin_flutter.dart, lib/src/{default_paths,lifecycle_observer}.dart
-        ├── test/grin_flutter_test.dart
-        ├── README.md
-        └── example/                    # flutter create app + integration_test/app_test.dart
+    └── grin_native/                    # Native backend (name: grin_native, publish_to: none)
+        ├── pubspec.yaml                # depends on grin; native_toolchain_rust 1.0.6; no flutter sdk
+        ├── ffigen.yaml                 # @ffi.Native bindings, asset id package:grin_native/src/ffi/bindings.g.dart
+        ├── hook/
+        │   └── build.dart              # RustBuilder build of rust/ (test_utils -> --features test-utils)
+        ├── rust/                       # The grin-ffi crate, a single-crate Cargo workspace
+        │   ├── Cargo.toml, Cargo.lock, rust-toolchain.toml, .cargo/config.toml
+        │   ├── build.rs, cbindgen.toml # Header generation
+        │   ├── include/grin_ffi.h      # The committed C header (the ABI contract)
+        │   ├── src/                    # lib, error, handle, logging, config, lifecycle, address, balance,
+        │   │                           # scan, sidecar, slatepack, transaction, proof, test_support
+        │   └── tests/                  # header_test, ffi_e2e_test, ffi_tx_test
+        ├── lib/
+        │   ├── grin_native.dart        # export 'package:grin/grin.dart' plus GrinWalletClient, GrinNativeBackend
+        │   ├── testing.dart            # GrinTestChain
+        │   └── src/{ffi,wallet,testing}/
+        ├── test/                       # mnemonic_address, bounds_and_panic, wallet_lifecycle, test_chain,
+        │                               # slatepack_e2e, memory, arguments, live_node, regtest
+        ├── example/                    # Flutter app (grin_native_example) + integration_test/app_test.dart
+        │   └── lib/src/{wallet_paths,lifecycle_observer}.dart  # example code to copy
+        ├── test_consumer/              # pure Dart app shape (grin_native_test_consumer): depends on grin_native alone
+        └── README.md
 ```
 
-The `cypherstack/grin-wallet` fork (`v5.5.1` + submodule `grin` `v5.5.2`) is not part of this tree. It lives in its own repository (`ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git`, branch `optional-tor-rustls`, commit `b5d756bd`; checked out locally at `/home/user/src/grin-wallet`) and is pulled in by `packages/grin/rust/Cargo.toml` as a `rev`-pinned git dependency (see 4.1).
+The `cypherstack/grin-wallet` fork (`v5.5.1` + submodule `grin` `v5.5.2`) is not part of this tree. It lives in its own repository (`ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git`, branch `optional-tor-rustls`, commit `b5d756bd`; checked out locally at `/home/user/src/grin-wallet`) and is pulled in by `packages/grin_native/rust/Cargo.toml` as a `rev`-pinned git dependency (see 4.1).
 
-### 3.1 Why `packages/grin` Owns `hook/build.dart` Instead of `packages/grin_flutter`
+### 3.1 Why `packages/grin_native` Owns `hook/build.dart`
 
 > [!IMPORTANT]
-> Although the original task description framed the companion Flutter package as providing the native library/build, **Dart Native Assets (`code_assets` + `@ffi.Native`) requires the package that declares `@DefaultAsset('package:grin/src/ffi/bindings.g.dart')` to own `hook/build.dart`**, because a build hook can only emit a `CodeAsset` for its own `input.packageName` (`grin`).
+> Dart Native Assets (`code_assets` + `@ffi.Native`) requires the package that declares the `@Native` bindings to own `hook/build.dart`, because a build hook can only emit a `CodeAsset` for its own `input.packageName`. The asset id is `package:grin_native/src/ffi/bindings.g.dart`, so the hook, the bindings and the Rust crate live in `packages/grin_native`.
 >
-> Placing `hook/build.dart` in `packages/grin`:
-> - Allows **both** pure Dart (`cd packages/grin && dart test`) and Flutter (`flutter test`, `flutter run`, `flutter build` in `grin_flutter/example` or `stack_wallet`) to automatically invoke `packages/grin/hook/build.dart` and bundle `libgrin_ffi`.
-> - Keeps the build to one hook: a `native_toolchain_rust` `RustBuilder` build of `rust/`, with one `grin`-specific user-define:
+> Placing `hook/build.dart` in `packages/grin_native`:
+> - Makes native assets work in `dart test`, `dart run` and in Flutter (`flutter test`, `flutter run`, `flutter build` in `packages/grin_native/example` or `stack_wallet`) without any Flutter plugin package: the hooks runner invokes the hook of every package in the dependency graph and bundles `libgrin_ffi`.
+> - Keeps `packages/grin` pure Dart. It has no hook, no `dart:ffi`, no `dart:isolate` and no runtime dependencies, so it compiles to JavaScript (the `web-smoke` stage) and the contract can be implemented by another backend (5.2).
+> - Keeps the build to one hook: a `native_toolchain_rust` `RustBuilder` build of `rust/`, with one `grin_native`-specific user-define:
 >   ```yaml
 >   hooks:
 >     user_defines:
->       grin:
+>       grin_native:
 >         test_utils: false  # true only in this workspace's root pubspec so dart test gets --features test-utils
 >   ```
-> - Leaves `packages/grin_flutter` focused cleanly on Flutter-specific integration (default wallet storage directory via `path_provider`, `AppLifecycleListener` hooks, and re-exporting `package:grin/grin.dart`).
+> - Needs no Flutter package. The first build put the hook in `grin` and Flutter glue in a separate package; D12 moved the hook into `grin_native` and removed the Flutter package (section 6).
 
 ---
 
@@ -275,12 +283,12 @@ Every FFI function (except the `void` destructors `grin_ffi_result_free`, `grin_
 
 ---
 
-## 5. Layer 2: Pure Dart Package (`packages/grin` -> `GrinWalletClient`)
+## 5. Layer 2: Pure Dart Packages (`packages/grin` contract and `packages/grin_native` -> `GrinWalletClient`)
 
 ### 5.1 Naming Convention (`GrinWalletClient`), `this`-Free `Isolate.run` Closures, & Safe Finalization
 
 1. **Consistent Naming**:
-   - Following Stack Wallet's convention where `<Coin>Wallet` (`GrinWallet`) is the `stack_wallet` subclass of `Wallet<Grin>`, the client class in `package:grin` is named **`GrinWalletClient`** everywhere (`packages/grin/lib/src/wallet/grin_wallet_client.dart`).
+   - Following Stack Wallet's convention where `<Coin>Wallet` (`GrinWallet`) is the `stack_wallet` subclass of `Wallet<Grin>`, the client class in `package:grin_native` is named **`GrinWalletClient`** everywhere (`packages/grin_native/lib/src/wallet/grin_wallet_client.dart`). It implements the backend-neutral `GrinWalletApi` of `package:grin` (5.2).
 2. **Keeping `Isolate.run` Closures Strictly Free of `this`**:
    - `GrinWalletClient` implements `Finalizable` (with a `static final NativeFinalizer _finalizer = NativeFinalizer(bindings.addresses.grin_wallet_close_finalizer)`) and owns a `final StreamController<GrinWalletEvent> _events = StreamController.broadcast()`.
    - Because Dart `Isolate.run` rejects closures that capture a `Finalizable` instance or a `StreamController`, **every method on `GrinWalletClient` extracts `final int handle = _handle;` into a local variable before invoking a top-level static helper inside `Isolate.run`**:
@@ -317,19 +325,34 @@ Every FFI function (except the `void` destructors `grin_ffi_result_free`, `grin_
      5. Call `grin_wallet_close(handle)` via `Isolate.run` with `handle` as a local (it may run the final `Drop`, which closes LMDB), then close `_events`.
    - Because the queue is drained before step 5, no operation from this client still holds an `Arc<WalletSession>`. The registry's `Arc` is the last one, `Drop` runs inside `grin_wallet_close`, and the `OPEN_DIRS` entry is gone before `close()` completes. A reopen of the same directory after `await client.close()` therefore never sees `WalletBusy`. Only the GC-finalizer path (a client dropped without `close()` while an operation is in flight) can reach the busy state.
 5. **`WalletBusy` in Dart (Surfaced, Not Retried)**:
-   - `GrinErrorCode::WalletBusy` maps to `GrinWalletBusyException` (carrying `walletDir`) in the sealed `GrinException` hierarchy (`errors/grin_exception.dart`).
+   - `GrinErrorCode::WalletBusy` maps to `GrinWalletBusyException` (carrying `walletDir`) in the sealed `GrinException` hierarchy (`packages/grin/lib/src/errors/grin_exception.dart`).
    - `GrinWalletClient.open`, `create`, and `delete` surface it to the caller without automatic retry. The orphaned operation that holds the directory may be a long HTTP send or a scan between batches, so a bounded retry would mostly hide a leaked client instead of fixing it. Callers such as `stack_wallet` decide whether to retry, reuse an existing client, or show an error.
+
+### 5.2 The Contract (`package:grin`), the Backend (`package:grin_native`) and How to Test Against Them
+
+1. **Dependency chain**: app -> `grin_native` -> `grin`. An app lists `grin_native` alone and imports only `package:grin_native/...`; `grin` is transitive. `lib/grin_native.dart` does `export 'package:grin/grin.dart';` in full, so one import gives the models, exceptions, units, events and both interfaces, plus `GrinWalletClient` and `GrinNativeBackend`.
+2. **`grin` is pure Dart**: no build hook, no `dart:ffi`, no `dart:isolate` and no runtime dependencies (its pubspec has only `lints` and `test` as dev dependencies). The `web-smoke` stage of `tool/ci.dart` compiles `packages/grin/tool/web_smoke.dart` to JavaScript and runs it with node when installed, so any native import fails the gate.
+3. **Two interfaces**:
+   - `GrinWalletApi` (`packages/grin/lib/src/wallet/grin_wallet_api.dart`) is one open wallet: every instance operation of `GrinWalletClient` (`walletDir`, `network`, `isClosed`, `events`, `getAddress`, `getBalance`, `scan`, `scanProgress`, `cancelScan`, the send, receive, invoice and finalize operations, `repost`, `cancelTransaction`, `exportPaymentProof`, `close` and the rest).
+   - `GrinWalletBackend` (`packages/grin/lib/src/wallet/grin_wallet_backend.dart`) is what needs no open wallet, and the way to get one: `generateMnemonic`, `validateMnemonic`, `validateAddress`, `validateAddressSync`, `testNodeConnection`, `create`, `open`, `delete` and `decodeSlatepackWithoutWallet`. `create` and `open` return a `GrinWalletApi`.
+   - Native-only members stay off both interfaces: `GrinWalletClient.nativeHandle`, `runQueued`, `initLogs` and the `NativeFinalizer` and `Finalizer` machinery.
+4. **Why `GrinWalletApi` and not `GrinWallet`**: Stack Wallet's own wallet class for Grin is `GrinWallet` (section 9, and 5.1 point 1), and that class will hold a `GrinWalletApi`. The same reasoning named the client `GrinWalletClient`.
+5. **`GrinWalletClient` and `GrinNativeBackend`**: `GrinWalletClient implements GrinWalletApi, Finalizable` and keeps its name and all its static methods, so existing call sites do not change. `GrinNativeBackend` is a `const` `GrinWalletBackend` whose methods delegate to those statics, for code that should take the backend as a parameter.
+6. **`package:grin/codec.dart`** is a separate public library that `grin.dart` does not export. It exposes the JSON helpers (`lib/src/internal/json_helpers.dart`) to backend packages, so `grin_native` decodes native output with the same rules as the models and needs no `implementation_imports` ignore. Apps do not use it.
+7. **`package:grin_native/testing.dart`** exports `GrinTestChain`, the harness that creates wallets on the in-process test chain and mines blocks to them (7.1). It needs a library built with `test_utils`.
+8. **Testing app code without the native library**: app code that takes a `GrinWalletBackend` or a `GrinWalletApi` runs in a unit test against a hand-written fake that `implements` the interface, with no Rust toolchain and no library load. `packages/grin/test/wallet_interface_test.dart` shows fakes of both interfaces. The opposite direction is covered by `packages/grin_native/test_consumer` (pub name `grin_native_test_consumer`, stage `consumer`): a pure Dart package that depends on `grin_native` alone, never imports `package:grin/`, and pays by Slatepack between two wallets on the in-process test chain through `GrinWalletApi`. It proves that the single import and the re-export are enough for an app.
 
 ---
 
-## 6. Layer 3: Companion Flutter Package (`packages/grin_flutter`)
+## 6. Layer 3: Flutter Apps (No Flutter Package; `packages/grin_native/example`)
 
-Because `packages/grin/hook/build.dart` already builds/downloads and bundles `libgrin_ffi` for all Dart and Flutter targets, `packages/grin_flutter` is a lightweight Flutter package (`resolution: workspace`, `publish_to: none`) that provides:
-1. **Re-exports**: `export 'package:grin/grin.dart';`
-2. **Default Platform Wallet Directory Helper (`GrinFlutter.defaultWalletDirectory(String walletId)`)**:
-   - Uses `path_provider` (`getApplicationDocumentsDirectory()` / `getApplicationSupportDirectory()`) to compute the canonical per-wallet directory on Android, iOS, macOS, Linux, and Windows (avoiding persisting absolute iOS container UUID paths in secure storage!).
-3. **App Lifecycle Observer (`GrinLifecycleObserver`)**:
-   - Wraps Flutter's `AppLifecycleListener` to optionally cancel in-flight background scans (`client.cancelScan()`) when the mobile app transitions to `AppLifecycleState.detached` or `paused`.
+There is no Flutter package (D12). `packages/grin_native` is pure Dart plus a build hook, and native assets are built and bundled for `dart test`, `dart run`, `flutter test`, `flutter run` and `flutter build` alike, so a Flutter app lists `grin_native` in its pubspec and imports `package:grin_native/grin_native.dart`. Nothing else is needed for the library, and the app does not list `grin`.
+
+1. **The example app is the Flutter bundling gate**: `packages/grin_native/example` (`name: grin_native_example`) depends on `grin_native` only. `tool/ci.dart` analyzes it (`flutter-analyze`), runs its unit tests (`flutter-test`) and builds it for Linux and for Android arm64 (`flutter-build`), which proves the hook output is bundled into a Flutter app.
+2. **`WalletPaths` is example code to copy** (`packages/grin_native/example/lib/src/wallet_paths.dart`). `WalletPaths.defaultWalletDirectory(walletId)` uses `path_provider`'s `getApplicationSupportDirectory()` to return `<application support>/grin/<walletId>`, creates it and restricts it to the current user where the platform allows. Keeping the wallet id and recomputing the path on every open avoids persisting absolute iOS container paths. `GrinWalletConfig.walletDir` takes any directory, so an app with its own storage root (Stack Wallet, 9.3) does not need it.
+3. **`GrinLifecycleObserver` is example code to copy** (`packages/grin_native/example/lib/src/lifecycle_observer.dart`). `GrinLifecycleObserver(wallet: ...)` takes a `GrinWalletApi`, wraps Flutter's `AppLifecycleListener` and calls `cancelScan()` when the app transitions to `AppLifecycleState.paused` or `detached`. Its tests are in `example/test/helpers_test.dart`.
+
+The two helpers were part of a Flutter companion package in the first build. They are small, depend on `path_provider` and `flutter`, and an app's storage layout and lifecycle policy are its own decisions, so they are shown as example code and kept out of the library.
 
 ---
 
@@ -339,7 +362,7 @@ A wallet with 0 balance cannot initiate an `S1` send (`init_send_tx` fails with 
 
 ### 7.1 Single Test Harness (`impls::test_framework` Behind `test-utils`)
 - `grin_wallet_impls` already exports `pub mod test_framework;` (`LocalWalletClient`, `WalletProxy`, `award_blocks_to_wallet`) as part of our normal dependency on `grin_wallet_impls`.
-- In `packages/grin/rust/src/test_support.rs` (compiled under `#[cfg(feature = "test-utils")]` only; the crate's own unit tests do not need it), we manage an in-process `WalletProxy<DefaultLCProvider<LocalWalletClient, ExtKeychain>, LocalWalletClient, ExtKeychain>` backed by a real temporary `grin_chain::Chain` (`ChainTypes::AutomatedTesting`, where `COINBASE_MATURITY = 3` blocks).
+- In `packages/grin_native/rust/src/test_support.rs` (compiled under `#[cfg(feature = "test-utils")]` only; the crate's own unit tests do not need it), we manage an in-process `WalletProxy<DefaultLCProvider<LocalWalletClient, ExtKeychain>, LocalWalletClient, ExtKeychain>` backed by a real temporary `grin_chain::Chain` (`ChainTypes::AutomatedTesting`, where `COINBASE_MATURITY = 3` blocks).
 - No `MockNodeClient` and no `mock://local` magic URL exist in production code. Instead, test wallets connected to the in-process `WalletProxy` are created exclusively via two `#[cfg(feature = "test-utils")]` FFI exports:
   1. `grin_test_create_wallet(chain_dir: *const c_char, wallet_dir: *const c_char, client_id: *const c_char, network: u8, mnemonic: *const c_char, password: *const c_char) -> GrinFfiResult`: Initializes/attaches to the shared `WalletProxy` in `chain_dir`, registers a `LocalWalletClient` for `client_id`, creates/opens the wallet on the requested `network` (acquiring the same `OPEN_DIRS` lease as `grin_wallet_open`, 4.5), and returns `{"handle": u64}`.
   2. `grin_test_mine_blocks(handle: u64, count: u64) -> GrinFfiResult`: Calls `test_framework::award_blocks_to_wallet` to mine `count` real blocks (with Cuckatoo10 PoW and coinbase rewards) directly to `handle`'s wallet on the shared in-process `Chain`.
@@ -347,9 +370,9 @@ A wallet with 0 balance cannot initiate an `S1` send (`init_send_tx` fails with 
 
 ### 7.2 How `dart test` Enables `test-utils` & Release Binary Verification
 - **Enabling `test-utils` in `dart test`**:
-  - `packages/grin/hook/build.dart` reads `input.userDefines['test_utils']` (from `hooks.user_defines.grin.test_utils` in the root workspace `pubspec.yaml`).
+  - `packages/grin_native/hook/build.dart` reads `input.userDefines['test_utils']` (from `hooks.user_defines.grin_native.test_utils` in the root workspace `pubspec.yaml`).
   - When `test_utils: true` is set, `hook/build.dart` passes `--features test-utils` to `cargo build`.
-  - Because `test_utils: true` is set in the workspace root `pubspec.yaml`, it applies to every package build resolved from this workspace, including `packages/grin_flutter/example` (`flutter run` / `flutter build`), so those binaries export `grin_test_*`. That is acceptable for development: example and workspace builds are never release artifacts. `stack_wallet` consumes `grin` from its own root `pubspec.yaml`, where `hooks.user_defines.grin.test_utils` is unset, so its source builds compile without `test-utils`.
+  - Because `test_utils: true` is set in the workspace root `pubspec.yaml`, it applies to every package build resolved from this workspace, including `packages/grin_native/example` (`flutter run` / `flutter build`), so those binaries export `grin_test_*`. That is acceptable for development: example and workspace builds are never release artifacts. `stack_wallet` consumes `grin_native` from its own root `pubspec.yaml`, where `hooks.user_defines.grin_native.test_utils` is unset, so its source builds compile without `test-utils`.
 - **Release Binary Symbol Verification (`nm` Gate)**:
   - `hook/build.dart` compiles `grin-ffi` **without** `test-utils` unless `test_utils: true` is set; apps never set it.
   - `tool/ci.dart` runs `llvm-nm` on the host release build and on the three Android release builds (`rust-release` and `android` stages) and asserts 35 `grin_` symbols and **zero `grin_test_*`**; `tool/verify-apple.sh` and `tool/verify-windows.ps1` do the same on a Mac and on Windows.
@@ -372,6 +395,10 @@ A wallet with 0 balance cannot initiate an `S1` send (`init_send_tx` fails with 
    - Rust (`ffi_e2e_test.rs`): create and open a wallet, take `test_support::retain_session(handle)` to stand in for a long in-flight operation, then call `grin_wallet_close(handle)` (and, in a second case, `grin_wallet_close_finalizer`). Immediately afterwards, `grin_wallet_open`, `grin_wallet_create`, and `grin_wallet_delete` on the same directory (also via a non-normalized `dir/./` path and a symlink, to exercise canonicalization) all return `WalletBusy`, and `wallet_data` still exists. After the retained `Arc` drops, `grin_wallet_open` succeeds with a new handle and the wallet's data is intact, and `grin_wallet_delete` succeeds.
    - Rust: a second `grin_wallet_open` on a directory that is open and registered returns `WalletBusy`, and a failed open (wrong password) leaves no `OPEN_DIRS` entry behind.
    - Dart (`wallet_lifecycle_test.dart`): start a scan or `getBalance`, call `await client.close()` while it is in flight, and verify that `close()` completes only after the operation settles, that new calls throw `StateError`, and that an immediate `GrinWalletClient.open` on the same directory succeeds without `GrinWalletBusyException`.
+5. **Contract, Purity and Consumer Gates (`packages/grin/test`, `web-smoke`, `consumer`)**:
+   - `packages/grin/test` (`models_test.dart`, `tx_models_test.dart`, `wallet_interface_test.dart`) runs in pure Dart with no native library; the interface test uses hand-written fakes of `GrinWalletApi` and `GrinWalletBackend`.
+   - `web-smoke` compiles `packages/grin/tool/web_smoke.dart` to JavaScript, which fails on any native import.
+   - `consumer` analyzes and tests `packages/grin_native/test_consumer`, which depends on `grin_native` alone and sends and receives on the in-process test chain through `GrinWalletApi` (5.2).
 
 ---
 
@@ -379,8 +406,8 @@ A wallet with 0 balance cannot initiate an `S1` send (`init_send_tx` fails with 
 
 ```mermaid
 flowchart LR
-    P1["Phase 1: cypherstack/grin-wallet Fork & grin-ffi Crate"] --> P2["Phase 2: cbindgen + ffigen & Pure Dart package:grin"]
-    P2 --> P3["Phase 3: package:grin_flutter & Example App"]
+    P1["Phase 1: cypherstack/grin-wallet Fork & grin-ffi Crate"] --> P2["Phase 2: cbindgen + ffigen, package:grin_native & package:grin"]
+    P2 --> P3["Phase 3: Example App"]
     P3 --> P4["Phase 4: Unified test_framework E2E & Concurrency Tests"]
 ```
 
@@ -394,26 +421,26 @@ flowchart LR
 4. Implement all **35** standard C ABI functions (plus the 3 `#[cfg(feature = "test-utils")]` exports, including `grin_test_panic`, in `test_support.rs` using `grin_wallet_impls::test_framework`).
 5. Configure `build.rs` + `cbindgen.toml` to generate `target/include/grin_ffi.h`.
 
-### Phase 2: Pure Dart Package (`packages/grin`) & Build Hook
-1. Create root `pubspec.yaml` (`workspace: [packages/grin, packages/grin_flutter, packages/grin_flutter/example]`, `publish_to: none`, `hooks.user_defines.grin`, no Melos).
-2. Create `packages/grin/pubspec.yaml` (`name: grin`, `publish_to: none`, `resolution: workspace`) and `packages/grin/hook/build.dart` (as built: a `RustBuilder` build of `rust/` reading `hooks.user_defines.grin.test_utils`, with the Apple deployment floors and Android NDK API-level clang selection; D1, D11).
-3. Configure `packages/grin/ffigen.yaml` (`ffi-native: asset-id: 'package:grin/src/ffi/bindings.g.dart'`) with `symbol-address` enabled for `grin_wallet_close_finalizer`, and generate `lib/src/ffi/bindings.g.dart`.
-4. Implement `memory.dart` (`usingSecretArena`, `unwrapFfiResult`), `grin_exception.dart` (including `GrinWalletBusyException`), typed `BigInt` nanogrin domain models, and `GrinWalletClient` (with `this`-free static `Isolate.run` helpers, `Pointer<Void>.fromAddress(handle)` `NativeFinalizer`, ordered `close()` that rejects new ops, drains the op queue, detaches the finalizer, then calls `grin_wallet_close`, and `Stream<GrinWalletEvent>`).
+### Phase 2: Pure Dart Package & Build Hook (`packages/grin_native`; the contract in `packages/grin`)
+Phase 2 was first built as one package named `grin`. D12 (2026-11-03) split it, and the steps below use the names as they stand now.
+1. Create root `pubspec.yaml` (`workspace: [packages/grin, packages/grin_native, packages/grin_native/example, packages/grin_native/test_consumer]`, `publish_to: none`, `hooks.user_defines.grin_native`, no Melos).
+2. Create `packages/grin_native/pubspec.yaml` (`name: grin_native`, `publish_to: none`, `resolution: workspace`) and `packages/grin_native/hook/build.dart` (as built: a `RustBuilder` build of `rust/` reading `hooks.user_defines.grin_native.test_utils`, with the Apple deployment floors and Android NDK API-level clang selection; D1, D11).
+3. Configure `packages/grin_native/ffigen.yaml` (`ffi-native: asset-id: 'package:grin_native/src/ffi/bindings.g.dart'`) with `symbol-address` enabled for `grin_wallet_close_finalizer`, and generate `lib/src/ffi/bindings.g.dart`.
+4. Implement `memory.dart` (`usingSecretArena`, `unwrapFfiResult`) and `GrinWalletClient` in `packages/grin_native` (with `this`-free static `Isolate.run` helpers, `Pointer<Void>.fromAddress(handle)` `NativeFinalizer`, ordered `close()` that rejects new ops, drains the op queue, detaches the finalizer, then calls `grin_wallet_close`, and `Stream<GrinWalletEvent>`). Implement `grin_exception.dart` (including `GrinWalletBusyException`), the typed `BigInt` nanogrin domain models, the events and the `GrinWalletApi` and `GrinWalletBackend` interfaces in `packages/grin` (5.2).
 
-### Phase 3: Companion Flutter Package (`packages/grin_flutter`) & Example App
-1. Create `packages/grin_flutter/pubspec.yaml` (`name: grin_flutter`, `publish_to: none`, `resolution: workspace`).
-2. Implement `lib/grin_flutter.dart` (re-exporting `package:grin/grin.dart`, `GrinFlutter.defaultWalletDirectory`, and `GrinLifecycleObserver`).
-3. Create `packages/grin_flutter/example/` Flutter app exercising mnemonic generation, wallet creation, address display, and Slatepack encoding/decoding.
+### Phase 3: Example App (the Flutter companion package of the first build was removed by D12)
+1. Phase 3 first built a Flutter companion package holding a re-export of the Dart package, a default wallet directory helper (`path_provider`) and `GrinLifecycleObserver`, plus the example app. D12 removed that package.
+2. `packages/grin_native/example` (`name: grin_native_example`) is a Flutter app exercising mnemonic generation, wallet creation, address display, and Slatepack encoding/decoding. It depends on `grin_native` only and carries the two helpers as example code (`lib/src/wallet_paths.dart`, `lib/src/lifecycle_observer.dart`).
 
 ### Phase 4: End-to-End Verification (Rust & Dart)
 1. Implement `crates/grin-ffi/tests/header_test.rs` and `crates/grin-ffi/tests/ffi_e2e_test.rs` (testing `S1->S3`, `I1->I3` with invoice input-locking verification, Mainnet + Testnet concurrent execution, and the `WalletBusy` double-open guard with a retained session `Arc`).
-2. Implement `packages/grin/test/` suites (`mnemonic_address_test.dart`, `bounds_and_panic_test.dart`, `wallet_lifecycle_test.dart` including close-while-in-flight then immediate reopen, and `slatepack_e2e_test.dart` using `grin_test_create_wallet` & `grin_test_mine_blocks`).
-3. Run `cargo tree -d`, `cargo test`, `(cd packages/grin && dart test)`, `(cd packages/grin_flutter && flutter test)`, `dart analyze`, `flutter analyze`, and the `tool/ci.dart` `nm` check on `hook/build.dart` output built without `test-utils`.
+2. Implement `packages/grin_native/test/` suites (`mnemonic_address_test.dart`, `bounds_and_panic_test.dart`, `wallet_lifecycle_test.dart` including close-while-in-flight then immediate reopen, and `slatepack_e2e_test.dart` using `grin_test_create_wallet` & `grin_test_mine_blocks`) and the contract tests in `packages/grin/test/`.
+3. Run `cargo tree -d`, `cargo test`, `(cd packages/grin && dart test)`, `(cd packages/grin_native && dart test)`, `(cd packages/grin_native/example && flutter test)`, `dart analyze`, `flutter analyze`, the `web-smoke` and `consumer` stages, and the `tool/ci.dart` `nm` check on `hook/build.dart` output built without `test-utils`.
 4. Release artifacts, and the `nm` gate on the exact files a release publishes, are deferred to the dnix pipeline (D11).
 
 ## 9. Stack Wallet integration design (design only; no stack_wallet code changes)
 
-This section is the Phase 5 target contract that [PLAN] §1 item 5 (lines 24-25) leaves for a later stack_wallet branch. It describes how Stack Wallet would consume `grin_flutter` and `grin`, and it changes nothing in stack_wallet. Every stack_wallet fact below was read from refs already present locally with `git show`, `git diff`, `git log`, and one `git merge-tree --write-tree` whose objects went to a scratch object directory outside the repository. No worktree, branch or stash was touched and nothing was fetched. The settled decisions of [PLAN] §1 to §8 are inputs, with the build-hook correction recorded in [PLAN] D1 (lines 458-463).
+This section is the Phase 5 target contract that [PLAN] §1 item 5 (lines 24-25) leaves for a later stack_wallet branch. It describes how Stack Wallet would consume `grin_native` (which brings `grin` with it), and it changes nothing in stack_wallet. Every stack_wallet fact below was read from refs already present locally with `git show`, `git diff`, `git log`, and one `git merge-tree --write-tree` whose objects went to a scratch object directory outside the repository. No worktree, branch or stash was touched and nothing was fetched. The settled decisions of [PLAN] §1 to §8 are inputs, with the build-hook correction recorded in [PLAN] D1 (lines 458-463).
 
 ### Citation keys
 
@@ -510,7 +537,7 @@ These refs have no `Coin` enum. `CryptoCurrency.identifier` "should also match t
 2. `case const (Grin): return GrinWallet(net);` in `Wallet._loadWallet` (lib/wallets/wallet/wallet.dart:355-437; Epic at 382-383).
 3. `Grin(CryptoCurrencyNetwork.main)` and `Grin(CryptoCurrencyNetwork.test)` in the `_supportedCoins` list written by scripts/app_config/configure_stack_wallet.sh:98-136, and `GRIN` in both marker lists of that script (`process_pubspec_deps.dart` at :23-34, `gen_interfaces.dart` at :36-48). The Campfire and Stack Duo scripts leave it out.
 4. A `%%ENABLE_GRIN%%` block in scripts/app_config/templates/pubspec.template.yaml (9.8). `tool/process_pubspec_deps.dart:19-54` uncomments every block whose marker is listed, so one marker can wrap both a `dependencies` block and a `dependency_overrides` block.
-5. `lib/wl_gen/interfaces/libgrin_interface.dart` plus `tool/wl_templates/GRIN_libgrin_interface_impl.template.dart`, modelled on `LibEpicCashInterface` ([SW-uni] lib/wl_gen/interfaces/libepiccash_interface.dart:1-134) and its template ([SW-uni] tool/wl_templates/EPIC_libepiccash_interface_impl.template.dart:1-21, whose `//ON` and `//OFF` sections are selected by tool/gen_interfaces.dart:41-83). Only the template imports `package:grin_flutter`. An OFF build has no `package:grin`, so the interface cannot expose `GrinWalletClient`, `GrinBalance`, `GrinTxLogEntry` or `GrinException`. It declares Stack-side mirrors instead, as `MimblewimbleTransaction` does ([SW-uni] lib/wl_gen/interfaces/mimblewimble_transaction.dart:3-42) and as `BadHttpAddressException` does for errors (libepiccash_interface.dart:134), plus a typed facade `abstract class GrinSession` that mirrors the client one to one. That reads better than Epic's `DynamicObject` wrapper (lib/utilities/dynamic_object.dart:11-25; [SW-uni] EPIC template:183-213).
+5. `lib/wl_gen/interfaces/libgrin_interface.dart` plus `tool/wl_templates/GRIN_libgrin_interface_impl.template.dart`, modelled on `LibEpicCashInterface` ([SW-uni] lib/wl_gen/interfaces/libepiccash_interface.dart:1-134) and its template ([SW-uni] tool/wl_templates/EPIC_libepiccash_interface_impl.template.dart:1-21, whose `//ON` and `//OFF` sections are selected by tool/gen_interfaces.dart:41-83). Only the template imports `package:grin_native`. An OFF build has no `package:grin_native` and therefore no `package:grin`, so the interface cannot expose `GrinWalletClient`, `GrinBalance`, `GrinTxLogEntry` or `GrinException`. It declares Stack-side mirrors instead, as `MimblewimbleTransaction` does ([SW-uni] lib/wl_gen/interfaces/mimblewimble_transaction.dart:3-42) and as `BadHttpAddressException` does for errors (libepiccash_interface.dart:134), plus a typed facade `abstract class GrinSession` that mirrors the client one to one. That reads better than Epic's `DynamicObject` wrapper (lib/utilities/dynamic_object.dart:11-25; [SW-uni] EPIC template:183-213).
 6. A `PriceAPI._coinToIdMap` entry (lib/services/price.dart:28-45; Epic at :36). The CoinGecko id `grin` is an assumption.
 7. A `testNodeConnection` case (lib/utilities/test_node_connection.dart:116-170; Epic at :144-146) calling the stateless `grin_node_test_connection` (#7).
 8. A `Wallets.deleteWallet` branch (lib/services/wallets.dart:149-171 covers Epic and MWC).
@@ -585,15 +612,15 @@ class Grin extends Bip39Currency {
 }
 ```
 
-`CryptoCurrency.validateAddress` is synchronous ([SW-stg] lib/wallets/crypto_currency/crypto_currency.dart:73), so `package:grin` provides `GrinWalletClient.validateAddressSync(address, network)`, the same native check as `validateAddress` run on the calling isolate (stateless, microseconds). Added on 2026-11-02 after the independent review found it missing (section 13).
+`CryptoCurrency.validateAddress` is synchronous ([SW-stg] lib/wallets/crypto_currency/crypto_currency.dart:73), so `package:grin_native` provides `GrinWalletClient.validateAddressSync(address, network)` (also declared on `GrinWalletBackend`, so a fake can supply it), the same native check as `validateAddress` run on the calling isolate (stateless, microseconds). Added on 2026-11-02 after the independent review found it missing (section 13).
 
 Restore height: GrinWallet keeps a `firstBlockTimestamp` as `MimblewimbleWallet` does (mimblewimble_wallet.dart:43-45). The Grin mainnet genesis time is 2019-01-15 16:01:26 UTC, 1547568086 ([GW] grin/core/src/genesis.rs:160). The restore screen needs a Grin branch beside Epic and MWC ([SW-uni] lib/pages/add_wallet_views/restore_wallet_view/restore_wallet_view.dart:225-267) that stores only the height.
 
 ### 9.3 GrinWallet mapped onto GrinWalletClient
 
-Calls go through `libGrin` and `GrinSession` (9.2 item 5), which forward one to one. The C functions are fixed by [PLAN] §4.6. Dart names other than `open`, `create`, `delete` (line 359), `close` (349-356), `getBalance` (326), `cancelScan` (370) and `updateNetwork` are proposals. In the table, "base" is [SW-stg] lib/wallets/wallet/wallet.dart, "MW" is [SW-uni] mimblewimble_wallet.dart, "E" and "M" are the [SW-uni] Epic and MWC wallet impls.
+Calls go through `libGrin` and `GrinSession` (9.2 item 5), which forward one to one. On the plugin side the interface is `GrinWalletApi` (5.2), so `GrinWallet` can hold a `GrinWalletApi` (and take a `GrinWalletBackend`) and Stack Wallet's tests can pass fakes without loading the native library. The C functions are fixed by [PLAN] §4.6. Dart names other than `open`, `create`, `delete` (line 359), `close` (349-356), `getBalance` (326), `cancelScan` (370) and `updateNetwork` are proposals. In the table, "base" is [SW-stg] lib/wallets/wallet/wallet.dart, "MW" is [SW-uni] mimblewimble_wallet.dart, "E" and "M" are the [SW-uni] Epic and MWC wallet impls.
 
-Storage and configuration. GrinWallet keeps the seed password under `${walletId}_password`, generated with `generatePassword()` as Epic does (E:543-558), and treats its presence as the provisioned marker as MWC does (M:605-611). The mnemonic stays in the `MnemonicInterface` slot that `Wallet.create` writes (base 208-216); it is generated in Dart by `bip39.generateMnemonic` ([SW-uni] lib/pages/add_wallet_views/new_wallet_recovery_phrase_warning_view/new_wallet_recovery_phrase_warning_view.dart:217-223). Nothing else is persisted: no config JSON (MWC stores one at M:618-621 and M:1037-1041 and patches `wallet_dir` on iOS at M:579-591) and no `.api_secret` file (M:411-420). The wallet directory is recomputed on each open as `StackFileSystem.applicationRootDirectory()/grin/<walletId>` (MW `currentWalletDirPath`, 288-294; the root honours the desktop override, [SW-stg] lib/utilities/stack_file_system.dart:21-36). `GrinFlutter.defaultWalletDirectory` ([PLAN] line 367) is for apps without their own root.
+Storage and configuration. GrinWallet keeps the seed password under `${walletId}_password`, generated with `generatePassword()` as Epic does (E:543-558), and treats its presence as the provisioned marker as MWC does (M:605-611). The mnemonic stays in the `MnemonicInterface` slot that `Wallet.create` writes (base 208-216); it is generated in Dart by `bip39.generateMnemonic` ([SW-uni] lib/pages/add_wallet_views/new_wallet_recovery_phrase_warning_view/new_wallet_recovery_phrase_warning_view.dart:217-223). Nothing else is persisted: no config JSON (MWC stores one at M:618-621 and M:1037-1041 and patches `wallet_dir` on iOS at M:579-591) and no `.api_secret` file (M:411-420). The wallet directory is recomputed on each open as `StackFileSystem.applicationRootDirectory()/grin/<walletId>` (MW `currentWalletDirPath`, 288-294; the root honours the desktop override, [SW-stg] lib/utilities/stack_file_system.dart:21-36). For an app without such a root, the example app's `WalletPaths.defaultWalletDirectory` (`packages/grin_native/example/lib/src/wallet_paths.dart`) returns `<application support>/grin/<walletId>`; it is example code to copy and not part of the library.
 
 | Wallet or UI method | GrinWalletClient call (C function) | Notes |
 |---|---|---|
@@ -746,7 +773,7 @@ Stack facts ([SW-stg]). One `Wallet` per wallet id lives in `Wallets._wallets` (
 
 GrinWallet:
 
-1. `init()`: (a) await `_closing` if an earlier `exit()` is still running; (b) if `_session` is open, refresh the cached address, run `super.init()` and return; (c) build the config (9.3); (d) `create` or `open`; (e) attach a `GrinLifecycleObserver` ([PLAN] lines 369-370); (f) subscribe to the two Tor events; (g) `getAddress(0)`; (h) `super.init()`.
+1. `init()`: (a) await `_closing` if an earlier `exit()` is still running; (b) if `_session` is open, refresh the cached address, run `super.init()` and return; (c) build the config (9.3); (d) `create` or `open`; (e) attach a `GrinLifecycleObserver` (example code in `packages/grin_native/example`, taking a `GrinWalletApi`; [PLAN] lines 369-370 describe the original); (f) subscribe to the two Tor events; (g) `getAddress(0)`; (h) `super.init()`.
 2. Background and foreground: the observer cancels a running scan on `paused` or `detached` (mobile only). The next periodic refresh (150 s, base 599-607) or the next `init()` restarts an unfinished restore scan. Whether `grin_wallet_scan` persists its progress per batch is open; if it does not, GrinWallet stores `scanned_height` from `scanProgress` in `WalletInfo.otherData` and resumes from there.
 3. `exit()`: (a) cancel the Tor subscriptions; (b) dispose the observer; (c) set `_closing = _session.close()` and await it; (d) drop the address and slatepack caches; (e) `super.exit()`. `close()` rejects new calls, cancels a scan, drains the queue, detaches the finalizer and calls `grin_wallet_close` ([PLAN] lines 349-356), so `OPEN_DIRS` is clear when it returns and an immediate reopen cannot see `WalletBusy` (line 356).
 4. A call that arrives after `exit()` began (a refresh timer that already fired, a late UI action) gets the client's `StateError`. GrinWallet reports "wallet is closed" and does not reopen on its own.
@@ -761,22 +788,22 @@ Ordering guarantees GrinWallet relies on ([PLAN] #10, #11 at lines 285-286, and 
 
 ### 9.8 pubspec consumption
 
-Stack Wallet's precedent for two packages from one git repository is `coinlib_flutter` in `dependencies` with `coinlib` pinned in `dependency_overrides` at the same url and ref, under the comment "coinlib_flutter requires this" ([SW-stg] scripts/app_config/templates/pubspec.template.yaml:224-228 and 323-328). The optional ISAR source build overrides three packages from one repository the same way (349-365). `grin_flutter` depends on `grin` ([PLAN] line 112). An override replaces every constraint on `grin`, so it works whatever form `grin_flutter`'s pubspec uses for that dependency (not checked in this task). Template additions, written in the template's commented form; the `dependencies` block sits next to the EPIC and MWC blocks ([SW-stg] pubspec.template.yaml:53-65):
+Stack Wallet's precedent for two packages from one git repository is `coinlib_flutter` in `dependencies` with `coinlib` pinned in `dependency_overrides` at the same url and ref, under the comment "coinlib_flutter requires this" ([SW-stg] scripts/app_config/templates/pubspec.template.yaml:224-228 and 323-328). The optional ISAR source build overrides three packages from one repository the same way (349-365). Stack Wallet lists only `grin_native` under `dependencies` and imports only `package:grin_native/...`; `grin` is transitive, because `grin_native` depends on it and re-exports it (5.2). The one `grin` entry is a `dependency_overrides` pin at the same url and ref, and pub needs it: `grin_native` declares `grin: ^0.1.0` (packages/grin_native/pubspec.yaml), a hosted constraint. Inside this repository the workspace satisfies it; a git consumer would look `grin` up on pub.dev, where this package is not published. The pin replaces every constraint on `grin` and goes away once `grin` is published. It is a pin and not a dependency of the app: no Stack Wallet file imports `package:grin`. Template additions, written in the template's commented form; the `dependencies` block sits next to the EPIC and MWC blocks ([SW-stg] pubspec.template.yaml:53-65):
 
 ```yaml
 dependencies:
   # ...
 # %%ENABLE_GRIN%%
-#  grin_flutter:
+#  grin_native:
 #    git:
 #      url: ssh://git@git.cypherstack.com:222/sneurlax/grin.git
-#      path: packages/grin_flutter
+#      path: packages/grin_native
 #      ref: <commit>
 # %%END_ENABLE_GRIN%%
 
 dependency_overrides:
   # ...
-  # grin_flutter requires this; keep url and ref identical to grin_flutter's
+  # grin_native requires this; keep url and ref identical to grin_native's
 # %%ENABLE_GRIN%%
 #  grin:
 #    git:
@@ -790,10 +817,10 @@ Generated result with both markers enabled:
 
 ```yaml
 dependencies:
-  grin_flutter:
+  grin_native:
     git:
       url: ssh://git@git.cypherstack.com:222/sneurlax/grin.git
-      path: packages/grin_flutter
+      path: packages/grin_native
       ref: <commit>
 dependency_overrides:
   grin:
@@ -805,8 +832,8 @@ dependency_overrides:
 
 Notes:
 
-- Nothing goes into the `hooks.user_defines` block for `grin` today. The hook reads one key, `hooks.user_defines.grin.test_utils`, and Stack Wallet leaves it unset, so Stack never links `grin_test_*` ([PLAN] D1). Everything else is fixed: the hook always builds `rust/` with the host toolchain, so Stack Wallet's build machines need rustup (the toolchain is pinned by `rust/rust-toolchain.toml`) and the NDK Flutter provides, as they do for the pre-kit `flutter_libepiccash` and `flutter_libmwc` source builds. The `tor_ffi_plugin`, `flutter_libepiccash` and `flutter_libmwc` entries in the NATIVE_PREBUILTS block ([SW-stg] pubspec.template.yaml:374-387) are untouched.
-- Prebuilt artifacts, and the user-define that selects them, arrive with the dnix pipeline (D11). The template block at :373-388 then gains a `grin` entry in dnix's form, next to the dnix entries `flutter_libepiccash` and `flutter_libmwc` already carry on their GitHub main branches (10.2).
+- Nothing goes into the `hooks.user_defines` block for `grin_native` today. The hook reads one key, `hooks.user_defines.grin_native.test_utils`, and Stack Wallet leaves it unset, so Stack never links `grin_test_*` ([PLAN] D1, D12). Everything else is fixed: the hook always builds `rust/` with the host toolchain, so Stack Wallet's build machines need rustup (the toolchain is pinned by `rust/rust-toolchain.toml`) and the NDK Flutter provides, as they do for the pre-kit `flutter_libepiccash` and `flutter_libmwc` source builds. The `tor_ffi_plugin`, `flutter_libepiccash` and `flutter_libmwc` entries in the NATIVE_PREBUILTS block ([SW-stg] pubspec.template.yaml:374-387) are untouched.
+- Prebuilt artifacts, and the user-define that selects them, arrive with the dnix pipeline (D11). The template block at :373-388 then gains a `grin_native` entry in dnix's form, next to the dnix entries `flutter_libepiccash` and `flutter_libmwc` already carry on their GitHub main branches (10.2).
 - The template already notes that entries for packages outside the dependency graph are ignored ([SW-stg] pubspec.template.yaml:369-370), which covers app configs that leave `GRIN` off.
 
 ### 9.9 Breaking changes versus the legacy plugin APIs
@@ -840,7 +867,7 @@ Kept as is on purpose: the generated per-wallet password in secure storage (E:54
 
 ### 9.10 Assumptions and open items
 
-1. Dart method names on `GrinWalletClient` beyond those [PLAN] names (9.3).
+1. Dart method names on `GrinWalletClient` and `GrinWalletApi` beyond those [PLAN] names (9.3).
 2. Resolved: `GrinWalletClient.validateAddressSync` (9.2).
 3. `GrinTxLogEntry` fields beyond [PLAN] 4.4; the confirmed-height field is resolved (`confirmedHeight`, 9.5).
 4. Testnet node port 13413 and the absence of participant messages in slate v4 (the other Grin constants in 9.2 are now cited from the fork).
@@ -850,7 +877,7 @@ Kept as is on purpose: the generated per-wallet password in secure storage (E:54
 8. Whether `grin_wallet_scan` persists progress per batch (9.7).
 9. The contents of `GrinWalletEvent` ([PLAN] lines 103, 323 name it without fields).
 10. Armored slatepack sizes for QR codes.
-11. How `grin_flutter`'s pubspec declares `grin` (the override covers any form).
+11. How `grin_native`'s pubspec declares `grin` (the override covers any form), and whether pub needs the override at all for a git dependency on `grin_native`.
 
 ### Sources read
 
@@ -865,7 +892,7 @@ Kept as is on purpose: the generated per-wallet password in secure storage (E:54
 
 ## 10. Epic/MWC migration foundation
 
-This section decides how the grin monorepo becomes a foundation that Epic Cash and MWC can move onto later, with each coin isolated. It takes the settled decisions as given: one monorepo per coin with a Rust FFI crate, a pure Dart package that owns the single build hook, and a Flutter companion package ([PLAN] lines 7-19, 46-123); the C ABI conventions of `GrinFfiResult`, `ffi_guard!`, u64 handles, per-thread chain type and drop-based close with `OPEN_DIRS`/`DirLease` ([PLAN] lines 199-268, 270-312); and the native-build-kit hook at 85f7eb09 with the `build` user-define and a committed `hook/prebuilt_hashes.json` ([PLAN] line 18).
+This section decides how the grin monorepo becomes a foundation that Epic Cash and MWC can move onto later, with each coin isolated. It takes the settled decisions as given: one monorepo per coin with a Rust FFI crate, a pure Dart package that owns the single build hook, and a Flutter companion package ([PLAN] lines 7-19, 46-123; at those lines the Dart package was `grin` and the companion was a Flutter package, and D12 has since split `grin` into a pure contract and `grin_native`, which owns the hook, and removed the Flutter package); the C ABI conventions of `GrinFfiResult`, `ffi_guard!`, u64 handles, per-thread chain type and drop-based close with `OPEN_DIRS`/`DirLease` ([PLAN] lines 199-268, 270-312); and the native-build-kit hook at 85f7eb09 with the `build` user-define and a committed `hook/prebuilt_hashes.json` ([PLAN] line 18).
 
 The plan records the kit contract at [PLAN] line 18, section 3.1 (lines 135-142) and decision D1 (lines 458-463). Only the tree comment at [PLAN] line 86 still names the pre-kit keys `native_build`/`prebuilt_*`, which the kit ports reject ([EP-kit] hook/build.dart:132-147). Every [PLAN] line number below is against commit dfb7f04 of that file.
 
@@ -910,12 +937,12 @@ Against the file list in [PLAN] lines 58-122:
 | scan.rs (line 72) | the `ScanProgressState` atomics and cancel flag | the scanner | |
 | sidecar.rs (line 73) | atomic tmp + `sync_all` + rename JSON file with best-effort writes ([PLAN] lines 244-246) | `TxSidecarEntry` schema and path | |
 | build.rs, cbindgen.toml, tests/header_test.rs | the header-test template | prefixes, header names | |
-| packages/grin/lib/src/ffi/memory.dart (line 92) | zeroing `SecretArena`, `usingSecretArena`, the unwrap algorithm | the ffigen-generated `GrinFfiResult` struct and the `grin_ffi_result_free` binding | ffigen emits the struct type into each package's bindings |
-| errors/grin_exception.dart (line 94) | a non-sealed base class (code, message, details) | the sealed hierarchy | Dart only allows subtypes of a sealed class in the same library, so a shared sealed root cannot be extended by coin packages |
-| models/*.dart (lines 95-103) | none | all | units differ: nanogrin 1e9 ([PLAN] line 38), `EPIC_BASE = 100_000_000` ([EN] core/src/consensus.rs:31), `MWC_BASE = 1_000_000_000` ([MN] core/src/consensus.rs:30) |
-| wallet/grin_wallet_client.dart (line 105) | the serialized op queue and the ordered close algorithm ([PLAN] lines 349-356); the handle-as-finalizer-token technique ([PLAN] line 343) | the method surface and bindings | |
-| bindings.g.dart, ffigen.yaml, hook/build.dart | none | all | asset id rule (below) |
-| grin_flutter default_paths.dart, lifecycle_observer.dart | generic logic | the client type | small enough to copy (assumption: sizes not yet known) |
+| packages/grin_native/lib/src/ffi/memory.dart (line 92) | zeroing `SecretArena`, `usingSecretArena`, the unwrap algorithm | the ffigen-generated `GrinFfiResult` struct and the `grin_ffi_result_free` binding | ffigen emits the struct type into each package's bindings |
+| errors/grin_exception.dart (line 94; now in `packages/grin`) | a non-sealed base class (code, message, details) | the sealed hierarchy | Dart only allows subtypes of a sealed class in the same library, so a shared sealed root cannot be extended by coin packages |
+| models/*.dart (lines 95-103; now in `packages/grin`) | none | all | units differ: nanogrin 1e9 ([PLAN] line 38), `EPIC_BASE = 100_000_000` ([EN] core/src/consensus.rs:31), `MWC_BASE = 1_000_000_000` ([MN] core/src/consensus.rs:30) |
+| wallet/grin_wallet_client.dart (line 105; now in `packages/grin_native`) | the serialized op queue and the ordered close algorithm ([PLAN] lines 349-356); the handle-as-finalizer-token technique ([PLAN] line 343) | the method surface and bindings | |
+| bindings.g.dart, ffigen.yaml, hook/build.dart (now in `packages/grin_native`) | none | all | asset id rule (below) |
+| the wallet directory and lifecycle helpers (first in a Flutter package, now example code: `wallet_paths.dart`, `lifecycle_observer.dart`) | generic logic | the wallet type | small enough to copy (assumption: sizes not yet known) |
 | tool/ci.dart | the runner | crate names in the `cargo tree -d` gate ([PLAN] line 197), symbol prefix in the `nm` gate | |
 
 The neutral set is roughly four Rust files' worth of mechanism (guard, result plumbing, registry, dir lease, plus two small helpers) and three small Dart helpers. Everything that touches a wallet crate is coin-specific.
@@ -933,7 +960,7 @@ The neutral set is roughly four Rust files' worth of mechanism (guard, result pl
 
    Epic's fork keeps the package name `grin_secp256k1zkp`. None of the three declares `links`. In one Cargo graph, Grin and Epic would resolve two packages with the same name from different sources, both compiling unprefixed `secp256k1_*` C symbols into one binary. That is a duplicate-symbol link failure at best and silent first-definition-wins at worst. The epic monorepo's duplicate gate therefore has to check `epic_*` and `grin_secp256k1zkp` (expecting exactly the EpicCash source), the MWC one `mwc_*` and `mwc_secp256k1zkp`.
 3. Linking. Each coin ships its own cdylib, and the kit only ships dynamic libraries: `DynamicLoadingBundled()` for every target ([KIT] dart/native_prebuilt_hook/lib/src/hook.dart:192-197), refusal of static link requests in prebuilt/source/dev modes (hook.dart:308-320, dart/native_prebuilt_hook/README.md:58-66), and dynamic-only outputs in the plugin flakes ([MW-kit] flake.nix:38-46; [KIT] README.md:378-381). The pinned Epic hook already bundled a dylib on iOS ([EP] hook/build.dart:126-129, 283-296). The shipped Linux libraries keep their C internals local: `nm -D` on [BUILT] libepic_cash_wallet.so and libmwc_wallet.so shows 0 exported `secp256k1_*`, `mdb_*` or `sqlite3_*` symbols, while the full symbol tables contain 140/143 local `secp256k1_*` and 270 local `sqlite3_*`. Collisions between C internals only matter if someone static-links two coins (iOS static frameworks, or the `staticlib` crate type in [PLAN] line 60). Rust `#[no_mangle]` symbols from dependencies are exported, though: libmwc_wallet.so exports `rustsecp256k1_v0_2_0_*` and `rustsecp256k1_v0_4_1_*`, and libepic_cash_wallet.so exports unprefixed `wallet_init`, `get_mnemonic`, `listener_spawn`, `listener_poll` and friends (from `export_task!`, [EP] rust/src/listener.rs:65-74). Rule for any shared code: it exports no `#[no_mangle]` symbol; each coin writes its own prefixed exports as thin shims (10.1.5).
-4. Native asset ids. A hook can only emit a `CodeAsset` for its own package ([KIT] hook.dart:294-301 uses `package: input.packageName`; [PLAN] lines 127-130). [BUILT] native_assets.json maps `package:flutter_libepiccash/src/epic_cash_wallet_bindings.g.dart` and `package:flutter_libmwc/mwc.dart` to separate libraries. Every kit plugin's hook is one spec naming its own package ([TOR] hook/build.dart:8-28, [FROST] hook/build.dart:14-27, [MW-kit] hook/build.dart:10-29). A shared Dart package cannot hold `@Native` bindings for any coin and must stay pure Dart.
+4. Native asset ids. A hook can only emit a `CodeAsset` for its own package ([KIT] hook.dart:294-301 uses `package: input.packageName`; [PLAN] lines 127-130). [BUILT] native_assets.json maps `package:flutter_libepiccash/src/epic_cash_wallet_bindings.g.dart` and `package:flutter_libmwc/mwc.dart` to separate libraries. Every kit plugin's hook is one spec naming its own package ([TOR] hook/build.dart:8-28, [FROST] hook/build.dart:14-27, [MW-kit] hook/build.dart:10-29). A shared Dart package cannot hold `@Native` bindings for any coin and must stay pure Dart; the pure contract package of D12 is the same shape, and each coin's native backend package owns its own asset id.
 5. Resolution scope differs by language. Rust: each coin repo builds its own cdylib against its own committed Cargo.lock (`lockFile`, `--locked`, [KIT] README.md:88), so two coins can sit on different revs of a shared crate in the same app. Dart: pub resolves one version of each package for the whole app. If `grin`, `epic` and `mwc` each depended on a shared Dart package by git ref, Stack Wallet's pubspec would have to agree on one ref for all three, and a breaking change would force lockstep releases of every coin package before Stack Wallet could bump any of them.
 6. Publishing. Everything is `publish_to: none` ([PLAN] line 9; [EP-kit] pubspec.yaml:7; [MW-kit] pubspec.yaml:5). Git dependencies work now; a shared Dart package would join native_prebuilt_hook on the list of things to publish before any coin package goes to pub.dev ([PLAN] line 17).
 
@@ -969,7 +996,7 @@ crates/grin-ffi/src/ffi_core/      # coin-neutral, extracted later as the shared
 ├── progress.rs      # ProgressState atomics + cancel flag (from scan.rs)
 └── atomic_json.rs   # AtomicJsonFile<T>: tmp, sync_all, rename, best-effort (from sidecar.rs)
 
-packages/grin/lib/src/ffi/core/    # coin-neutral, stays a per-coin copy
+packages/grin_native/lib/src/ffi/core/    # coin-neutral, stays a per-coin copy
 ├── secret_arena.dart     # zeroing allocator, usingSecretArena
 ├── unwrap.dart           # unwrapResultParts(code, data, error, free: () => ..., mapError: ...)
 ├── op_queue.dart         # serialized op queue + drain used by close()
@@ -992,7 +1019,11 @@ Rules, enforced by a `tool/ci.dart` check:
 1. Split history: `git filter-repo --path crates/grin-ffi/src/ffi_core` into a new repository holding one crate (name placeholder `mw-ffi-core`, `publish = false`).
 2. In grin: delete `src/ffi_core/`, add the crate as a git dependency pinned by `rev`, rewrite `crate::ffi_core::` and `$crate::ffi_core::` to the crate name, and run the unchanged tests, the `cargo tree -d` gate and the `nm` gate. The export list must not change, since the core exports nothing.
 3. epic-ffi and mwc-ffi depend on the same crate at whatever rev each needs.
-4. Copy `packages/grin/lib/src/ffi/core/` into each coin's Dart package. Revisit a shared Dart package only if those files stop changing.
+4. Copy `packages/grin_native/lib/src/ffi/core/` into each coin's native Dart package. Revisit a shared Dart package only if those files stop changing.
+
+#### 10.1.7 Package split for a later coin
+
+The Epic and MWC packages would follow the split of D12: a pure contract package (models, exceptions, units, events and the wallet and backend interfaces) and a native backend package that depends on it, owns the hook, the bindings and the Rust crate, and re-exports the contract so an app lists the backend package alone. The contract stays per coin for the reasons above: sealed exception roots cannot be shared across packages, units differ, and the interface names are free to differ in method surface (Epic and MWC have listeners, 10.3). A coin whose interfaces turn out to match can share the contract later without touching any app, because apps import only the backend package.
 
 ### 10.2 Legacy comparison
 
@@ -1219,7 +1250,7 @@ All in /home/user/src/stack_wallet/stack_wallet (a checkout on `security/rbf-his
 
 - The implementation plan this file grew from: /home/user/.gemini/antigravity-cli/brain/dd32207c-5b42-482e-9559-f3754168ced0/implementation_plan.md (three review rounds; imported as commit `dfb7f04`).
 - The hand-off brief: /home/user/src/grin-handoff.md.
-- docs/ffi-json.md in this repository: the JSON contract between grin-ffi and package:grin.
+- docs/ffi-json.md in this repository: the JSON contract between grin-ffi and package:grin_native.
 
 ---
 
@@ -1227,7 +1258,7 @@ All in /home/user/src/stack_wallet/stack_wallet (a checkout on `security/rbf-his
 
 Each entry records a choice made while building, the evidence behind it, and how to reverse it. The settled decisions from the review rounds (sections 1 to 8) are not reopened here.
 
-Three entries change a settled decision of the brief: D1 (the hook), D2 (the local wiring to the fork before it was pushed) and D6 (where the Cargo workspace lives). Each says why and how to reverse it. The brief asked for a stop before such a change; the changes were made and recorded first, and on 2026-11-02 the user, asked to accept or reverse them, delegated the call with the instruction to prefer correctness and security over effort. Later the same day the user directed a larger change, recorded in D11: the Nix build and native-build-kit are removed, which supersedes D1's kit contract, D7 and D10 and makes D2's wiring unnecessary.
+Three entries change a settled decision of the brief: D1 (the hook), D2 (the local wiring to the fork before it was pushed) and D6 (where the Cargo workspace lives). Each says why and how to reverse it. The brief asked for a stop before such a change; the changes were made and recorded first, and on 2026-11-02 the user, asked to accept or reverse them, delegated the call with the instruction to prefer correctness and security over effort. Later the same day the user directed a larger change, recorded in D11: the Nix build and native-build-kit are removed, which supersedes D1's kit contract, D7 and D10 and makes D2's wiring unnecessary. On 2026-11-03 D12 split the Dart side into two packages and superseded D4.
 
 ### D1. The build hook is a plain `native_toolchain_rust` build; the kit's user-define contract was used first and then removed
 
@@ -1250,6 +1281,7 @@ Three entries change a settled decision of the brief: D1 (the hook), D2 (the loc
 ### D4. Package names
 
 - The assignment calls the pure Dart package `grin_dart`. That is how it refers to "the pure Dart package", and the settled decision is that the pub package name is `grin` (in `packages/grin`), with the Flutter package `grin_flutter`. The name `grin_dart` is not used anywhere in code or pubspecs.
+- Superseded by D12 (2026-11-03).
 
 ### D5. Fork test runtime flavor
 
@@ -1388,3 +1420,21 @@ Removed with the kit on 2026-11-02 (D11). What was found is kept because dnix al
 - Kept: the `nm` symbol gate on every release build `tool/ci.dart` makes (host and Android) and on the host builds the verify scripts make; `rust/rust-toolchain.toml` as the only toolchain pin; the crate layout (D6).
 - What dnix will want, from its README as read on 2026-11-02 (not pinned or verified here): `hook/build.dart` calling `buildNativeLibrary(args)` from `package:dnix/dnix.dart`, a `dnix.json` in the package root naming `rust.workspace` and `rust.crate`, `library`, `targets` and `toolchains.rust`, a `flake.nix` calling `dnix.lib.package`, a `dnix.lock` of per-library hashes, and a `cdylib` with an explicit release profile. `packages/grin/rust` already satisfies the crate side (cdylib, release profile, single-crate workspace, Rust 1.94.0 pin). Two things from the removed hook to carry over when that happens, if dnix's source path does not handle them: the Android API-level linker selection and the Apple `strip = none` finding (D1).
 - Verification after the removal is recorded at the end of section 13.
+
+### D12. Two pure Dart packages: grin (contract) and grin_native (backend); grin_flutter removed
+
+Decided on 2026-11-03. It supersedes D4. The first build kept the contract and the native implementation together in `grin` (hook, Rust crate, bindings, `GrinWalletClient`, models) and put Flutter glue in `grin_flutter`. Native assets need no Flutter package (they build in `dart test`, `dart run` and Flutter alike), so `grin_flutter` was left holding two helpers that belong in an app. The contract and the native backend are split so that another backend, such as a pure Dart implementation, can implement the same interfaces, and so that code using only the contract never runs the Rust build. Consumers still see one package: `grin_native` re-exports `grin`.
+
+- Dependency chain: app -> `grin_native` -> `grin`. An app lists `grin_native` alone (Stack Wallet: 9.8) and imports only `package:grin_native/...`. `lib/grin_native.dart` does `export 'package:grin/grin.dart';` in full, so one import gives everything. Both packages are pure Dart; there is no Flutter package.
+- `packages/grin` (`name: grin`) holds the models, exceptions, units, events and two interfaces: `GrinWalletApi` (one open wallet, every instance operation of the client) and `GrinWalletBackend` (`generateMnemonic`, `validateMnemonic`, `validateAddress`, `validateAddressSync`, `testNodeConnection`, `create`, `open`, `delete`, `decodeSlatepackWithoutWallet`). It has no hook, no `dart:ffi`, no `dart:isolate` and no runtime dependencies.
+- Native-only members are kept off the interfaces: `nativeHandle`, `runQueued`, `initLogs` and the finalizers. A fake therefore never has to implement them, and the interfaces describe behaviour that any backend can provide.
+- The interface is named `GrinWalletApi` and not `GrinWallet` because Stack Wallet's own wallet class for Grin is `GrinWallet` (5.1 point 1, section 9).
+- `GrinWalletClient` (now in `grin_native`) `implements GrinWalletApi, Finalizable` and keeps its name and all its static methods. `GrinNativeBackend` is a `const` `GrinWalletBackend` whose methods delegate to those statics. Existing call sites need no change.
+- `package:grin/codec.dart` is a separate public library, not exported by `grin.dart`, that exposes the JSON helpers to backend packages. It replaces what would otherwise be `implementation_imports` of `grin`'s `src/` by `grin_native`.
+- The native asset id changed from `package:grin/src/ffi/bindings.g.dart` to `package:grin_native/src/ffi/bindings.g.dart` (`ffigen.yaml` moved with the bindings), and the user-define key from `hooks.user_defines.grin` to `hooks.user_defines.grin_native` (`test_utils`). Anything that set the old key must set the new one.
+- D6's Cargo workspace is now at `packages/grin_native/rust`, moved with `git mv`. The Rust code and the C ABI are unchanged (35 exported symbols), and so is `docs/ffi-json.md` apart from the paths in its first lines.
+- `grin_flutter` is removed. The re-export became `grin_native.dart`'s export of `grin`. The path_provider helper became example code, `WalletPaths` in `lib/src/wallet_paths.dart`, with the same behaviour. `GrinLifecycleObserver` became example code in `lib/src/lifecycle_observer.dart` and takes a `GrinWalletApi`. Their tests are `example/test/helpers_test.dart`.
+- The example app moved from `grin_flutter/example` to `packages/grin_native/example` and was renamed `grin_native_example`; its Android, iOS, macOS, Linux and Windows identifiers changed from `grin_flutter_example` and `grinFlutterExample` to `grin_native_example` and `grinNativeExample`. It depends on `grin_native` only.
+- New gates in `tool/ci.dart`: `web-smoke` compiles `packages/grin/tool/web_smoke.dart` to JavaScript (and runs it with node when installed), which fails on any native import into `grin`; `consumer` analyzes and tests `packages/grin_native/test_consumer` (pub name `grin_native_test_consumer`), a pure Dart package that depends on `grin_native` alone, never imports `package:grin/`, and pays by Slatepack between two wallets on the in-process test chain through `GrinWalletApi`. `tool/regen_bindings.dart`, `tool/regtest.sh`, `tool/verify-apple.sh` and `tool/verify-windows.ps1` point at `packages/grin_native`.
+- Section 13 is a dated record and still names the earlier paths and the example ids `grin_flutter_example`; D1 to D11 are left as written.
+- To reverse: the layout before the split is in the history of `grin-v1`.

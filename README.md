@@ -5,17 +5,22 @@ for Stack Wallet's `flutter_libepiccash` and `flutter_libmwc` pattern and
 as the model the Epic Cash and MWC plugins can migrate onto later. Nothing
 in this repository is published; every pubspec has `publish_to: none`.
 
-Three layers, one repository:
+A Rust crate and two pure Dart packages, one repository:
 
 | Layer | Where | What |
 |---|---|---|
-| `grin-ffi` (Rust) | `packages/grin/rust` | a C ABI over a thin fork of `grin-wallet` 5.5.1: 35 functions, the 32 fallible ones return `GrinFfiResult {code, data, error}` and run inside a panic guard (the three free and finalizer functions return void and catch panics); wallets are u64 handles |
-| `grin` (pure Dart) | `packages/grin` | ffigen bindings, typed models (`BigInt` nanogrin), a sealed `GrinException` hierarchy and `GrinWalletClient`; owns the single native-assets build hook |
-| `grin_flutter` (Flutter) | `packages/grin_flutter` | a default wallet directory, an app lifecycle observer and re-exports; the example app lives in `example/` |
+| `grin-ffi` (Rust) | `packages/grin_native/rust` | a C ABI over a thin fork of `grin-wallet` 5.5.1: 35 functions, the 32 fallible ones return `GrinFfiResult {code, data, error}` and run inside a panic guard (the three free and finalizer functions return void and catch panics); wallets are u64 handles |
+| `grin` (pure Dart) | `packages/grin` | the backend-neutral contract: typed models (`BigInt` nanogrin), a sealed `GrinException` hierarchy, units, events and the `GrinWalletApi` and `GrinWalletBackend` interfaces. No native code, no runtime dependencies; it compiles to JavaScript |
+| `grin_native` (pure Dart) | `packages/grin_native` | the native backend: ffigen bindings, `GrinWalletClient` (implements `GrinWalletApi`), `GrinNativeBackend` and the single native-assets build hook; re-exports all of `grin`, so an app depends on `grin_native` alone |
+
+There is no Flutter package. Flutter apps depend on `grin_native` directly.
+The example app (`packages/grin_native/example`) is the Flutter bundling
+gate, and `packages/grin_native/test_consumer` is a pure Dart package that
+depends on `grin_native` alone, as an app would.
 
 The design, every decision and the Stack Wallet integration plan are in
 [docs/architecture.md](docs/architecture.md). The JSON contract between the
-Rust crate and the Dart package is [docs/ffi-json.md](docs/ffi-json.md).
+Rust crate and `grin_native` is [docs/ffi-json.md](docs/ffi-json.md).
 Each package has its own README.
 
 ## Layout
@@ -28,10 +33,16 @@ tool/regen_bindings.dart      cargo build (cbindgen header) then ffigen
 tool/regtest.sh               private chain run (node, grin-wallet peer, SOCKS5 proxy)
 tool/verify-apple.sh          host release builds and the symbol gate on a Mac
 tool/verify-windows.ps1       the same on Windows
-packages/grin/
+packages/grin/                the contract: models, exceptions, units, events,
+                              GrinWalletApi, GrinWalletBackend; pure Dart
+  lib/codec.dart              JSON helpers for backend packages
+  tool/web_smoke.dart         compiled to JavaScript by the web-smoke stage
+packages/grin_native/         the native backend; re-exports package:grin
   rust/                       the grin-ffi crate (Cargo.lock, rust-toolchain.toml)
   hook/build.dart             builds rust/ with native_toolchain_rust
-packages/grin_flutter/        Flutter glue and example/
+  lib/testing.dart            GrinTestChain, for tests of code that uses it
+  example/                    Flutter example app (grin_native_example)
+  test_consumer/              pure Dart package that depends on grin_native alone
 ```
 
 ## Building and testing
@@ -43,26 +54,27 @@ dart run tool/ci.dart --skip android,flutter-build  # quick local run
 dart run tool/ci.dart                               # everything
 ```
 
-`dart test` in `packages/grin` and `flutter run` in the example build the
-Rust library with the host toolchain through the hook. The workspace pubspec
+`dart test` in `packages/grin` needs no native library. `dart test` in
+`packages/grin_native` and `flutter run` in the example build the Rust
+library with the host toolchain through the hook. The workspace pubspec
 turns on `test_utils`, which exports the three `grin_test_*` functions the
 Dart tests drive an in-process chain with. `tool/ci.dart` checks with
 `llvm-nm` that release builds made without it export exactly the 35 standard
 functions and none of the test ones.
 
-The Rust toolchain is pinned by `packages/grin/rust/rust-toolchain.toml`
+The Rust toolchain is pinned by `packages/grin_native/rust/rust-toolchain.toml`
 (1.94.0). The Android stage needs NDK 28.2.13676358 and `cargo-ndk`.
 
 ## The grin-wallet fork
 
-`packages/grin/rust/Cargo.toml` depends on a fork of grin-wallet at
+`packages/grin_native/rust/Cargo.toml` depends on a fork of grin-wallet at
 `ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git`, branch
 `optional-tor-rustls`, pinned to commit
 `b5d756bdae51c71b1b2ec06dbf0695b37d50a850` (also on
 `ssh://git@git.manymath.com:2222/sneurlax/grin-wallet.git`). Cargo fetches
 it with the git command line, so a machine that has not fetched it yet needs
 ssh read access to that host. See "Fetching the fork" in
-`packages/grin/README.md` for what that means inside the build hook.
+`packages/grin_native/README.md` for what that means inside the build hook.
 
 ## Status
 
