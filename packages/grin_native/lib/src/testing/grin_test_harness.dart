@@ -114,8 +114,8 @@ abstract final class GrinTestChain {
     Error.throwWithStackTrace(
       StateError(
         'The native grin library has no grin_test_* functions. Build it with '
-        'the test_utils user-define (hooks.user_defines.grin_native.test_utils: true '
-        'together with build: cargo). Details: ${error.message}',
+        'the test_utils user-define (hooks.user_defines.grin_native.test_utils: '
+        'true). Details: ${error.message}',
       ),
       stackTrace,
     );

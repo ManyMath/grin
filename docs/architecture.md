@@ -5,7 +5,7 @@
 This document defines the clean-room architecture and implementation plan (**Phases 1–4**) for **Grin** in `/home/user/src/grin`, incorporating all review resolutions from Rounds 1 and 2:
 
 1. **Single Monorepo at `/home/user/src/grin`**:
-   - Combines a Cargo workspace (`crates/grin-ffi`) and a **native Dart pub workspace** (`workspace: [packages/grin, packages/grin_native, packages/grin_native/example, packages/grin_native/test_consumer]`, **no Melos**).
+   - Combines a Cargo workspace (`packages/grin_native/rust`) and a **native Dart pub workspace** (`workspace: [packages/grin, packages/grin_native, packages/grin_native/example, packages/grin_native/test_consumer]`, **no Melos**).
    - All `pubspec.yaml` files declare `publish_to: none`.
 2. **Thin `cypherstack/grin-wallet` Fork (`v5.5.1`) with `HttpSlateSender` Split, `tor` Gating, and `ring`+`webpki-roots` `rustls`**:
    - Rather than copying ~2,000 lines of `node_clients/http.rs` (455 lines), `client_utils/` (595 lines), and `lifecycle/` (873 lines) into `grin-ffi` and owning seed encryption forever, we maintain a minimal fork `cypherstack/grin-wallet` (branched from `mimblewimble/grin-wallet` `v5.5.1`, commit `f097811ee953fc81be4e70435d6ef845b6b2e8c9`, on branch `optional-tor-rustls`, fork commits `64d361f2` and `b5d756bd`, the latter pinned). The fork is a separate repository checked out locally at `/home/user/src/grin-wallet` (outside the monorepo; remote `cypherstack` = `ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git`), and `grin-ffi` consumes it as a git dependency pinned by `rev`.
@@ -101,7 +101,7 @@ The `cypherstack/grin-wallet` fork (`v5.5.1` + submodule `grin` `v5.5.2`) is not
 >
 > Placing `hook/build.dart` in `packages/grin_native`:
 > - Makes native assets work in `dart test`, `dart run` and in Flutter (`flutter test`, `flutter run`, `flutter build` in `packages/grin_native/example` or `stack_wallet`) without any Flutter plugin package: the hooks runner invokes the hook of every package in the dependency graph and bundles `libgrin_ffi`.
-> - Keeps `packages/grin` pure Dart. It has no hook, no `dart:ffi`, no `dart:isolate` and no runtime dependencies, so it compiles to JavaScript (the `web-smoke` stage) and the contract can be implemented by another backend (5.2).
+> - Keeps `packages/grin` pure Dart. It has no hook, no `dart:ffi`, no `dart:isolate` and no runtime dependencies, so it compiles to JavaScript (the `web-smoke` stage, which compiles it and also checks `lib/` for `dart:io` and `dart:isolate` imports, since those compile and fail only at run time) and the contract can be implemented by another backend (5.2).
 > - Keeps the build to one hook: a `native_toolchain_rust` `RustBuilder` build of `rust/`, with one `grin_native`-specific user-define:
 >   ```yaml
 >   hooks:
@@ -331,7 +331,7 @@ Every FFI function (except the `void` destructors `grin_ffi_result_free`, `grin_
 ### 5.2 The Contract (`package:grin`), the Backend (`package:grin_native`) and How to Test Against Them
 
 1. **Dependency chain**: app -> `grin_native` -> `grin`. An app lists `grin_native` alone and imports only `package:grin_native/...`; `grin` is transitive. `lib/grin_native.dart` does `export 'package:grin/grin.dart';` in full, so one import gives the models, exceptions, units, events and both interfaces, plus `GrinWalletClient` and `GrinNativeBackend`.
-2. **`grin` is pure Dart**: no build hook, no `dart:ffi`, no `dart:isolate` and no runtime dependencies (its pubspec has only `lints` and `test` as dev dependencies). The `web-smoke` stage of `tool/ci.dart` compiles `packages/grin/tool/web_smoke.dart` to JavaScript and runs it with node when installed, so any native import fails the gate.
+2. **`grin` is pure Dart**: no build hook, no `dart:ffi`, no `dart:isolate` and no runtime dependencies (its pubspec has only `lints` and `test` as dev dependencies). The `web-smoke` stage of `tool/ci.dart` first rejects any `dart:ffi`, `dart:io` or `dart:isolate` import, or a package other than `grin`, in `packages/grin/lib`, then compiles `packages/grin/tool/web_smoke.dart` (which imports both `grin.dart` and `codec.dart`) to JavaScript and runs it with node when installed. The compile alone catches only `dart:ffi`.
 3. **Two interfaces**:
    - `GrinWalletApi` (`packages/grin/lib/src/wallet/grin_wallet_api.dart`) is one open wallet: every instance operation of `GrinWalletClient` (`walletDir`, `network`, `isClosed`, `events`, `getAddress`, `getBalance`, `scan`, `scanProgress`, `cancelScan`, the send, receive, invoice and finalize operations, `repost`, `cancelTransaction`, `exportPaymentProof`, `close` and the rest).
    - `GrinWalletBackend` (`packages/grin/lib/src/wallet/grin_wallet_backend.dart`) is what needs no open wallet, and the way to get one: `generateMnemonic`, `validateMnemonic`, `validateAddress`, `validateAddressSync`, `testNodeConnection`, `create`, `open`, `delete` and `decodeSlatepackWithoutWallet`. `create` and `open` return a `GrinWalletApi`.
@@ -397,7 +397,7 @@ A wallet with 0 balance cannot initiate an `S1` send (`init_send_tx` fails with 
    - Dart (`wallet_lifecycle_test.dart`): start a scan or `getBalance`, call `await client.close()` while it is in flight, and verify that `close()` completes only after the operation settles, that new calls throw `StateError`, and that an immediate `GrinWalletClient.open` on the same directory succeeds without `GrinWalletBusyException`.
 5. **Contract, Purity and Consumer Gates (`packages/grin/test`, `web-smoke`, `consumer`)**:
    - `packages/grin/test` (`models_test.dart`, `tx_models_test.dart`, `wallet_interface_test.dart`) runs in pure Dart with no native library; the interface test uses hand-written fakes of `GrinWalletApi` and `GrinWalletBackend`.
-   - `web-smoke` compiles `packages/grin/tool/web_smoke.dart` to JavaScript, which fails on any native import.
+   - `web-smoke` checks `packages/grin/lib` for `dart:ffi`, `dart:io` and `dart:isolate` imports and for packages other than `grin`, then compiles `packages/grin/tool/web_smoke.dart` to JavaScript and runs it with node.
    - `consumer` analyzes and tests `packages/grin_native/test_consumer`, which depends on `grin_native` alone and sends and receives on the in-process test chain through `GrinWalletApi` (5.2).
 
 ---
@@ -1410,17 +1410,19 @@ Same machine. `dart run tool/ci.dart` on branch `grin-native-split`, compared wi
 | rust-release, android | nm: 35 standard, 0 test symbols on the host and on aarch64, armv7 and x86_64 Android | the same |
 | bindings | no diff | no diff (regenerated once for the new asset id) |
 | dart-analyze | packages/grin: no issues | packages/grin and grin_native lib, test, hook: no issues |
-| dart-test | packages/grin: 119 passed, 2 skipped | packages/grin: 38 passed; packages/grin_native: 84 passed, 2 skipped |
-| web-smoke | (new) | `web_smoke ok` from node |
+| dart-test | packages/grin: 119 passed, 2 skipped | packages/grin: 38 passed; packages/grin_native: 87 passed, 2 skipped |
+| web-smoke | (new) | no dart:ffi, dart:io or dart:isolate in packages/grin/lib; `web_smoke ok` from node |
 | consumer | (new) | no issues; 1 passed |
 | flutter-analyze, flutter-test | no issues; 8 passed | no issues; 8 passed (in the example) |
 | flutter-build | linux bundle and app-release.apk (28.0MB) | the same, bundle `grin_native_example` |
 
-The 119 baseline Dart tests are the 35 that stayed in `grin` (models 9, tx_models 26) and the 84 that moved to `grin_native`, with the same count per file; the 3 new ones are `grin`'s `wallet_interface_test.dart`. The 2 skips are `live_node_test.dart` and `regtest_test.dart`, which need their environment variables. The 8 Flutter tests are the 7 helper tests, now in `example/test/helpers_test.dart`, and the re-export test, now `example/test/widget_test.dart`.
+The 119 baseline Dart tests are the 35 that stayed in `grin` (models 9, tx_models 26) and the 84 that moved to `grin_native`, with the same count per file. The 6 new ones are `grin`'s `wallet_interface_test.dart` (3, hand-written fakes) and `grin_native`'s `native_backend_test.dart` (3, every `GrinNativeBackend` method through the `GrinWalletBackend` type), added after the independent review. The 2 skips are `live_node_test.dart` and `regtest_test.dart`, which need their environment variables. The 8 Flutter tests are the 7 helper tests, now in `example/test/helpers_test.dart`, and the re-export test, now `example/test/widget_test.dart`.
 
 `tool/regtest.sh` passed against the fork at b5d756b: 1 test, 3 proxy connections. After deleting `.dart_tool/hooks_runner`, `dart test` in `packages/grin` passed and no hooks ran at all. A `dart compile js` of a program that imports `package:grin_native` fails with "Dart library 'dart:ffi' is not available on this platform", which is the failure web-smoke exists to catch in `grin`.
 
 Two failures on the first full run were environmental and are fixed: the analysis server crashed sending a memory-usage analytics event without network when `grin_native` was analyzed together with its nested example and consumer packages (dart-analyze now analyzes only `lib`, `test` and `hook` there), and `flutter build linux` refused the CMake cache that `git mv` had carried over from the old example path (the ignored `example/build` directory was deleted).
+
+An independent review of `git diff grin-v1..grin-native-split` found no bugs and confirmed that `packages/grin_native/rust` is the same git tree as `grin-v1:packages/grin/rust`. Its should-fix items are done: web-smoke now also checks `packages/grin/lib` for `dart:io` and `dart:isolate` (which `dart compile js` accepts) and compiles `codec.dart` too; the example's analysis options regained the strict modes and rules the helpers had under `grin_flutter`, and its pubspec the `flutter: ">=3.47.0"` floor; `GrinNativeBackend` has its own tests. Left as found: the root `analysis_options.yaml` says every package includes it, and none does, on this branch or on `grin-v1`.
 
 ### D9. Review items left as they are, and why
 
@@ -1458,6 +1460,6 @@ Decided on 2026-11-03. It supersedes D4. The first build kept the contract and t
 - D6's Cargo workspace is now at `packages/grin_native/rust`, moved with `git mv`. The Rust code and the C ABI are unchanged (35 exported symbols), and so is `docs/ffi-json.md` apart from the paths in its first lines.
 - `grin_flutter` is removed. The re-export became `grin_native.dart`'s export of `grin`. The path_provider helper became example code, `WalletPaths` in `lib/src/wallet_paths.dart`, with the same behaviour. `GrinLifecycleObserver` became example code in `lib/src/lifecycle_observer.dart` and takes a `GrinWalletApi`. Their tests are `example/test/helpers_test.dart`.
 - The example app moved from `grin_flutter/example` to `packages/grin_native/example` and was renamed `grin_native_example`; its Android, iOS, macOS, Linux and Windows identifiers changed from `grin_flutter_example` and `grinFlutterExample` to `grin_native_example` and `grinNativeExample`. It depends on `grin_native` only.
-- New gates in `tool/ci.dart`: `web-smoke` compiles `packages/grin/tool/web_smoke.dart` to JavaScript (and runs it with node when installed), which fails on any native import into `grin`; `consumer` analyzes and tests `packages/grin_native/test_consumer` (pub name `grin_native_test_consumer`), a pure Dart package that depends on `grin_native` alone, never imports `package:grin/`, and pays by Slatepack between two wallets on the in-process test chain through `GrinWalletApi`. `tool/regen_bindings.dart`, `tool/regtest.sh`, `tool/verify-apple.sh` and `tool/verify-windows.ps1` point at `packages/grin_native`.
+- New gates in `tool/ci.dart`: `web-smoke` rejects `dart:ffi`, `dart:io`, `dart:isolate` and foreign package imports in `packages/grin/lib`, then compiles `packages/grin/tool/web_smoke.dart` to JavaScript (catching `dart:ffi` again) and runs it with node when installed; `consumer` analyzes and tests `packages/grin_native/test_consumer` (pub name `grin_native_test_consumer`), a pure Dart package that depends on `grin_native` alone, never imports `package:grin/`, and pays by Slatepack between two wallets on the in-process test chain through `GrinWalletApi`. `tool/regen_bindings.dart`, `tool/regtest.sh`, `tool/verify-apple.sh` and `tool/verify-windows.ps1` point at `packages/grin_native`.
 - Section 13 is a dated record and still names the earlier paths and the example ids `grin_flutter_example`; D1 to D11 are left as written.
 - To reverse: the layout before the split is in the history of `grin-v1`.

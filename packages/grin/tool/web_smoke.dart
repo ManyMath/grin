@@ -1,10 +1,12 @@
 // Compiled to JavaScript by the web-smoke stage of tool/ci.dart, which runs
-// the output with node when it is installed. It proves that package:grin
-// has no native dependency: dart compile js fails on any dart:ffi or
-// dart:isolate import.
+// the output with node when it is installed. Both public libraries of
+// package:grin are imported, so a dart:ffi import anywhere in them fails the
+// compile; the stage checks lib/ for dart:io and dart:isolate separately,
+// since those compile and only fail at run time.
 //
 //   dart compile js -o /tmp/web_smoke.js tool/web_smoke.dart && node /tmp/web_smoke.js
 // ignore_for_file: avoid_print
+import 'package:grin/codec.dart';
 import 'package:grin/grin.dart';
 
 void main() {
@@ -27,6 +29,8 @@ void main() {
     balance.amountCurrentlySpendable == amount,
     error is GrinWalletBusyException,
     GrinNetwork.testnet.value == 1,
+    readBigInt('18446744073709551615', 'max') ==
+        BigInt.parse('18446744073709551615'),
   ];
   if (checks.contains(false)) throw StateError('web_smoke failed: $checks');
   print('web_smoke ok');

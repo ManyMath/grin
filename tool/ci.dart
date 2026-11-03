@@ -21,9 +21,10 @@
 //   dart-format      dart format --set-exit-if-changed on the Dart sources
 //   dart-test        dart test in packages/grin (pure Dart) and
 //                    packages/grin_native (test_utils on)
-//   web-smoke        dart compile js of packages/grin/tool/web_smoke.dart,
-//                    run with node when it is installed: grin has no native
-//                    dependency
+//   web-smoke        packages/grin/lib imports no dart:ffi, dart:io or
+//                    dart:isolate and no package but grin; then dart compile
+//                    js of packages/grin/tool/web_smoke.dart (which fails on
+//                    dart:ffi), run with node when it is installed
 //   consumer         analyze and test packages/grin_native/test_consumer,
 //                    which depends on grin_native alone and sends and
 //                    receives on the test chain through GrinWalletApi
@@ -238,6 +239,23 @@ Future<void> dartTest() async {
 }
 
 Future<void> webSmoke() async {
+  // dart compile js rejects dart:ffi but accepts dart:io and dart:isolate,
+  // which only fail at run time, so those are checked here.
+  final directive = RegExp(
+    r'''^\s*(?:import|export)\s+'(dart:(?:ffi|io|isolate)|package:(?!grin/)[^']*)''',
+    multiLine: true,
+  );
+  final offenders = <String>[];
+  for (final entity in Directory('$grin/lib').listSync(recursive: true)) {
+    if (entity is! File || !entity.path.endsWith('.dart')) continue;
+    for (final m in directive.allMatches(entity.readAsStringSync())) {
+      offenders.add('${entity.path.substring(root.length + 1)}: ${m[1]}');
+    }
+  }
+  if (offenders.isNotEmpty) {
+    throw _GateFailure('native or foreign imports in grin: $offenders');
+  }
+  stdout.writeln('packages/grin/lib: no dart:ffi, dart:io, dart:isolate');
   final out = await Directory.systemTemp.createTemp('grin_web_smoke_');
   try {
     final js = '${out.path}/web_smoke.js';

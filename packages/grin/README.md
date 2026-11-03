@@ -41,9 +41,11 @@ Wallet's own wallet class for Grin is `GrinWallet`, and it holds one of these.
 
 The package has no build hook, no `dart:ffi`, no `dart:isolate` and no
 runtime dependencies (`pubspec.yaml` lists only `lints` and `test` for
-development). It compiles to JavaScript. `tool/web_smoke.dart` is compiled
-with `dart compile js` by the `web-smoke` stage of `tool/ci.dart` and run
-with node, so an import of anything native fails that gate.
+development). It compiles to JavaScript. The `web-smoke` stage of
+`tool/ci.dart` checks `lib/` for `dart:ffi`, `dart:io` and `dart:isolate`
+imports and for packages other than `grin`, then compiles
+`tool/web_smoke.dart` with `dart compile js` and runs it with node. The
+compile on its own catches only `dart:ffi`.
 
 ## Implementing a backend
 
