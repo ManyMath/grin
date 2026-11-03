@@ -1,5 +1,5 @@
 name: grin_workspace
-description: Pub workspace for the grin and grin_flutter packages. Not a package.
+description: Pub workspace for the grin and grin_native packages. Not a package.
 publish_to: none
 
 environment:
@@ -7,14 +7,15 @@ environment:
 
 workspace:
   - packages/grin
-  - packages/grin_flutter
-  - packages/grin_flutter/example
+  - packages/grin_native
+  - packages/grin_native/example
 
 # Applies to every build resolved from this workspace (dart test, the
-# example app). Stack Wallet sets its own block; see packages/grin/README.md.
+# example app). Stack Wallet sets its own block; see
+# packages/grin_native/README.md.
 hooks:
   user_defines:
-    grin:
+    grin_native:
       # Export grin_test_* so dart test can drive an in-process chain.
       # Never set it in an app.
       test_utils: true

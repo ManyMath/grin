@@ -1,0 +1,42 @@
+# Run with `dart run tool/regen_bindings.dart` from the repository root,
+# which rebuilds the header first. Direct: `dart run ffigen --config ffigen.yaml`.
+name: GrinFfiBindings
+description: |
+  Bindings for rust/include/grin_ffi.h.
+
+  Regenerate with `dart run tool/regen_bindings.dart`.
+output: 'lib/src/ffi/bindings.g.dart'
+ffi-native:
+  asset-id: 'package:grin_native/src/ffi/bindings.g.dart'
+headers:
+  entry-points:
+    - 'rust/include/grin_ffi.h'
+  include-directives:
+    - 'rust/include/grin_ffi.h'
+# The grin_test_* declarations sit behind this define in the header. They are
+# bound lazily, so a library built without test-utils only fails when one is called.
+compiler-opts:
+  - '-DGRIN_FFI_TEST_UTILS'
+functions:
+  include:
+    - 'grin_.*'
+  symbol-address:
+    include:
+      - 'grin_wallet_close_finalizer'
+structs:
+  include:
+    - 'GrinFfiResult'
+enums:
+  include:
+    - 'GrinErrorCode'
+  as-int:
+    include:
+      - 'GrinErrorCode'
+preamble: |
+  // ignore_for_file: always_specify_types
+  // ignore_for_file: camel_case_types
+  // ignore_for_file: non_constant_identifier_names
+  // ignore_for_file: public_member_api_docs
+comments:
+  style: any
+  length: full

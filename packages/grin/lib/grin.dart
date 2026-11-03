@@ -1,7 +1,8 @@
-/// Dart bindings and a typed wallet client for Grin.
+/// The backend-neutral Grin wallet API: models, exceptions, units and events.
 ///
-/// The native library is built or downloaded by this package's build hook.
-/// Start with [GrinWalletClient].
+/// This package has no native code. Apps depend on a backend package, such
+/// as grin_native, which implements the wallet over the grin-ffi library and
+/// re-exports this library.
 library;
 
 export 'src/errors/grin_exception.dart';
@@ -27,5 +28,4 @@ export 'src/models/grin_tx_list.dart';
 export 'src/models/grin_tx_log_entry.dart';
 export 'src/models/grin_units.dart';
 export 'src/models/grin_wallet_config.dart';
-export 'src/wallet/grin_wallet_client.dart';
 export 'src/wallet/grin_wallet_event.dart';

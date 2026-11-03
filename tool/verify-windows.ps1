@@ -22,7 +22,7 @@ Write-Output '== host'
 rustc --version; cargo --version
 $fail = $false
 
-Set-Location "$root\packages\grin\rust"
+Set-Location "$root\packages\grin_native\rust"
 Write-Output '== cargo build --release --target x86_64-pc-windows-msvc'
 cargo build -p grin-ffi --release --locked --target x86_64-pc-windows-msvc
 if ($LASTEXITCODE -ne 0) { Write-Output 'BUILD_FAIL'; $fail = $true }
@@ -46,7 +46,7 @@ if ($Flutter -and (Get-Command flutter -ErrorAction SilentlyContinue)) {
   Write-Output '== flutter build windows (example)'
   Set-Location $root
   dart pub get | Out-Null
-  Set-Location "$root\packages\grin_flutter\example"
+  Set-Location "$root\packages\grin_native\example"
   flutter build windows
   if ($LASTEXITCODE -ne 0) { Write-Output 'FLUTTER_FAIL'; $fail = $true }
 }

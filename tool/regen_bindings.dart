@@ -4,21 +4,21 @@
 //   dart run tool/regen_bindings.dart --check  # fail if anything would change
 //
 // Steps: cargo build -p grin-ffi (build.rs runs cbindgen and refreshes
-// packages/grin/rust/include/grin_ffi.h), then ffigen in
-// packages/grin, then dart format on the generated file. --check runs the
+// packages/grin_native/rust/include/grin_ffi.h), then ffigen in
+// packages/grin_native, then dart format on the generated file. --check runs the
 // same and fails when git reports a diff in either generated file.
 import 'dart:io';
 
 import 'package:path/path.dart' as p;
 
-const _header = 'packages/grin/rust/include/grin_ffi.h';
-const _bindings = 'packages/grin/lib/src/ffi/bindings.g.dart';
+const _header = 'packages/grin_native/rust/include/grin_ffi.h';
+const _bindings = 'packages/grin_native/lib/src/ffi/bindings.g.dart';
 
 Future<void> main(List<String> args) async {
   final check = args.contains('--check');
   final root = _repoRoot();
-  final rust = p.join(root, 'packages', 'grin', 'rust');
-  final grin = p.join(root, 'packages', 'grin');
+  final rust = p.join(root, 'packages', 'grin_native', 'rust');
+  final grinNative = p.join(root, 'packages', 'grin_native');
 
   // build.rs only refreshes the committed header when asked, so a plain
   // cargo build never rewrites a checkout; tests/header_test.rs compares
@@ -29,7 +29,7 @@ Future<void> main(List<String> args) async {
     rust,
     environment: {'GRIN_FFI_WRITE_HEADER': '1'},
   );
-  await _run('dart', ['run', 'ffigen', '--config', 'ffigen.yaml'], grin);
+  await _run('dart', ['run', 'ffigen', '--config', 'ffigen.yaml'], grinNative);
   await _run('dart', ['format', p.join(root, _bindings)], root);
 
   if (check) {

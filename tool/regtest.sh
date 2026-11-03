@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Runs packages/grin/test/regtest_test.dart against a private Grin chain:
+# Runs packages/grin_native/test/regtest_test.dart against a private Grin chain:
 # the node's usernet mode with its test miner, a grin-wallet CLI wallet that
 # owns the mined coins and runs a foreign API listener, and a small SOCKS5
 # proxy. The node and the CLI are built from the fork's own sources.
@@ -58,7 +58,7 @@ for _ in $(seq 1 120); do [ "$(tip)" -ge 20 ] && break; sleep 2; done
 echo "tip: $(tip)"
 
 echo "== regtest_test.dart"
-cd "$root/packages/grin"
+cd "$root/packages/grin_native"
 GRIN_REGTEST_NODE_URL=http://127.0.0.1:23413 \
 GRIN_REGTEST_PEER_URL=http://127.0.0.1:23415 \
 GRIN_REGTEST_CLI=$cli \

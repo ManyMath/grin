@@ -5,8 +5,6 @@ analyzer:
     strict-casts: true
     strict-inference: true
     strict-raw-types: true
-  exclude:
-    - "lib/src/ffi/bindings.g.dart"
 linter:
   rules:
     - always_declare_return_types

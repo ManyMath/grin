@@ -20,7 +20,7 @@ export CARGO_NET_GIT_FETCH_WITH_CLI=true
 
 echo "== host"; sw_vers 2>/dev/null || true; xcodebuild -version 2>/dev/null | head -2 || true; rustc --version; cargo --version
 
-cd "$root/packages/grin/rust"
+cd "$root/packages/grin_native/rust"
 fail=0
 for t in aarch64-apple-darwin x86_64-apple-darwin aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios; do
   echo "== cargo build --release --target $t"
@@ -36,7 +36,7 @@ done
 
 if [ "${FLUTTER:-0}" = 1 ] && command -v flutter >/dev/null; then
   echo "== flutter build macos (example)"
-  (cd "$root" && dart pub get >/dev/null && cd packages/grin_flutter/example && flutter build macos) || { echo "FLUTTER_FAIL"; fail=1; }
+  (cd "$root" && dart pub get >/dev/null && cd packages/grin_native/example && flutter build macos) || { echo "FLUTTER_FAIL"; fail=1; }
 fi
 
 if [ "$fail" = 0 ]; then echo "VERIFY_APPLE_OK"; else echo "VERIFY_APPLE_FAIL"; exit 1; fi

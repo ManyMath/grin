@@ -16,11 +16,13 @@
 //                    NDK 28.2 through cargo-ndk; nm on each
 //   bindings         tool/regen_bindings.dart --check (header and ffigen output
 //                    are up to date)
-//   dart-analyze     dart analyze --fatal-infos in packages/grin
+//   dart-analyze     dart analyze --fatal-infos in packages/grin and
+//                    packages/grin_native
 //   dart-format      dart format --set-exit-if-changed on the Dart sources
-//   dart-test        dart test in packages/grin (test_utils on)
-//   flutter-analyze  flutter analyze in packages/grin_flutter and its example
-//   flutter-test     flutter test in packages/grin_flutter
+//   dart-test        dart test in packages/grin (pure Dart) and
+//                    packages/grin_native (test_utils on)
+//   flutter-analyze  flutter analyze in packages/grin_native/example
+//   flutter-test     flutter test in packages/grin_native/example
 //   flutter-build    flutter build linux and apk (arm64) of the example
 //
 // The nm gate reads the dynamic symbol table (llvm-nm -D) for ELF files,
@@ -39,10 +41,10 @@ const _androidTargets = {
 };
 
 late final String root;
-String get rust => '$root/packages/grin/rust';
+String get rust => '$root/packages/grin_native/rust';
 String get grin => '$root/packages/grin';
-String get grinFlutter => '$root/packages/grin_flutter';
-String get example => '$root/packages/grin_flutter/example';
+String get grinNative => '$root/packages/grin_native';
+String get example => '$root/packages/grin_native/example';
 
 final List<String> _failures = [];
 final List<String> _passed = [];
@@ -194,27 +196,32 @@ Future<void> android() async {
 Future<void> bindings() =>
     _run('dart', ['run', 'tool/regen_bindings.dart', '--check'], root);
 
-Future<void> dartAnalyze() => _run('dart', ['analyze', '--fatal-infos'], grin);
+Future<void> dartAnalyze() async {
+  await _run('dart', ['analyze', '--fatal-infos'], grin);
+  await _run('dart', ['analyze', '--fatal-infos'], grinNative);
+}
 
 Future<void> dartFormat() => _run('dart', [
   'format',
   '--set-exit-if-changed',
   'packages/grin',
-  'packages/grin_flutter/lib',
-  'packages/grin_flutter/test',
-  'packages/grin_flutter/example/lib',
-  'packages/grin_flutter/example/integration_test',
+  'packages/grin_native/hook',
+  'packages/grin_native/lib',
+  'packages/grin_native/test',
+  'packages/grin_native/example/lib',
+  'packages/grin_native/example/test',
+  'packages/grin_native/example/integration_test',
   'tool',
 ], root);
 
-Future<void> dartTest() => _run('dart', ['test'], grin);
-
-Future<void> flutterAnalyze() async {
-  await _run('flutter', ['analyze'], grinFlutter);
-  await _run('flutter', ['analyze'], example);
+Future<void> dartTest() async {
+  await _run('dart', ['test'], grin);
+  await _run('dart', ['test'], grinNative);
 }
 
-Future<void> flutterTest() => _run('flutter', ['test'], grinFlutter);
+Future<void> flutterAnalyze() => _run('flutter', ['analyze'], example);
+
+Future<void> flutterTest() => _run('flutter', ['test'], example);
 
 Future<void> flutterBuild() async {
   await _run('flutter', ['build', 'linux'], example);
