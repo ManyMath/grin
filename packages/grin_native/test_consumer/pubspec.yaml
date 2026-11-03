@@ -1,0 +1,14 @@
+name: grin_native_test_consumer
+description: Not a library. An app-shaped package that depends on grin_native alone, as Stack Wallet would, and sends and receives on the in-process test chain through the GrinWallet interface.
+publish_to: none
+resolution: workspace
+
+environment:
+  sdk: ^3.13.0
+
+dependencies:
+  grin_native: ^0.1.0
+
+dev_dependencies:
+  lints: ^6.0.0
+  test: ^1.26.0

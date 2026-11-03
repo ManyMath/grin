@@ -24,6 +24,9 @@
 //   web-smoke        dart compile js of packages/grin/tool/web_smoke.dart,
 //                    run with node when it is installed: grin has no native
 //                    dependency
+//   consumer         analyze and test packages/grin_native/test_consumer,
+//                    which depends on grin_native alone and sends and
+//                    receives on the test chain through GrinWallet
 //   flutter-analyze  flutter analyze in packages/grin_native/example
 //   flutter-test     flutter test in packages/grin_native/example
 //   flutter-build    flutter build linux and apk (arm64) of the example
@@ -48,6 +51,7 @@ String get rust => '$root/packages/grin_native/rust';
 String get grin => '$root/packages/grin';
 String get grinNative => '$root/packages/grin_native';
 String get example => '$root/packages/grin_native/example';
+String get consumerPackage => '$root/packages/grin_native/test_consumer';
 
 final List<String> _failures = [];
 final List<String> _passed = [];
@@ -69,6 +73,7 @@ Future<void> main(List<String> args) async {
     'dart-format': dartFormat,
     'dart-test': dartTest,
     'web-smoke': webSmoke,
+    'consumer': consumer,
     'flutter-analyze': flutterAnalyze,
     'flutter-test': flutterTest,
     'flutter-build': flutterBuild,
@@ -215,6 +220,7 @@ Future<void> dartFormat() => _run('dart', [
   'packages/grin_native/example/lib',
   'packages/grin_native/example/test',
   'packages/grin_native/example/integration_test',
+  'packages/grin_native/test_consumer',
   'tool',
 ], root);
 
@@ -247,6 +253,11 @@ Future<void> webSmoke() async {
   } finally {
     await out.delete(recursive: true);
   }
+}
+
+Future<void> consumer() async {
+  await _run('dart', ['analyze', '--fatal-infos'], consumerPackage);
+  await _run('dart', ['test'], consumerPackage);
 }
 
 Future<void> flutterAnalyze() => _run('flutter', ['analyze'], example);

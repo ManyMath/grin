@@ -9,6 +9,7 @@ workspace:
   - packages/grin
   - packages/grin_native
   - packages/grin_native/example
+  - packages/grin_native/test_consumer
 
 # Applies to every build resolved from this workspace (dart test, the
 # example app). Stack Wallet sets its own block; see

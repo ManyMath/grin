@@ -1,0 +1,13 @@
+include: package:lints/recommended.yaml
+analyzer:
+  language:
+    strict-casts: true
+    strict-inference: true
+    strict-raw-types: true
+linter:
+  rules:
+    - depend_on_referenced_packages
+    - directives_ordering
+    - implementation_imports
+    - prefer_final_locals
+    - unawaited_futures
