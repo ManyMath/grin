@@ -26,6 +26,9 @@ import 'grin_wallet_event.dart';
 /// should match. Code written against this interface can be tested with a
 /// hand-written fake.
 ///
+/// It is not called `GrinWallet` because that is the name of Stack Wallet's
+/// own wallet class for Grin, which will hold one of these.
+///
 /// Operations of one wallet run one after another in the order they were
 /// called; [scanProgress] and [cancelScan] are the two exceptions, because
 /// they must answer while a scan runs. Amounts are `BigInt` nanogrin; see
@@ -44,7 +47,7 @@ import 'grin_wallet_event.dart';
 ///   mismatch between the backend and its library, not a wallet problem.
 ///
 /// Call [close] when you are done.
-abstract interface class GrinWallet {
+abstract interface class GrinWalletApi {
   /// The directory the wallet was opened from, as it was given.
   String get walletDir;
 

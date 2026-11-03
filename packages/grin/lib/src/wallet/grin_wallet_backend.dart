@@ -5,7 +5,7 @@ import '../models/grin_network.dart';
 import '../models/grin_node_info.dart';
 import '../models/grin_slate_info.dart';
 import '../models/grin_wallet_config.dart';
-import 'grin_wallet.dart';
+import 'grin_wallet_api.dart';
 
 /// The operations of a Grin backend that need no open wallet, and the way
 /// to get one: [create] and [open].
@@ -60,7 +60,7 @@ abstract interface class GrinWalletBackend {
   /// Creates a wallet in `<config.walletDir>/wallet_data` and opens it.
   ///
   /// With a null [mnemonic] a new 24-word seed is generated; otherwise the
-  /// 12 to 24 word phrase is restored, and the wallet needs a [GrinWallet.scan] to find
+  /// 12 to 24 word phrase is restored, and the wallet needs a [GrinWalletApi.scan] to find
   /// its outputs. Nothing contacts the node.
   ///
   /// Throws [GrinWalletExistsException] if the directory already holds a
@@ -71,7 +71,7 @@ abstract interface class GrinWalletBackend {
   /// holds the directory, or one that was closed is still finishing a call.
   /// The error is reported as it is and never retried. Close the other
   /// wallet, reuse it, or let the caller decide whether to wait.
-  Future<GrinWallet> create({
+  Future<GrinWalletApi> create({
     required GrinWalletConfig config,
     String? mnemonic,
     required String password,
@@ -88,7 +88,7 @@ abstract interface class GrinWalletBackend {
   /// if a wallet that was closed has a call that has not returned yet. After
   /// `await wallet.close()` the directory is always free again. The error is
   /// reported as it is and never retried.
-  Future<GrinWallet> open({
+  Future<GrinWalletApi> open({
     required GrinWalletConfig config,
     required String password,
   });

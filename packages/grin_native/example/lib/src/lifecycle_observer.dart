@@ -3,18 +3,18 @@ import 'package:grin_native/grin_native.dart';
 
 /// Cancels a running scan when the app goes to the background.
 ///
-/// It listens to [AppLifecycleListener] and calls [GrinWallet.cancelScan]
+/// It listens to [AppLifecycleListener] and calls [GrinWalletApi.cancelScan]
 /// when the app becomes `paused` or `detached`, as configured. Call [dispose]
 /// before closing the wallet.
 ///
 /// The native scan cannot be interrupted between its batches of blocks, so
 /// the cancel takes effect when the running batch ends. See
-/// [GrinWallet.cancelScan].
+/// [GrinWalletApi.cancelScan].
 class GrinLifecycleObserver {
   /// Watches [wallet]. [onError] receives every error from `cancelScan`
   /// except the [StateError] of a closed wallet, which is ignored.
   GrinLifecycleObserver({
-    required GrinWallet wallet,
+    required GrinWalletApi wallet,
     bool cancelScanOnPause = true,
     bool cancelScanOnDetach = true,
     void Function(Object error)? onError,

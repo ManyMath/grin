@@ -9,7 +9,7 @@ Future<String> openAndDescribe(
   GrinWalletBackend backend,
   GrinWalletConfig config,
 ) async {
-  GrinWallet wallet;
+  GrinWalletApi wallet;
   try {
     wallet = await backend.open(config: config, password: 'pw');
   } on GrinWalletNotFoundException {
@@ -30,7 +30,7 @@ final class _FakeBackend implements GrinWalletBackend {
   final List<String> calls = [];
 
   @override
-  Future<GrinWallet> open({
+  Future<GrinWalletApi> open({
     required GrinWalletConfig config,
     required String password,
   }) async {
@@ -46,7 +46,7 @@ final class _FakeBackend implements GrinWalletBackend {
   }
 
   @override
-  Future<GrinWallet> create({
+  Future<GrinWalletApi> create({
     required GrinWalletConfig config,
     String? mnemonic,
     required String password,
@@ -61,7 +61,7 @@ final class _FakeBackend implements GrinWalletBackend {
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
-final class _FakeWallet implements GrinWallet {
+final class _FakeWallet implements GrinWalletApi {
   _FakeWallet(GrinWalletConfig config)
     : walletDir = config.walletDir,
       network = config.network;
@@ -172,7 +172,7 @@ void main() {
   });
 
   test('events and close through the interface', () async {
-    final GrinWallet wallet = _FakeWallet(config);
+    final GrinWalletApi wallet = _FakeWallet(config);
     final events = <GrinWalletEvent>[];
     final done = wallet.events.listen(events.add).asFuture<void>();
 

@@ -26,7 +26,7 @@
 //                    dependency
 //   consumer         analyze and test packages/grin_native/test_consumer,
 //                    which depends on grin_native alone and sends and
-//                    receives on the test chain through GrinWallet
+//                    receives on the test chain through GrinWalletApi
 //   flutter-analyze  flutter analyze in packages/grin_native/example
 //   flutter-test     flutter test in packages/grin_native/example
 //   flutter-build    flutter build linux and apk (arm64) of the example

@@ -6,13 +6,13 @@ import 'package:grin_native_test_consumer/payments.dart';
 import 'package:test/test.dart';
 
 void main() {
-  test('send, receive and finalize through GrinWallet', () async {
+  test('send, receive and finalize through GrinWalletApi', () async {
     final root = await Directory.systemTemp.createTemp('grin_consumer_');
     addTearDown(() => root.delete(recursive: true));
     final chainDir = Directory('${root.path}/chain')..createSync();
 
     // The harness is native-only and hands out the concrete client; mining
-    // needs it. Everything else goes through GrinWallet.
+    // needs it. Everything else goes through GrinWalletApi.
     Future<GrinWalletClient> wallet(String id) async {
       final dir = Directory('${root.path}/$id')..createSync();
       final created = await GrinTestChain.createWallet(
@@ -26,8 +26,8 @@ void main() {
     }
 
     final miner = await wallet('alice');
-    final GrinWallet alice = miner;
-    final GrinWallet bob = await wallet('bob');
+    final GrinWalletApi alice = miner;
+    final GrinWalletApi bob = await wallet('bob');
     await GrinTestChain.mineBlocks(miner, 5);
 
     const GrinWalletBackend backend = GrinNativeBackend();

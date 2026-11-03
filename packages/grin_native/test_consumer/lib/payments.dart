@@ -7,8 +7,8 @@ import 'package:grin_native/grin_native.dart';
 /// Pays [amount] from [sender] to [recipient] with an encrypted Slatepack
 /// round trip (S1, S2, S3) and broadcasts the result.
 Future<GrinFinalizeResult> payBySlatepack({
-  required GrinWallet sender,
-  required GrinWallet recipient,
+  required GrinWalletApi sender,
+  required GrinWalletApi recipient,
   required BigInt amount,
 }) async {
   final to = await recipient.getAddress();

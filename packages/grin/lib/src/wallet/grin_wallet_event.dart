@@ -1,8 +1,8 @@
 import '../models/grin_scan_result.dart';
-import 'grin_wallet.dart';
+import 'grin_wallet_api.dart';
 
-/// Something that happened to a [GrinWallet]. Listen with
-/// [GrinWallet.events].
+/// Something that happened to a [GrinWalletApi]. Listen with
+/// [GrinWalletApi.events].
 sealed class GrinWalletEvent {
   const GrinWalletEvent();
 }

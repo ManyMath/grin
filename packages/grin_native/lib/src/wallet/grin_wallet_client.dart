@@ -11,7 +11,7 @@ import '../ffi/bindings.g.dart' as bindings;
 import '../ffi/memory.dart';
 import 'grin_native_backend.dart';
 
-/// A typed client for one open Grin wallet: the [GrinWallet] of the native
+/// A typed client for one open Grin wallet: the [GrinWalletApi] of the native
 /// backend. The wallet-less operations are static members here, and
 /// [GrinNativeBackend] offers them as a [GrinWalletBackend].
 ///
@@ -44,7 +44,7 @@ import 'grin_native_backend.dart';
 /// closed by a native finalizer when it is garbage collected, but the
 /// directory may stay busy until any operation still running has returned.
 /// Its [events] stream is then closed too, without [GrinWalletClosed].
-class GrinWalletClient implements GrinWallet, Finalizable {
+class GrinWalletClient implements GrinWalletApi, Finalizable {
   /// Wraps a native wallet [handle].
   ///
   /// Only for code that obtains a handle by other means, such as the test
@@ -626,7 +626,7 @@ class GrinWalletClient implements GrinWallet, Finalizable {
     return _enqueue(() => _verifyPaymentProof(handle, proofJson));
   }
 
-  /// Closes the wallet as [GrinWallet.close] describes. Releasing the
+  /// Closes the wallet as [GrinWalletApi.close] describes. Releasing the
   /// backend's hold means detaching the native finalizer and the [events]
   /// finalizer; closing the wallet means closing the native handle.
   @override
