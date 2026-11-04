@@ -23,8 +23,8 @@ use grin_util::ToHex;
 use grin_wallet_impls::{HttpSlateSender, SlateSender};
 use grin_wallet_libwallet::api_impl::{foreign, owner};
 use grin_wallet_libwallet::{
-    Error as LibwalletError, InitTxArgs, IssueInvoiceTxArgs, Slate, SlateState, SlatepackAddress,
-    StoredProofInfo, TxLogEntry, TxLogEntryType, WalletBackend,
+    Error as LibwalletError, InitTxArgs, IssueInvoiceTxArgs, OutputStatus, Slate, SlateState,
+    SlatepackAddress, StoredProofInfo, TxLogEntry, TxLogEntryType, WalletBackend,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -494,10 +494,16 @@ fn proof_info(p: &StoredProofInfo) -> Result<ProofInfoOut, GrinError> {
     })
 }
 
-/// The height each transaction confirmed at, from the wallet's own outputs:
-/// libwallet records a height on every output of ours once it is seen on
-/// chain, and `tx_log_entry` ties the output to its transaction. A send with
-/// no change output leaves no output of ours behind and gets no height.
+/// The height each transaction confirmed at, from the outputs it created
+/// for this wallet: libwallet records a height on every output of ours once
+/// it is seen on chain, and `tx_log_entry` ties the output to a transaction.
+///
+/// libwallet points an output's `tx_log_entry` at the spending transaction
+/// when it locks the output as an input, so a spent or locked output's
+/// height is its creation height, not the height of the transaction it now
+/// names. Only unspent outputs are counted. A transaction left with no
+/// unspent output of ours (a send without change, or one whose outputs have
+/// all been spent since) gets no height.
 fn confirmed_heights(session: &WalletSession) -> Result<HashMap<u32, u64>, GrinError> {
     let mask = session.mask();
     let (_, outputs) = owner::retrieve_outputs(
@@ -511,7 +517,7 @@ fn confirmed_heights(session: &WalletSession) -> Result<HashMap<u32, u64>, GrinE
     let mut heights = HashMap::new();
     for m in outputs {
         let o = m.output;
-        if o.height == 0 {
+        if o.height == 0 || o.status != OutputStatus::Unspent {
             continue;
         }
         if let Some(id) = o.tx_log_entry {

@@ -1180,3 +1180,41 @@ fn argument_errors() {
     close(alice);
     close(bob);
 }
+
+#[test]
+fn confirmed_height_of_a_send_without_change() {
+    let tmp = tempfile::tempdir().unwrap();
+    // Height 4: one mature coinbase output of REWARD.
+    let (alice, bob) = alice_and_bob(tmp.path(), 4);
+
+    // The whole output with the fee taken out of it leaves no change.
+    let s1 = init_send(
+        alice,
+        json!({
+            "amount": REWARD,
+            "min_confirms": 1,
+            "amount_includes_fee": true,
+            "recipient_address": address(bob),
+        }),
+    )
+    .unwrap();
+    let slate_id = s(&s1["slate_id"]).to_owned();
+    let s2 = receive(bob, &armored(&s1)).unwrap();
+    finalize(alice, &armored(&s2), true).unwrap();
+    // The test chain mines a broadcast transaction straight away, at height 5.
+    let mined_at = 5;
+    assert_eq!(mine(alice, 2), 7);
+
+    let a = entry(&txs(alice, true), &slate_id);
+    assert_eq!(a["confirmed"], true, "{a}");
+    assert_eq!(a["num_outputs"], 0, "{a}");
+    // Alice has no output from this transaction, so its height is unknown.
+    // Her spent input's creation height must not stand in for it.
+    assert!(a["confirmed_height"].is_null(), "{a}");
+
+    let b = entry(&txs(bob, true), &slate_id);
+    assert_eq!(b["confirmed"], true, "{b}");
+    assert_eq!(u(&b["confirmed_height"]), mined_at, "{b}");
+    close(alice);
+    close(bob);
+}

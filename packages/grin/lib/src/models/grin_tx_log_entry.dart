@@ -210,10 +210,12 @@ final class GrinTxLogEntry {
   /// Whether the transaction is confirmed.
   final bool confirmed;
 
-  /// The block height the transaction confirmed at, taken from this wallet's
-  /// own outputs in it. Null while unconfirmed, and for a confirmed send that
-  /// left this wallet no output (no change); fall back to
-  /// [kernelLookupMinHeight] then.
+  /// The block height the transaction confirmed at, taken from the unspent
+  /// outputs it created for this wallet. Null while unconfirmed, for a
+  /// confirmed send that left this wallet no output (no change), and once
+  /// every output it created has been spent. Null means unknown:
+  /// [kernelLookupMinHeight] is only a lower bound for a kernel search, not
+  /// the height the transaction confirmed at.
   final int? confirmedHeight;
 
   /// This wallet's inputs in the transaction.
