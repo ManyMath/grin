@@ -176,7 +176,9 @@ Stack Wallet lists `grin_native` alone and imports only
 same repository, and `grin` is not published, so it is pinned in
 `dependency_overrides` at the same url and ref: `grin_native` declares
 `grin: ^0.1.0`, which a git consumer would otherwise look up on pub.dev. The
-pin goes away once `grin` is published.
+pin goes away once `grin` is published. Use the grin.git url for both
+entries and move both refs together; grin_native.git on the same host is a
+mirror of the same tree, and pub counts a second url as a second source.
 The hook reads one user-define, `test_utils`, which adds the `grin_test_*`
 functions for tests and must stay false in an app; leaving the block out is
 the same.

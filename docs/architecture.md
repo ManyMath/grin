@@ -155,8 +155,8 @@ We fork `mimblewimble/grin-wallet` (`v5.5.1`, commit `f097811ee953fc81be4e70435d
 3. **Splitting [`HttpSlateSender`](file:///home/user/src/grin-wallet/impls/src/adapters/http.rs) from [`TorSlateSender`](file:///home/user/src/grin-wallet/impls/src/adapters/tor.rs)**:
    - [`impls/src/adapters/http.rs`](file:///home/user/src/grin-wallet/impls/src/adapters/http.rs) defines the ungated `HttpSlateSender` (`HttpSlateSender::new`, `HttpSlateSender::with_socks_proxy`, `check_other_version`, `post`, and `impl SlateSender for HttpSlateSender`).
    - [`impls/src/adapters/tor.rs`](file:///home/user/src/grin-wallet/impls/src/adapters/tor.rs) (gated behind `#[cfg(feature = "tor")]` in [`adapters/mod.rs`](file:///home/user/src/grin-wallet/impls/src/adapters/mod.rs) and [`lib.rs`](file:///home/user/src/grin-wallet/impls/src/lib.rs)) keeps the `arti` / external Tor process management and delegates its HTTP/JSON-RPC methods to `HttpSlateSender`.
-4. **Direct Dependencies in `crates/grin-ffi/Cargo.toml` (No `grin_wallet_controller` Dev-Dependency)**:
-   - Because `use grin_core as core;` etc. in [`impls/src/lib.rs`](file:///home/user/src/grin-wallet/impls/src/lib.rs#L27-L31) are private aliases rather than `pub use` re-exports, `crates/grin-ffi/Cargo.toml` depends directly on `grin_wallet_impls` (`default-features = false, features = ["rustls"]`), `grin_wallet_libwallet`, `grin_wallet_config`, `grin_wallet_util`, `grin_core`, `grin_keychain`, `grin_chain`, `grin_store`, and `grin_util` from the exact same fork via one git source pinned by `rev` (Cargo fetches the fork's `grin` submodule for the `grin_*` node crates):
+4. **Direct Dependencies in `packages/grin_native/rust/Cargo.toml` (No `grin_wallet_controller` Dev-Dependency)**:
+   - Because `use grin_core as core;` etc. in [`impls/src/lib.rs`](file:///home/user/src/grin-wallet/impls/src/lib.rs#L27-L31) are private aliases rather than `pub use` re-exports, `packages/grin_native/rust/Cargo.toml` depends directly on `grin_wallet_impls` (`default-features = false, features = ["rustls"]`), `grin_wallet_libwallet`, `grin_wallet_config`, `grin_wallet_util`, `grin_core`, `grin_keychain`, `grin_chain`, `grin_store`, and `grin_util` from the exact same fork via one git source pinned by `rev` (Cargo fetches the fork's `grin` submodule for the `grin_*` node crates):
      ```toml
      grin_wallet_impls = { git = "ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git", rev = "b5d756bdae51c71b1b2ec06dbf0695b37d50a850", default-features = false, features = ["rustls"] }
      grin_wallet_libwallet = { git = "ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git", rev = "b5d756bdae51c71b1b2ec06dbf0695b37d50a850" }
@@ -197,7 +197,7 @@ In v1, `grin_tx_send_http` uses `grin_wallet_impls::HttpSlateSender` (and the `S
    - Otherwise (only allowed for clearnet `http(s)://`, never `.onion`), call `HttpSlateSender::new(&recipient_url, timeout)?`.
 3. Call `owner::init_send_tx` (`S1`), call `sender.send_tx(&slate_s1, false)` to perform the `check_version` + `receive_tx` JSON-RPC handshake and receive the signed `S2` `Slate`, call `owner::tx_lock_outputs`, call `owner::finalize_tx` (`S3`), and broadcast via `owner::post_tx`.
 
-### 4.4 Trimmed, Fault-Tolerant Sidecar (`crates/grin-ffi/src/sidecar.rs`)
+### 4.4 Trimmed, Fault-Tolerant Sidecar (`packages/grin_native/rust/src/sidecar.rs`)
 
 Because `grin_wallet_libwallet::TxLogEntry` already persists `kernel_excess: Option<Commitment>` and `payment_proof: Option<StoredProofInfo>` (which stores `receiver_address` and `sender_address`), the sidecar file `<wallet_dir>/wallet_data/tx_metadata.json` only stores what `TxLogEntry` lacks:
 ```rust
@@ -216,7 +216,7 @@ pub struct TxSidecarEntry {
   - Sidecar reads and writes are best-effort (`if let Err(e) = sidecar.upsert(...) { log::warn!("Sidecar write failed: {e}"); }`) and **never** fail a transaction init, send, receive, or finalize operation.
   - When `grin_txs_get` builds each `GrinTxLogEntry` JSON object, `counterparty_address` is populated from `tx.payment_proof` first, falling back to `sidecar.counterparty_address`.
 
-### 4.5 Session Registry, `Drop`-Based Close & Per-Directory LMDB Guard (`crates/grin-ffi/src/handle.rs`)
+### 4.5 Session Registry, `Drop`-Based Close & Per-Directory LMDB Guard (`packages/grin_native/rust/src/handle.rs`)
 
 1. **Session Registry**:
    - `SESSION_REGISTRY: LazyLock<Mutex<HashMap<u64, Arc<WalletSession>>>>` maps non-zero monotonic `u64` handles (from an `AtomicU64` starting at 1, never reused) to sessions. `get_session(handle)` clones the `Arc<WalletSession>` out of the map, releases the lock, and sets the thread-local `CHAIN_TYPE` (4.2).
@@ -358,7 +358,7 @@ The two helpers were part of a Flutter companion package in the first build. The
 
 ## 7. Layer 4: Unified End-to-End Testing Strategy (Phase 4)
 
-A wallet with 0 balance cannot initiate an `S1` send (`init_send_tx` fails with `InsufficientFunds`). Rather than maintaining two separate test harnesses, **both Rust integration tests and Dart E2E tests use a single unified harness (`crates/grin-ffi/src/test_support.rs`) built on `grin_wallet_impls::test_framework` (`LocalWalletClient` and `WalletProxy` over a real in-process `grin_chain`)**:
+A wallet with 0 balance cannot initiate an `S1` send (`init_send_tx` fails with `InsufficientFunds`). Rather than maintaining two separate test harnesses, **both Rust integration tests and Dart E2E tests use a single unified harness (`packages/grin_native/rust/src/test_support.rs`) built on `grin_wallet_impls::test_framework` (`LocalWalletClient` and `WalletProxy` over a real in-process `grin_chain`)**:
 
 ### 7.1 Single Test Harness (`impls::test_framework` Behind `test-utils`)
 - `grin_wallet_impls` already exports `pub mod test_framework;` (`LocalWalletClient`, `WalletProxy`, `award_blocks_to_wallet`) as part of our normal dependency on `grin_wallet_impls`.
@@ -379,7 +379,7 @@ A wallet with 0 balance cannot initiate an `S1` send (`init_send_tx` fails with 
   - When release artifacts exist (D11, dnix), the same check moves onto the exact files a release publishes, before their hashes are recorded.
 
 ### 7.3 Test Suites (Rust & Dart)
-1. **C/C++ Header Verification (`crates/grin-ffi/tests/header_test.rs`)**:
+1. **C/C++ Header Verification (`packages/grin_native/rust/tests/header_test.rs`)**:
    - Compiles `target/include/grin_ffi.h` under both C11 and C++11 (`-Wall -Wextra -pedantic`).
 2. **Funded `S1 -> S2 -> S3` & `I1 -> I2 -> I3` E2E Tests (`ffi_e2e_test.rs` & `slatepack_e2e_test.dart`)**:
    - Creates Alice and Bob via `grin_test_create_wallet`, mines 5 blocks to Alice via `grin_test_mine_blocks` (maturing coinbase outputs since `AUTOMATED_TESTING_COINBASE_MATURITY = 3`), and runs:
@@ -832,6 +832,7 @@ dependency_overrides:
 
 Notes:
 
+- The url is `ssh://git@git.cypherstack.com:222/sneurlax/grin.git` for both entries. `sneurlax/grin_native.git` on the same host holds the same tree as a mirror; consumers do not use it. Pub treats two urls as two sources even at the same commit, so mixing them in one app gives source conflicts or pins that drift apart, and the dependency and the override advance to the same ref together.
 - Nothing goes into the `hooks.user_defines` block for `grin_native` today. The hook reads one key, `hooks.user_defines.grin_native.test_utils`, and Stack Wallet leaves it unset, so Stack never links `grin_test_*` ([PLAN] D1, D12). Everything else is fixed: the hook always builds `rust/` with the host toolchain, so Stack Wallet's build machines need rustup (the toolchain is pinned by `rust/rust-toolchain.toml`) and the NDK Flutter provides, as they do for the pre-kit `flutter_libepiccash` and `flutter_libmwc` source builds. The `tor_ffi_plugin`, `flutter_libepiccash` and `flutter_libmwc` entries in the NATIVE_PREBUILTS block ([SW-stg] pubspec.template.yaml:374-387) are untouched.
 - Prebuilt artifacts, and the user-define that selects them, arrive with the dnix pipeline (D11). The template block at :373-388 then gains a `grin_native` entry in dnix's form, next to the dnix entries `flutter_libepiccash` and `flutter_libmwc` already carry on their GitHub main branches (10.2).
 - The template already notes that entries for packages outside the dependency graph are ignored ([SW-stg] pubspec.template.yaml:369-370), which covers app configs that leave `GRIN` off.
@@ -930,7 +931,7 @@ Against the file list in [PLAN] lines 58-122:
 
 | Plan file | Coin-neutral part | Coin-specific part | Reason |
 |---|---|---|---|
-| crates/grin-ffi/src/error.rs ([PLAN] line 65) | `ffi_guard!` (catch_unwind, panic payload to message); the `{code, data, error}` result shape; CString ownership and free helpers; JSON error-body builder | `GrinErrorCode` variants and discriminants; the C type name `GrinFfiResult` and the exported `grin_ffi_result_free`/`grin_string_free` | cbindgen writes the type name into each coin's header and ffigen binds it per package, so each coin needs its own prefixed type and free symbols |
+| packages/grin_native/rust/src/error.rs ([PLAN] line 65) | `ffi_guard!` (catch_unwind, panic payload to message); the `{code, data, error}` result shape; CString ownership and free helpers; JSON error-body builder | `GrinErrorCode` variants and discriminants; the C type name `GrinFfiResult` and the exported `grin_ffi_result_free`/`grin_string_free` | cbindgen writes the type name into each coin's header and ffigen binds it per package, so each coin needs its own prefixed type and free symbols |
 | handle.rs ([PLAN] lines 66, 249-268) | u64 registry (AtomicU64 from 1, `Mutex<HashMap<u64, Arc<S>>>`, clone-out then unlock, `PoisonError::into_inner`); `OPEN_DIRS` + `DirLease` with canonicalization | `WalletSession` contents; the `set_local_chain_type` call in `get_session` ([PLAN] line 214) | chain-type storage differs per fork (10.1.2) |
 | logging.rs (line 67) | a `Once`-guarded init over the `log` crate | the backend | [PLAN] does not name the backend; treated as coin-side until written (assumption) |
 | config.rs, lifecycle.rs, address.rs, balance.rs, slatepack.rs, transaction.rs, proof.rs, test_support.rs (lines 68-77) | none | all | each wraps its own wallet family's API |
@@ -987,7 +988,7 @@ Justification: the Rust core holds the code where bugs are expensive and identic
 The grin tree in [PLAN] section 3 gains two marked directories. Names are proposals.
 
 ```text
-crates/grin-ffi/src/ffi_core/      # coin-neutral, extracted later as the shared Rust crate
+packages/grin_native/rust/src/ffi_core/      # coin-neutral, extracted later as the shared Rust crate
 ├── mod.rs
 ├── result.rs        # trait FfiResultRepr (from_parts); ok/err builders; free_result(), free_string() as plain Rust fns
 ├── guard.rs         # ffi_guard!; trait FfiError { code, message, details, panic(), busy(dir), invalid_handle(h) }
@@ -1016,7 +1017,7 @@ Rules, enforced by a `tool/ci.dart` check:
 
 #### 10.1.6 Extraction steps (first task of the Epic port)
 
-1. Split history: `git filter-repo --path crates/grin-ffi/src/ffi_core` into a new repository holding one crate (name placeholder `mw-ffi-core`, `publish = false`).
+1. Split history: `git filter-repo --path packages/grin_native/rust/src/ffi_core` into a new repository holding one crate (name placeholder `mw-ffi-core`, `publish = false`).
 2. In grin: delete `src/ffi_core/`, add the crate as a git dependency pinned by `rev`, rewrite `crate::ffi_core::` and `$crate::ffi_core::` to the crate name, and run the unchanged tests, the `cargo tree -d` gate and the `nm` gate. The export list must not change, since the core exports nothing.
 3. epic-ffi and mwc-ffi depend on the same crate at whatever rev each needs.
 4. Copy `packages/grin_native/lib/src/ffi/core/` into each coin's native Dart package. Revisit a shared Dart package only if those files stop changing.
@@ -1423,6 +1424,8 @@ The 119 baseline Dart tests are the 35 that stayed in `grin` (models 9, tx_model
 Two failures on the first full run were environmental and are fixed: the analysis server crashed sending a memory-usage analytics event without network when `grin_native` was analyzed together with its nested example and consumer packages (dart-analyze now analyzes only `lib`, `test` and `hook` there), and `flutter build linux` refused the CMake cache that `git mv` had carried over from the old example path (the ignored `example/build` directory was deleted).
 
 An independent review of `git diff grin-v1..grin-native-split` found no bugs and confirmed that `packages/grin_native/rust` is the same git tree as `grin-v1:packages/grin/rust`. Its should-fix items are done: web-smoke now also checks `packages/grin/lib` for `dart:io` and `dart:isolate` (which `dart compile js` accepts) and compiles `codec.dart` too; the example's analysis options regained the strict modes and rules the helpers had under `grin_flutter`, and its pubspec the `flutter: ">=3.47.0"` floor; `GrinNativeBackend` has its own tests. Left as found: the root `analysis_options.yaml` says every package includes it, and none does, on this branch or on `grin-v1`.
+
+A second independent review of the same range found no defect in the split itself and two minor items, both fixed. web-smoke read only the first single-quoted URI of a directive, so `import "dart:io";` and the conditional URI in `import 'stub.dart' if (dart.library.io) 'dart:io';` passed; it now checks every quoted URI of each directive in either quote style, and the stage first runs the check over fixed directives it must catch or let through. Sections 4, 7 and 10 still named the brief's `crates/grin-ffi/` paths, from before the first build; they now name `packages/grin_native/rust/`, and 8's phase steps keep the brief's wording. grin.git is the url consumers use (9.8); grin_native.git is a mirror. That review's whole-package `dart analyze --fatal-infos` of `grin_native` found no issues, so the narrowed dart-analyze stage hides nothing today.
 
 ### D9. Review items left as they are, and why
 

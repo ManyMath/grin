@@ -238,18 +238,50 @@ Future<void> dartTest() async {
   await _run('dart', ['test'], grinNative);
 }
 
+// The URIs in [source]'s import and export directives that grin may not
+// use: dart:ffi, dart:io, dart:isolate, and any package but grin. Every
+// quoted URI of a directive is checked, in either quote style, so the
+// conditional URIs after `if (...)` are covered as well.
+List<String> _forbiddenUris(String source) {
+  final directive = RegExp(r'^\s*(?:import|export)\b([^;]*);', multiLine: true);
+  final quoted = RegExp(r"""(['"])(.*?)\1""");
+  final forbidden = RegExp(r'^(?:dart:(?:ffi|io|isolate)|package:(?!grin/))');
+  return [
+    for (final d in directive.allMatches(source))
+      for (final q in quoted.allMatches(d[1]!))
+        if (forbidden.hasMatch(q[2]!)) q[2]!,
+  ];
+}
+
+// Directives the check must catch and must let through, so a regression in
+// _forbiddenUris fails the stage instead of passing everything.
+const _purityCases = {
+  "import 'dart:io';": ['dart:io'],
+  'import "dart:ffi";': ['dart:ffi'],
+  "import 'stub.dart' if (dart.library.io) 'dart:io';": ['dart:io'],
+  "import 'stub.dart'\n    if (dart.library.isolate) \"dart:isolate\";": [
+    'dart:isolate',
+  ],
+  "export 'package:other/other.dart';": ['package:other/other.dart'],
+  "import 'package:grin/codec.dart';": <String>[],
+  "import 'dart:convert' show jsonDecode;": <String>[],
+  "// import 'dart:io';": <String>[],
+};
+
 Future<void> webSmoke() async {
   // dart compile js rejects dart:ffi but accepts dart:io and dart:isolate,
   // which only fail at run time, so those are checked here.
-  final directive = RegExp(
-    r'''^\s*(?:import|export)\s+'(dart:(?:ffi|io|isolate)|package:(?!grin/)[^']*)''',
-    multiLine: true,
-  );
+  for (final MapEntry(key: source, value: expected) in _purityCases.entries) {
+    final found = _forbiddenUris(source);
+    if (found.join(',') != expected.join(',')) {
+      throw _GateFailure('purity check self-test: $source gave $found');
+    }
+  }
   final offenders = <String>[];
   for (final entity in Directory('$grin/lib').listSync(recursive: true)) {
     if (entity is! File || !entity.path.endsWith('.dart')) continue;
-    for (final m in directive.allMatches(entity.readAsStringSync())) {
-      offenders.add('${entity.path.substring(root.length + 1)}: ${m[1]}');
+    for (final uri in _forbiddenUris(entity.readAsStringSync())) {
+      offenders.add('${entity.path.substring(root.length + 1)}: $uri');
     }
   }
   if (offenders.isNotEmpty) {
