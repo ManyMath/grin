@@ -122,8 +122,13 @@ abstract interface class GrinWalletApi {
   /// you can.
   Future<String> getMnemonic(String password);
 
-  /// Points the wallet at another node, and optionally a SOCKS proxy,
-  /// without reopening the database. Nothing contacts the node.
+  /// Points the wallet at another node without reopening the database.
+  /// Nothing contacts the node.
+  ///
+  /// This replaces the whole transport: [apiSecret] and [socksProxy] are
+  /// required so that a caller changing only the node has to restate them.
+  /// Passing null for [socksProxy] connects directly, without a proxy, and
+  /// passing null for [apiSecret] sends no node API secret.
   ///
   /// Like every operation it runs in the queue, so it starts only after the
   /// operations before it. To apply it during a long scan, call [cancelScan]
@@ -131,8 +136,8 @@ abstract interface class GrinWalletApi {
   /// docs/ffi-json.md.
   Future<void> updateNetwork({
     required String nodeUrl,
-    String? apiSecret,
-    String? socksProxy,
+    required String? apiSecret,
+    required String? socksProxy,
   });
 
   /// Computes the fee and the inputs a send of [amount] would use, without

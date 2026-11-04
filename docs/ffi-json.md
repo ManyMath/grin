@@ -314,6 +314,9 @@ not be a symlink to a directory with another name (`InvalidArgument`).
 - `node_url` required; `api_secret` and `socks_proxy` nullable (section 3
   rules). Keeps the wallet's request timeout. Does not reopen the database
   and does not contact the node.
+- Replaces all three settings. NULL `socks_proxy` means connect directly and
+  NULL `api_secret` means send no secret; neither keeps the previous value.
+  The Dart `updateNetwork` therefore requires both arguments.
 - The node client and the stored node settings (used for the proxy of
   `grin_tx_send_http`) change together while the wallet lock is held, so
   no call that holds the wallet lock sees one without the other.

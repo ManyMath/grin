@@ -215,9 +215,17 @@ void main() {
     );
     final balance = await wallet.getBalance();
     expect(balance.refreshedFromNode, isFalse);
-    await wallet.updateNetwork(nodeUrl: 'http://127.0.0.1:2');
+    await wallet.updateNetwork(
+      nodeUrl: 'http://127.0.0.1:2',
+      apiSecret: null,
+      socksProxy: null,
+    );
     await expectLater(
-      wallet.updateNetwork(nodeUrl: 'not a url'),
+      wallet.updateNetwork(
+        nodeUrl: 'not a url',
+        apiSecret: null,
+        socksProxy: null,
+      ),
       throwsA(isA<GrinException>()),
     );
   });

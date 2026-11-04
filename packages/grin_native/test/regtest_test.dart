@@ -140,7 +140,11 @@ void main() {
 
       // The same send through a SOCKS5 proxy, when one is configured.
       if (socks != null && socks.isNotEmpty) {
-        await wallet.updateNetwork(nodeUrl: nodeUrl, socksProxy: socks);
+        await wallet.updateNetwork(
+          nodeUrl: nodeUrl,
+          apiSecret: null,
+          socksProxy: socks,
+        );
         final proxied = await wallet.sendHttp(
           GrinHttpSendArgs(
             amount: _grin,
@@ -149,7 +153,11 @@ void main() {
           ),
         );
         expect(proxied.posted, isTrue);
-        await wallet.updateNetwork(nodeUrl: nodeUrl);
+        await wallet.updateNetwork(
+          nodeUrl: nodeUrl,
+          apiSecret: null,
+          socksProxy: null,
+        );
       }
 
       // Both sends confirm on the mined chain.

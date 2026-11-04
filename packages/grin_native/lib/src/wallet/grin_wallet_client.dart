@@ -462,8 +462,8 @@ class GrinWalletClient implements GrinWalletApi, Finalizable {
   @override
   Future<void> updateNetwork({
     required String nodeUrl,
-    String? apiSecret,
-    String? socksProxy,
+    required String? apiSecret,
+    required String? socksProxy,
   }) {
     _ensureOpen();
     final handle = _handle;

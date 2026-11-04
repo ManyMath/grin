@@ -74,7 +74,11 @@ void main() {
         expect(() => wallet.getMnemonic('pw'), throwsStateError);
         expect(() => wallet.changePassword('pw', 'x'), throwsStateError);
         expect(
-          () => wallet.updateNetwork(nodeUrl: 'http://127.0.0.1:2'),
+          () => wallet.updateNetwork(
+            nodeUrl: 'http://127.0.0.1:2',
+            apiSecret: null,
+            socksProxy: null,
+          ),
           throwsStateError,
         );
       },
