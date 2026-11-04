@@ -92,7 +92,7 @@ This document defines the clean-room architecture and implementation plan (**Pha
         └── README.md
 ```
 
-The `cypherstack/grin-wallet` fork (`v5.5.1` + submodule `grin` `v5.5.2`) is not part of this tree. It lives in its own repository (`ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git`, branch `hardening`, commit `7ddc3bcc`, which is `optional-tor-rustls` at `b5d756bd` plus six fix commits; checked out locally at `/home/user/src/grin-wallet`) and is pulled in by `packages/grin_native/rust/Cargo.toml` as a `rev`-pinned git dependency (see 4.1).
+The `cypherstack/grin-wallet` fork (`v5.5.1` + submodule `grin` `v5.5.2`) is not part of this tree. It lives in its own repository (`ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git`, branch `hardening`, commit `92549323`, which is `optional-tor-rustls` at `b5d756bd` plus seven fix commits, with the `grin` submodule on `sneurlax/grin` branch `hardening`; checked out locally at `/home/user/src/grin-wallet`) and is pulled in by `packages/grin_native/rust/Cargo.toml` as a `rev`-pinned git dependency (see 4.1).
 
 ### 3.1 Why `packages/grin_native` Owns `hook/build.dart`
 
