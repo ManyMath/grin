@@ -64,6 +64,12 @@ abstract interface class GrinWalletApi {
 
   /// The address at derivation [index].
   ///
+  /// Only the index 0 address can be paid to: [receiveSlatepack],
+  /// [finalizeSlatepack], [processInvoice], [finalizeInvoice] and payment
+  /// proofs all use index 0, so a Slatepack encrypted to any other index
+  /// fails to decrypt there. Give counterparties the default address. Other
+  /// indices are only useful with [decodeSlatepack]'s `secretIndex`.
+  ///
   /// Throws [ArgumentError] unless [index] is between 0 and 4294967295.
   Future<GrinAddressInfo> getAddress({int index = 0});
 
