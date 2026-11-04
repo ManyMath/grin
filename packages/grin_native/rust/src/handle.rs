@@ -422,14 +422,42 @@ pub fn canonical_data_dir_create(wallet_dir: &str) -> Result<(PathBuf, bool), Gr
     let dir = data_dir_path(wallet_dir);
     let existed = dir.exists();
     std::fs::create_dir_all(&dir)?;
+    restrict_dir(&dir);
     Ok((std::fs::canonicalize(&dir)?, existed))
+}
+
+/// Makes `dir` accessible only to its owner on Unix, so the seed, database
+/// and transaction metadata inside it are not readable by other accounts
+/// whatever the umask. Elsewhere the platform's defaults apply. A failure,
+/// for example on a filesystem without Unix modes, is logged and ignored.
+fn restrict_dir(dir: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let result = std::fs::metadata(dir).and_then(|m| {
+            if m.permissions().mode() & 0o077 != 0 {
+                std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+            } else {
+                Ok(())
+            }
+        });
+        if let Err(e) = result {
+            log::warn!("could not restrict the wallet data directory: {e}");
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = dir;
 }
 
 /// For open and delete: the canonical data directory, or `None` if it does
 /// not exist.
 pub fn canonical_data_dir_existing(wallet_dir: &str) -> Result<Option<PathBuf>, GrinError> {
     match std::fs::canonicalize(data_dir_path(wallet_dir)) {
-        Ok(p) => Ok(Some(p)),
+        Ok(p) => {
+            // Wallets created before the directory was restricted.
+            restrict_dir(&p);
+            Ok(Some(p))
+        }
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e.into()),
     }
@@ -438,6 +466,29 @@ pub fn canonical_data_dir_existing(wallet_dir: &str) -> Result<Option<PathBuf>, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn data_dir_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let root = tempfile::tempdir().unwrap();
+
+        let wallet_dir = root.path().join("new");
+        let (dir, existed) = canonical_data_dir_create(wallet_dir.to_str().unwrap()).unwrap();
+        assert!(!existed);
+        assert_eq!(mode(&dir), 0o700);
+
+        // A directory left with open permissions by an older version.
+        let wallet_dir = root.path().join("old");
+        let old = data_dir_path(wallet_dir.to_str().unwrap());
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let dir = canonical_data_dir_existing(wallet_dir.to_str().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(mode(&dir), 0o700);
+    }
 
     #[test]
     fn lease_is_exclusive_and_released() {

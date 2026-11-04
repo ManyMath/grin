@@ -4,7 +4,7 @@
 //! Callers treat every failure here as non-fatal: log it and carry on.
 
 use std::collections::BTreeMap;
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
@@ -125,8 +125,17 @@ fn write_file(data_dir: &Path, entries: BTreeMap<Uuid, TxSidecarEntry>) -> io::R
     };
     let json = serde_json::to_vec_pretty(&file)?;
     let tmp = data_dir.join(SIDECAR_TMP);
+    // The mode below applies only to a new file, so drop any leftover.
+    let _ = fs::remove_file(&tmp);
     {
-        let mut f = File::create(&tmp)?;
+        let mut opts = OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut f = opts.open(&tmp)?;
         f.write_all(&json)?;
         f.sync_all()?;
     }
@@ -142,6 +151,28 @@ fn write_file(data_dir: &Path, entries: BTreeMap<Uuid, TxSidecarEntry>) -> io::R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn file_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        // A leftover temporary file with open permissions must not keep them.
+        fs::write(dir.path().join(SIDECAR_TMP), b"{}").unwrap();
+        fs::set_permissions(dir.path().join(SIDECAR_TMP), fs::Permissions::from_mode(0o644))
+            .unwrap();
+        Sidecar::upsert(
+            dir.path(),
+            Uuid::new_v4(),
+            TxSidecarEntry {
+                armored_slatepack: Some("BEGINSLATEPACK. one. ENDSLATEPACK.".into()),
+                counterparty_address: None,
+            },
+        )
+        .unwrap();
+        let mode = fs::metadata(path_of(dir.path())).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
 
     #[test]
     fn upsert_merges_and_survives_reload() {
