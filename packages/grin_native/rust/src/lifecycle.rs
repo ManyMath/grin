@@ -173,10 +173,12 @@ fn damaged_seed() -> GrinError {
 }
 
 /// Whether `bytes` are a seed file libwallet can decrypt: JSON with three hex
-/// strings, a 12-byte nonce, an 8-byte salt and a ciphertext longer than its
-/// 16-byte tag (`EncryptedWalletSeed` in the provider). libwallet's decrypt
-/// indexes the nonce without checking its length, so a file that parses but
-/// holds the wrong sizes must be caught before it is handed to the provider.
+/// strings, a 12-byte nonce, a salt of at least 8 bytes (8 in files written
+/// before the seed format recorded its KDF iterations, 16 after) and a
+/// ciphertext longer than its 16-byte tag (`EncryptedWalletSeed` in the
+/// provider). Older libwallet versions index the nonce without checking its
+/// length, so a file that parses but holds the wrong sizes is caught before
+/// it is handed to the provider.
 fn seed_shape_ok(bytes: &[u8]) -> bool {
     let Ok(shape) = serde_json::from_slice::<SeedFileShape>(bytes) else {
         return false;
@@ -184,7 +186,7 @@ fn seed_shape_ok(bytes: &[u8]) -> bool {
     let hex = |s: &str| grin_util::from_hex(s).ok();
     matches!(
         (hex(&shape.encrypted_seed), hex(&shape.salt), hex(&shape.nonce)),
-        (Some(e), Some(s), Some(n)) if e.len() > 16 && s.len() == 8 && n.len() == 12
+        (Some(e), Some(s), Some(n)) if e.len() > 16 && s.len() >= 8 && n.len() == 12
     )
 }
 
@@ -530,9 +532,10 @@ pub unsafe extern "C" fn grin_wallet_change_password(
         let mut w = session.wallet.lock();
         let lc = w.lc_provider()?;
         // Decrypt the seed with the old password first, so InvalidPassword
-        // means exactly that. The provider's change_password reports a
-        // failure to write the new seed with the same text as a wrong
-        // password, after it has already moved wallet.seed aside.
+        // means exactly that: the provider reports a failure to write the
+        // new seed with the same text as a wrong password. The provider
+        // replaces wallet.seed atomically, so a failure leaves the old file;
+        // the backup handling below covers seeds left by older versions.
         check_seed_file(&session.data_dir)?;
         drop(
             lc.get_mnemonic(None, old.clone())
@@ -710,6 +713,18 @@ mod tests {
             seed_error(read_failed(), READ_SEED_FAILED, d).code,
             GrinErrorCode::InvalidPassword
         );
+        // The current format: a 16-byte salt and a recorded iteration count.
+        std::fs::write(
+            d.join(SEED_FILE),
+            format!(
+                r#"{{"encrypted_seed": "{}", "salt": "{}", "nonce": "{}", "kdf_iterations": 210000}}"#,
+                "ab".repeat(48),
+                "cd".repeat(16),
+                "ef".repeat(12)
+            ),
+        )
+        .unwrap();
+        assert!(check_seed_file(d).is_ok());
         // Other messages are never read as a wrong password, even when they
         // mention one.
         let other = LibwalletError::Lifecycle(
