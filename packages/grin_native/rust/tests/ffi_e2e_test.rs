@@ -823,8 +823,8 @@ fn password_errors_are_precise() {
     std::fs::write(&seed, &original).unwrap();
 
     // With the old password verified, a later failure is Lifecycle with the
-    // provider's own message. A read-only wallet_data makes moving the seed
-    // aside fail, and the seed stays as it was.
+    // provider's own message. A read-only wallet_data makes writing the new
+    // seed file fail, and the seed stays as it was.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -842,7 +842,7 @@ fn password_errors_are_precise() {
             assert_eq!(e.0, LIFECYCLE, "{}", e.1);
             let message = e.1["message"].as_str().unwrap();
             assert!(message.contains("password change failed"), "{message}");
-            assert!(message.contains("backing up"), "{message}");
+            assert!(message.contains("writing new wallet seed"), "{message}");
             assert_eq!(e.1["details"]["seed_present"], true);
             assert_eq!(std::fs::read(&seed).unwrap(), original);
         }
