@@ -1127,3 +1127,31 @@ fn error_paths() {
         INVALID_ADDRESS
     );
 }
+
+#[test]
+fn lone_seed_backup_is_reported_not_treated_as_empty() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = path_str(&tmp.path().join("w"));
+    let h = create(&dir, AUTOMATED, None).unwrap();
+    let addr = address(h, 0);
+    close(h);
+
+    // The state an interrupted password change or recovery can leave.
+    let data_dir = tmp.path().join("w").join("wallet_data");
+    std::fs::rename(data_dir.join("wallet.seed"), data_dir.join("wallet.seed.bak")).unwrap();
+
+    for (what, r) in [("open", open(&dir, AUTOMATED)), ("create", create(&dir, AUTOMATED, None))] {
+        let (code, e) = r.unwrap_err();
+        assert_eq!(code, LIFECYCLE, "{what}: {e}");
+        assert_eq!(e["details"]["reason"], "seed_backup_only", "{what}: {e}");
+        assert_eq!(e["details"]["backup_files"], json!(["wallet.seed.bak"]), "{what}: {e}");
+    }
+    // Neither call removed or replaced anything.
+    assert!(data_dir.join("wallet.seed.bak").is_file());
+    assert!(!data_dir.join("wallet.seed").exists());
+
+    std::fs::rename(data_dir.join("wallet.seed.bak"), data_dir.join("wallet.seed")).unwrap();
+    let h = open(&dir, AUTOMATED).unwrap();
+    assert_eq!(address(h, 0), addr);
+    close(h);
+}

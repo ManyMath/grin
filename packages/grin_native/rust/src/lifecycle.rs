@@ -272,6 +272,33 @@ fn leftover_wallet_data(data_dir: &Path) -> Option<String> {
     })
 }
 
+/// `wallet.seed` is missing but a backup of it is not: a password change or
+/// a recovery was interrupted after moving the seed aside. Reported in place
+/// of "no wallet" or "leftover data" so that a caller does not treat the
+/// directory as empty or delete it.
+fn seed_backup_only(data_dir: &Path, wallet_dir: &str) -> Option<GrinError> {
+    if data_dir.join(SEED_FILE).exists() {
+        return None;
+    }
+    let backups = seed_backups(data_dir);
+    let latest = backups.last()?.clone();
+    Some(
+        GrinError::new(
+            GrinErrorCode::Lifecycle,
+            format!(
+                "{SEED_FILE} is missing but {latest} is in the wallet directory; an interrupted \
+                 password change or recovery may have left it. Rename it to {SEED_FILE} to \
+                 restore the wallet, and do not delete the directory"
+            ),
+        )
+        .with_details(serde_json::json!({
+            "wallet_dir": wallet_dir,
+            "reason": "seed_backup_only",
+            "backup_files": backups,
+        })),
+    )
+}
+
 fn wallet_not_found(wallet_dir: &str) -> GrinError {
     GrinError::new(
         GrinErrorCode::WalletNotFound,
@@ -305,7 +332,9 @@ pub unsafe extern "C" fn grin_wallet_create(
         let lease = DirLease::acquire(&data_dir)?;
 
         let leftover = if existed { leftover_wallet_data(&data_dir) } else { None };
-        let opened = if data_dir.join(SEED_FILE).exists() {
+        let opened = if let Some(e) = seed_backup_only(&data_dir, &config.wallet_dir) {
+            Err(e)
+        } else if data_dir.join(SEED_FILE).exists() {
             Err(GrinError::new(
                 GrinErrorCode::WalletExists,
                 "a wallet already exists in this directory",
@@ -376,6 +405,9 @@ pub unsafe extern "C" fn grin_wallet_open(
             .ok_or_else(|| wallet_not_found(&config.wallet_dir))?;
         check_data_dir_name(&data_dir)?;
         let lease = DirLease::acquire(&data_dir)?;
+        if let Some(e) = seed_backup_only(&data_dir, &config.wallet_dir) {
+            return Err(e);
+        }
         if !data_dir.join(SEED_FILE).is_file() {
             return Err(wallet_not_found(&config.wallet_dir));
         }
