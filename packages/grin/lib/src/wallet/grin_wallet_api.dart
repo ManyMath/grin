@@ -36,10 +36,12 @@ import 'grin_wallet_event.dart';
 ///
 /// Errors reach the caller in three ways:
 /// - A bad argument ([ArgumentError]: a negative or out of range number, an
-///   amount that does not fit the native argument, a string with U+0000) and
-///   use after [close] ([StateError]) are thrown synchronously, before a
-///   future exists. They are programming errors, so they do not reach a
-///   `catchError` on the returned future.
+///   amount that does not fit the native argument) and use after [close]
+///   ([StateError]) are thrown synchronously, before a future exists. They
+///   are programming errors, so they do not reach a `catchError` on the
+///   returned future. The one bad argument found later is a string with
+///   U+0000: it is rejected where it is converted, inside the operation, so
+///   its [ArgumentError] arrives through the future.
 /// - Everything the wallet library reports arrives as a [GrinException]
 ///   through the returned future.
 /// - Library output that does not have the documented shape surfaces as a

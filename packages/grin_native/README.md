@@ -61,10 +61,11 @@ Future<void> main() async {
 
 Things to know:
 
-- Every failure is a `GrinException`. `GrinWalletBusyException` means the
-  wallet directory is already held by an open wallet in this process (or by a
-  closed one that has a call still running). It is reported and never retried.
-  After `await client.close()` the directory is free again.
+- Every failure the native library reports is a `GrinException`.
+  `GrinWalletBusyException` means the wallet directory is already held by an
+  open wallet in this process (or by a closed one that has a call still
+  running). It is reported and never retried. After `await client.close()`
+  the directory is free again.
 - Calls on a closed client throw `StateError`.
 - `scanProgress()` and `cancelScan()` are direct calls that take no wallet
   lock, so they answer while a scan runs. `cancelScan()` stops a running scan
