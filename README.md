@@ -77,6 +77,28 @@ it with the git command line, so a machine that has not fetched it yet needs
 ssh read access to that host. See "Fetching the fork" in
 `packages/grin_native/README.md` for what that means inside the build hook.
 
+## Dependency advisories
+
+`cargo audit` on the pinned `Cargo.lock` (RustSec database of 2026-11-03)
+reports the entries below. None is reachable through what this package
+exposes; they are listed so the dispositions are on record and the pins can
+move when upstream does.
+
+- curve25519-dalek 3.2.0, RUSTSEC-2024-0344 (timing variability in scalar
+  subtraction): reached only through age 0.8.2 and x25519-dalek 1.1.1 in
+  grin-wallet's Slatepack encryption, which clamps and multiplies and does
+  not use the affected subtraction. Goes away when grin-wallet moves to a
+  current age.
+- zip 0.5.13, RUSTSEC-2026-0367, 0368, 0369 and 0429 (archive extraction):
+  pulled in by grin_util, which never extracts an archive through anything
+  this package calls, and no function here imports archives.
+- rand 0.7.3, RUSTSEC-2026-0097 (reentrant RNG use from a logger): needs
+  rand's `log` feature, which is not enabled, and this package's logger does
+  not call the RNG.
+- Unmaintained: basic-toml 0.1, bincode 1, memmap 0.7, proc-macro-error 1,
+  rand_os 0.1, rustls-pemfile 1, safemem 0.3, unsafe-libyaml 0.2. A
+  maintenance concern, not a known defect.
+
 ## Status
 
 Built and tested on Linux x86_64 (Rust tests on an in-process chain, Dart
