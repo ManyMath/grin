@@ -41,7 +41,11 @@ void main() {
 
     test('an unsupported node URL is an invalid argument', () async {
       final dir = await makeTempDir();
-      final config = testConfig(dir).copyWith(nodeUrl: 'ftp://example.com');
+      final config = GrinWalletConfig(
+        walletDir: dir.path,
+        network: GrinNetwork.automatedTesting,
+        nodeUrl: 'ftp://example.com',
+      );
       expect(
         GrinWalletClient.create(config: config, password: 'pw'),
         throwsA(isA<GrinInvalidArgumentException>()),

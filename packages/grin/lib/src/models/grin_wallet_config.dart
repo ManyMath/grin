@@ -39,25 +39,6 @@ final class GrinWalletConfig {
   /// The timeout of each node request, or null for the native default.
   final Duration? requestTimeout;
 
-  /// A copy with the given fields replaced.
-  GrinWalletConfig copyWith({
-    String? walletDir,
-    GrinNetwork? network,
-    String? nodeUrl,
-    String? nodeApiSecret,
-    String? socksProxy,
-    Duration? requestTimeout,
-  }) {
-    return GrinWalletConfig(
-      walletDir: walletDir ?? this.walletDir,
-      network: network ?? this.network,
-      nodeUrl: nodeUrl ?? this.nodeUrl,
-      nodeApiSecret: nodeApiSecret ?? this.nodeApiSecret,
-      socksProxy: socksProxy ?? this.socksProxy,
-      requestTimeout: requestTimeout ?? this.requestTimeout,
-    );
-  }
-
   /// The `config_json` document of the native library.
   Map<String, Object?> toJson() {
     final timeout = requestTimeout;
