@@ -783,11 +783,12 @@ it with `grin_tx_repost`.
 - Broadcasts the stored finalized transaction again (9.1 for the
   identifiers). The transaction is validated first.
 - A cancelled entry (`TxSentCancelled`, `TxReceivedCancelled`) is refused
-  with `Transaction`, even when a finalized copy is stored.
+  with `Transaction`, even when a finalized copy is stored. So is a
+  confirmed one: there is nothing left to broadcast.
 - Returns `{"posted": true}`.
 - Errors: `InvalidArgument`, `NotFound` (no such transaction, nothing
   stored, or the stored copy is not finalized yet), `Transaction`
-  (cancelled), `Node` with `{"slate_id"}`.
+  (cancelled or confirmed), `Node` with `{"slate_id"}`.
 
 ### `grin_tx_cancel(handle, tx_id, slate_id)`
 

@@ -1096,7 +1096,7 @@ fn repost_entry(
 
 /// Re-broadcasts a finalized, unconfirmed transaction.
 // (Plain comment: doc comments here are copied into include/grin_ffi.h.)
-// A cancelled transaction is refused with Transaction.
+// A cancelled or confirmed transaction is refused with Transaction.
 // # Safety
 // Every pointer argument must be NULL or point to a NUL-terminated string
 // that stays valid and unchanged until the call returns.
@@ -1122,6 +1122,12 @@ pub unsafe extern "C" fn grin_tx_repost(
                             "transaction {} was cancelled; a cancelled transaction cannot be reposted",
                             entry.id
                         ),
+                    ));
+                }
+                if entry.confirmed {
+                    return Err(GrinError::new(
+                        GrinErrorCode::Transaction,
+                        format!("transaction {} is confirmed; there is nothing to repost", entry.id),
                     ));
                 }
             }

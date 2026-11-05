@@ -693,6 +693,10 @@ fn repost_a_finalized_transaction() {
     assert_eq!(u(&entry(&txs(bob, true), &slate_id)["confirmed_height"]), 6);
     assert_eq!(e["kernel_excess"], s3["kernel_excess"]);
     assert_eq!(u(&balance(bob, true)["amount_currently_spendable"]), amount);
+    // Confirmed, so there is nothing left to repost.
+    let e = call!(grin_tx_repost(alice, -1, cs(&slate_id).as_ptr(), false)).unwrap_err();
+    assert_eq!(e.0, TRANSACTION, "{}", e.1);
+    assert!(s(&e.1["message"]).contains("confirmed"), "{}", e.1);
 
     // A coinbase entry has no slate and nothing stored.
     let coinbase_id = txs(alice, false)["txs"]
