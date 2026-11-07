@@ -941,7 +941,8 @@ fn wallet_data_link_to_another_name_is_refused() {
         path_str(&top)
     };
 
-    // A real wallet's data, moved to a directory named "moved".
+    // A real wallet's data, moved to a directory named "moved". The link is
+    // refused as a link before its target's name is looked at.
     let real = tmp.path().join("real");
     close(create(&path_str(&real), AUTOMATED, None).unwrap());
     let moved = tmp.path().join("moved");
@@ -953,15 +954,21 @@ fn wallet_data_link_to_another_name_is_refused() {
     ] {
         assert_eq!(e.0, INVALID_ARGUMENT, "{}", e.1);
         assert!(
-            e.1["message"]
-                .as_str()
-                .unwrap()
-                .contains("differently named"),
+            e.1["message"].as_str().unwrap().contains("symbolic link"),
             "{}",
             e.1
         );
     }
     assert!(moved.join("wallet.seed").is_file());
+    // The name rule itself still holds for a real directory reached through
+    // a link higher up: canonical names other than wallet_data are refused.
+    assert_eq!(
+        code_of(call!(grin_wallet_open(
+            config(&path_str(tmp.path()), AUTOMATED).as_ptr(),
+            cs(PASSWORD).as_ptr(),
+        ))),
+        WALLET_NOT_FOUND
+    );
 
     // An empty target: create would otherwise make a wallet in it.
     let empty = tmp.path().join("empty");
@@ -971,11 +978,62 @@ fn wallet_data_link_to_another_name_is_refused() {
     assert_eq!(code_of(open(&dir, AUTOMATED)), INVALID_ARGUMENT);
     assert_eq!(std::fs::read_dir(&empty).unwrap().count(), 0);
 
-    // A link to a directory that is itself named wallet_data is fine.
+    // A link to a directory that is itself named wallet_data is refused as
+    // well: through such a link a delete would remove another wallet.
     let named = tmp.path().join("elsewhere").join("wallet_data");
     std::fs::create_dir(tmp.path().join("elsewhere")).unwrap();
     std::fs::rename(&moved, &named).unwrap();
-    close(open(&link_to("w3", &named), AUTOMATED).unwrap());
+    let dir = link_to("w3", &named);
+    for e in [
+        open(&dir, AUTOMATED).unwrap_err(),
+        create(&dir, AUTOMATED, None).unwrap_err(),
+        delete(&dir, 0).unwrap_err(),
+    ] {
+        assert_eq!(e.0, INVALID_ARGUMENT, "{}", e.1);
+        assert!(
+            e.1["message"].as_str().unwrap().contains("symbolic link"),
+            "{}",
+            e.1
+        );
+    }
+    assert!(named.join("wallet.seed").is_file());
+    // The directory it points at is still a wallet, through its own path.
+    close(open(&path_str(&tmp.path().join("elsewhere")), AUTOMATED).unwrap());
+    // A link higher up the path is not the data directory itself.
+    let via_parent = tmp.path().join("via_parent");
+    symlink(tmp.path().join("elsewhere"), &via_parent).unwrap();
+    close(open(&path_str(&via_parent), AUTOMATED).unwrap());
+}
+
+#[test]
+fn delete_with_a_held_handle_keeps_the_handle() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = path_str(&tmp.path().join("w"));
+    let h = create(&dir, AUTOMATED, None).unwrap();
+    let addr = address(h, 0);
+
+    // Another call still holds the session: nothing is deleted and the
+    // handle stays usable.
+    let retained = retain_session(h).expect("session is registered");
+    let e = delete(&dir, h).unwrap_err();
+    assert_eq!(e.0, WALLET_BUSY, "{}", e.1);
+    assert_eq!(address(h, 0), addr);
+    assert!(tmp
+        .path()
+        .join("w")
+        .join("wallet_data")
+        .join("wallet.seed")
+        .is_file());
+
+    // Once the call has returned, the same delete closes the handle and
+    // removes the data.
+    drop(retained);
+    delete(&dir, h).unwrap();
+    assert_eq!(
+        code_of(call!(grin_wallet_get_address(h, 0))),
+        INVALID_HANDLE
+    );
+    assert!(!tmp.path().join("w").join("wallet_data").exists());
 }
 
 #[test]
@@ -1138,19 +1196,34 @@ fn lone_seed_backup_is_reported_not_treated_as_empty() {
 
     // The state an interrupted password change or recovery can leave.
     let data_dir = tmp.path().join("w").join("wallet_data");
-    std::fs::rename(data_dir.join("wallet.seed"), data_dir.join("wallet.seed.bak")).unwrap();
+    std::fs::rename(
+        data_dir.join("wallet.seed"),
+        data_dir.join("wallet.seed.bak"),
+    )
+    .unwrap();
 
-    for (what, r) in [("open", open(&dir, AUTOMATED)), ("create", create(&dir, AUTOMATED, None))] {
+    for (what, r) in [
+        ("open", open(&dir, AUTOMATED)),
+        ("create", create(&dir, AUTOMATED, None)),
+    ] {
         let (code, e) = r.unwrap_err();
         assert_eq!(code, LIFECYCLE, "{what}: {e}");
         assert_eq!(e["details"]["reason"], "seed_backup_only", "{what}: {e}");
-        assert_eq!(e["details"]["backup_files"], json!(["wallet.seed.bak"]), "{what}: {e}");
+        assert_eq!(
+            e["details"]["backup_files"],
+            json!(["wallet.seed.bak"]),
+            "{what}: {e}"
+        );
     }
     // Neither call removed or replaced anything.
     assert!(data_dir.join("wallet.seed.bak").is_file());
     assert!(!data_dir.join("wallet.seed").exists());
 
-    std::fs::rename(data_dir.join("wallet.seed.bak"), data_dir.join("wallet.seed")).unwrap();
+    std::fs::rename(
+        data_dir.join("wallet.seed.bak"),
+        data_dir.join("wallet.seed"),
+    )
+    .unwrap();
     let h = open(&dir, AUTOMATED).unwrap();
     assert_eq!(address(h, 0), addr);
     close(h);

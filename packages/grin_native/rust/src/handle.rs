@@ -326,6 +326,36 @@ pub(crate) fn remove_session(handle: u64) -> Option<Arc<WalletSession>> {
     session
 }
 
+/// Like `remove_session`, but only when no call still holds the session: if
+/// another `Arc` exists outside the registry the session stays registered
+/// and `WalletBusy` is returned, so a caller that is refused keeps its
+/// handle. The check and the removal happen under the registry lock, so a
+/// lookup cannot slip in between them.
+pub(crate) fn remove_session_if_idle(handle: u64) -> Result<Option<Arc<WalletSession>>, GrinError> {
+    if handle == 0 {
+        return Ok(None);
+    }
+    let mut reg = registry();
+    let Some(entry) = reg.get(&handle) else {
+        return Ok(None);
+    };
+    if Arc::strong_count(entry) > 1 {
+        return Err(GrinError::new(
+            GrinErrorCode::WalletBusy,
+            "the wallet still has a call running; it was not closed",
+        )
+        .with_details(serde_json::json!({
+            "wallet_dir": entry.data_dir.to_string_lossy(),
+        })));
+    }
+    let session = reg.remove(&handle);
+    drop(reg);
+    if let Some(s) = &session {
+        s.scan_state.mark_closed();
+    }
+    Ok(session)
+}
+
 /// Identity of a directory, the key of `OPEN_DIRS`.
 ///
 /// On unix this is the device and inode number of the directory, so two
@@ -416,6 +446,22 @@ pub fn data_dir_path(wallet_dir: &str) -> PathBuf {
     Path::new(wallet_dir).join(GRIN_WALLET_DIR)
 }
 
+/// Refuses a `<wallet_dir>/wallet_data` that is itself a symbolic link.
+/// Create, open and delete act on the directory the link points at, so a
+/// link planted in one wallet directory would let a delete remove another
+/// wallet's data (the name check alone passes when the target is also
+/// called `wallet_data`). A missing path is fine: it is not a link.
+pub fn refuse_symlinked_data_dir(wallet_dir: &str) -> Result<(), GrinError> {
+    match std::fs::symlink_metadata(data_dir_path(wallet_dir)) {
+        Ok(m) if m.file_type().is_symlink() => Err(GrinError::invalid_argument(format!(
+            "{GRIN_WALLET_DIR} must be a directory, not a symbolic link"
+        ))),
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// For create: makes `<wallet_dir>/wallet_data` if needed and returns its
 /// canonical path plus whether it existed before.
 pub fn canonical_data_dir_create(wallet_dir: &str) -> Result<(PathBuf, bool), GrinError> {
@@ -466,6 +512,27 @@ pub fn canonical_data_dir_existing(wallet_dir: &str) -> Result<Option<PathBuf>, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_data_dir_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().join("real");
+        std::fs::create_dir_all(real.join(GRIN_WALLET_DIR)).unwrap();
+        assert!(refuse_symlinked_data_dir(real.to_str().unwrap()).is_ok());
+        let missing = root.path().join("missing");
+        assert!(refuse_symlinked_data_dir(missing.to_str().unwrap()).is_ok());
+        let decoy = root.path().join("decoy");
+        std::fs::create_dir(&decoy).unwrap();
+        std::os::unix::fs::symlink(real.join(GRIN_WALLET_DIR), decoy.join(GRIN_WALLET_DIR))
+            .unwrap();
+        let e = refuse_symlinked_data_dir(decoy.to_str().unwrap()).unwrap_err();
+        assert_eq!(e.code, GrinErrorCode::InvalidArgument);
+        // A link higher up the path is not the data directory itself.
+        let link = root.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert!(refuse_symlinked_data_dir(link.to_str().unwrap()).is_ok());
+    }
 
     #[cfg(unix)]
     #[test]

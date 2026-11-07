@@ -25,7 +25,8 @@ use crate::error::{
 };
 use crate::handle::{
     canonical_data_dir_create, canonical_data_dir_existing, get_session, lookup_session,
-    register_session, remove_session, DirKey, DirLease, WalletInstance, WalletLc, WalletSession,
+    refuse_symlinked_data_dir, register_session, remove_session, remove_session_if_idle, DirKey,
+    DirLease, WalletInstance, WalletLc, WalletSession,
 };
 
 /// Name of the encrypted seed file inside `wallet_data` (impls keeps its own
@@ -329,6 +330,7 @@ pub unsafe extern "C" fn grin_wallet_create(
             validate_mnemonic_words(m)?;
         }
 
+        refuse_symlinked_data_dir(&config.wallet_dir)?;
         let (data_dir, existed) = canonical_data_dir_create(&config.wallet_dir)?;
         check_data_dir_name(&data_dir)?;
         let lease = DirLease::acquire(&data_dir)?;
@@ -403,6 +405,7 @@ pub unsafe extern "C" fn grin_wallet_open(
         global::set_local_chain_type(config.chain_type);
         let password = read_secret(password, "password")?;
 
+        refuse_symlinked_data_dir(&config.wallet_dir)?;
         let data_dir = canonical_data_dir_existing(&config.wallet_dir)?
             .ok_or_else(|| wallet_not_found(&config.wallet_dir))?;
         check_data_dir_name(&data_dir)?;
@@ -467,7 +470,10 @@ pub unsafe extern "C" fn grin_wallet_close_finalizer(token: *mut c_void) {
 /// counts as already deleted.
 // (Plain comment: doc comments here are copied into include/grin_ffi.h.)
 // With the directory missing, a handle whose own data directory is gone too
-// is taken to be this wallet's and is closed.
+// is taken to be this wallet's and is closed. A handle that another call
+// still holds is left open and the call is WalletBusy. `wallet_data` itself
+// must not be a symbolic link (InvalidArgument), so a link cannot point a
+// delete at another wallet's data.
 // # Safety
 // Every pointer argument must be NULL or point to a NUL-terminated string
 // that stays valid and unchanged until the call returns.
@@ -481,6 +487,7 @@ pub unsafe extern "C" fn grin_wallet_delete(
         if wallet_dir.trim().is_empty() {
             return Err(GrinError::invalid_argument("wallet_dir must not be empty"));
         }
+        refuse_symlinked_data_dir(wallet_dir)?;
         let target = canonical_data_dir_existing(wallet_dir)?;
         if let Some(session) = lookup_session(handle) {
             let same = match &target {
@@ -501,7 +508,10 @@ pub unsafe extern "C" fn grin_wallet_delete(
                 ));
             }
             drop(session);
-            drop(remove_session(handle));
+            // Close it only when no other call still holds it. Otherwise the
+            // directory lease below would be busy anyway, and the caller
+            // keeps a usable handle together with the WalletBusy error.
+            drop(remove_session_if_idle(handle)?);
         }
         let Some(target) = target else {
             return Ok(None);
