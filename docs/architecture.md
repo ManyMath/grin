@@ -1081,6 +1081,29 @@ output, and an I2 or a final slate carries the payer's inputs and change
 too, so those grow with the input count (34 bytes per input, about 46
 characters after base58; this was not measured).
 
+Gates after these changes (`dart run tool/ci.dart`, Rust 1.99.1, all 15
+stages ok): rust-dups none; `cargo fmt --check` clean; clippy with and
+without `test-utils` clean; Rust tests `47 passed` (unit), `18 passed, 1
+ignored` (ffi_e2e_test), `11 passed` (ffi_tx_test), `4 passed`
+(header_test); release build `36 standard, 0 test symbols` on the host and
+on aarch64, armv7 and x86_64 Android; bindings up to date; `dart analyze
+--fatal-infos` clean; `dart format` 0 changed; `dart test` `40 passed`
+(grin) and `90 passed, 2 skipped` (grin_native through the hook); web-smoke
+`web_smoke ok`; consumer `1 passed`; flutter analyze clean, flutter test `8
+passed`; `flutter build linux` and `flutter build apk` built. The first
+flutter-build attempt failed because the example's CMake cache under
+`build/linux` dated from when the repository lived at `/home/user/src/grin`;
+that directory was moved to `build/linux.stale-from-src-grin` and the
+stage passed on the rerun.
+
+Not verified: the ignored test `new_wallet_refresh_scans_only_the_reorg_window`
+(D14), which would show the shorter first refresh on a chain past the 2880
+block reorg window. One release run mined for 24 minutes and then failed in
+the test framework's `award_blocks_to_wallet` with "No space left on
+device" while the build machine's disk was full; it was not rerun. What
+the default suite checks is the stored `InitNoScanning` status that
+libwallet's `update_wallet_state` reads (`owner.rs` L1180-1213).
+
 ### D9. Review items left as they are, and why
 
 Of the review nits (section 13), three were deliberately not changed:
