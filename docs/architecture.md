@@ -1499,6 +1499,35 @@ environment. None of this can run on the Linux build machine: whether a
 sandboxed macOS app and an iOS device create, open, scan and send with
 these flags is not verified yet (G8).
 
+Armored Slatepack lengths (G9), in characters including the
+`BEGINSLATEPACK.` and `ENDSLATEPACK.` markers, from the test `armored
+Slatepack lengths` in `packages/grin_native/test/slatepack_e2e_test.dart`
+(it prints them). Seven runs on the test chain, each send with one coinbase
+input, one change output and the recipient's output. Encrypted Slatepacks
+vary by up to about 150 characters between runs; plain ones by one.
+
+| Slatepack | Length |
+|---|---:|
+| S1 plain (no recipient, no payment proof) | 359 to 360 |
+| S1 encrypted to the recipient, with a payment proof request | 806 to 955 |
+| S2 replying to a plain S1 (encrypted to the sender, no proof) | 1837 to 2010 |
+| S2 replying to an encrypted S1 (with the proof signature) | 2071 to 2185 |
+| S3 of a send without a proof | 2682 to 2683 |
+| S3 of a send with a proof | 2870 to 2871 |
+| I1 plain | 347 to 348 |
+| I1 encrypted to the payer | 719 to 855 |
+| I2 encrypted to the payee | 1881 to 2068 |
+| I3 | 2683 |
+
+An S1 or I1 fits a single QR code at any error correction level (version 40
+holds 2953 bytes in byte mode at level L, 1273 at level H). An S2 or I2
+fits only at level L or M (2331 bytes at M), and S3 and I3 are not handed
+to anyone. An S1 or I1 is a compact slate without a transaction, so its
+length does not depend on the inputs. The S2 carries the recipient's
+output, and an I2 or a final slate carries the payer's inputs and change
+too, so those grow with the input count (34 bytes per input, about 46
+characters after base58; this was not measured).
+
 ### D9. Review items left as they are, and why
 
 Of the review nits (section 13), three were deliberately not changed:
