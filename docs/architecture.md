@@ -1096,13 +1096,13 @@ flutter-build attempt failed because the example's CMake cache under
 that directory was moved to `build/linux.stale-from-src-grin` and the
 stage passed on the rerun.
 
-Not verified: the ignored test `new_wallet_refresh_scans_only_the_reorg_window`
-(D14), which would show the shorter first refresh on a chain past the 2880
-block reorg window. One release run mined for 24 minutes and then failed in
-the test framework's `award_blocks_to_wallet` with "No space left on
-device" while the build machine's disk was full; it was not rerun. What
-the default suite checks is the stored `InitNoScanning` status that
-libwallet's `update_wallet_state` reads (`owner.rs` L1180-1213).
+The ignored test `new_wallet_refresh_scans_only_the_reorg_window` (D14)
+shows the shorter first refresh on a chain past the 2880 block reorg window.
+Its first release run failed on a full disk after 24 minutes; the rerun on
+2026-11-07 passed (`cargo test --release --locked --features test-utils
+--test ffi_e2e_test -- --ignored new_wallet_refresh_scans_only_the_reorg_window`,
+1 passed in 2406 s). The default suite checks the stored `InitNoScanning`
+status that libwallet's `update_wallet_state` reads (`owner.rs` L1180-1213).
 
 ### D9. Review items left as they are, and why
 

@@ -123,7 +123,7 @@ I can do these myself on the grin `hardening` branch, pushed to cypherstack and 
 | G1 | Public HTTPS mirrors of the grin repo and the grin-wallet fork, with identical SHAs so rev 377141e is unchanged. Repoint the nine `git = "ssh://..."` entries in `packages/grin_native/rust/Cargo.toml:24-32` to HTTPS and regenerate `Cargo.lock`; only the `source =` lines change. Update `repository:` in both pubspecs. DECISION: mirror host and name; which Gitea URL is canonical (`grin.git` or `grin_native.git`). | `cargo fetch --locked` with no SSH key; `flutter pub get` in a throwaway app with no SSH key | Replaced by section 0: no public mirrors. Consumers use `ssh://git@git.cypherstack.com:222/sneurlax/grin_native.git` for both pub entries and prefetch the fork once (`packages/grin_native/README.md`, "Private access", added with G11). |
 | G2 | Bump `packages/grin_native/rust/rust-toolchain.toml` to 1.99.1 and rerun the full gate. | All gates green; release symbols 35/0 | Done in fb03b09: 1.99.1, target list unchanged. The new clippy deprecates `AtomicU8::fetch_update`, replaced by `try_update`. Release build `36 standard, 0 test symbols` (35 plus G5's export) on the host and the three Android targets. |
 | G3 | In `hook/build.dart`, set `CFLAGS_<arch>_apple_darwin=-DMDB_USE_POSIX_MUTEX=1 -DMDB_USE_ROBUST=0` as MWC does (`flutter_libmwc` `hook/build.dart:28-33`), and for iOS if it reproduces there. | Example app creates, opens, scans and sends on sandboxed macOS and on an iOS device | Done in 29ec73c for macOS and iOS (`aarch64-apple-darwin`, `x86_64-apple-darwin`, `aarch64-apple-ios`, `aarch64-apple-ios-sim`, `x86_64-apple-ios`). Not verified on a device yet; recorded as pending in `docs/architecture.md` section 13. |
-| G4 | Add a "new wallet" option to `grin_wallet_create` (for example `is_new: bool`, or a `scan_from_tip` field in the config JSON). It saves `InitNoScanning` even when a mnemonic is given. Expose it as `GrinWalletBackend.create(..., isNewWallet: true)`. Rust and Dart tests. | A new wallet's first `getBalance(refreshFromNode: true)` scans only the reorg window | Done in 9db5a3d: `grin_wallet_create(config_json, mnemonic, password, is_new_wallet)` saves `InitNoScanning` through a wallet batch inside the same call; `GrinWalletBackend.create(..., bool isNewWallet = false)`. Rust tests check the stored status; the reorg-window behaviour itself needs a chain longer than 2880 blocks and is in the ignored release test `new_wallet_refresh_scans_only_the_reorg_window`, whose one run failed on a full disk after 24 minutes (unverified). |
+| G4 | Add a "new wallet" option to `grin_wallet_create` (for example `is_new: bool`, or a `scan_from_tip` field in the config JSON). It saves `InitNoScanning` even when a mnemonic is given. Expose it as `GrinWalletBackend.create(..., isNewWallet: true)`. Rust and Dart tests. | A new wallet's first `getBalance(refreshFromNode: true)` scans only the reorg window | Done in 9db5a3d: `grin_wallet_create(config_json, mnemonic, password, is_new_wallet)` saves `InitNoScanning` through a wallet batch inside the same call; `GrinWalletBackend.create(..., bool isNewWallet = false)`. Rust tests check the stored status; the reorg-window behaviour itself needs a chain longer than 2880 blocks and is in the ignored release test `new_wallet_refresh_scans_only_the_reorg_window`, whose first run failed on a full disk; the rerun on 2026-11-07 passed (1 passed in 2406 s). |
 | G5 | Add a `lastScannedHeight` getter (from `last_scanned_block`), so Stack doesn't have to reconstruct the resume point when a cancellation is lost. | Rust and Dart tests | Done in 9db5a3d: `grin_wallet_get_last_scanned_height(handle)` returns `{"height"}`; `Future<int> GrinWalletApi.lastScannedHeight()`, queued. |
 | G6 | Add an offline mode to `updateNetwork`/config (`network_enabled: false`). Every node call then fails fast with a Node error, and no socket is opened. | Unit test proves no connect; replaces the dead proxy in S2 | Done in 9db5a3d: `network_enabled` in `config_json` and a `network_enabled` argument on `grin_wallet_update_network`; `GrinWalletConfig.networkEnabled` (default true) and `updateNetwork(..., required bool networkEnabled)`. Node calls and `sendHttp` fail with `GrinNodeException` (`details.reason` `network_disabled`); Rust and Dart tests count zero connections on a local listener. |
 | G7 | Throwaway outside consumer: a Flutter app that depends on `grin_native` and `grin` by git (and by path), builds on Linux, and runs one create/open/address call. This settles `resolution: workspace` for consumers. | Builds from a clean pub cache | Not done here. |
@@ -133,6 +133,21 @@ I can do these myself on the grin `hardening` branch, pushed to cypherstack and 
 | G11 | Docs: fix the README claim that `CARGO_*`/`RUSTUP_*` reach the hook (they don't). Fix D3, D6 and D12. Replace section 9 with a pointer to this plan. | | Done in the commit that added this file: README hook environment, "Private access", D3, D6, D12, section 9 pointer, D14. |
 
 G1, G2, G3 and G4 block S2. G6 can follow S2. G10 is optional because S2 guards invoice amounts in Dart anyway.
+
+## Status (2026-11-07)
+
+Phase S is implemented on git.cypherstack.com, sneurlax/stack_wallet, as stacked pull requests based on staging 4bc21f9e1:
+
+| PR | Branch | Content |
+|---|---|---|
+| #6 | `refactor/epic-mwc-unify-rebased` -> `staging` | S1 |
+| #7 | `feat/slatepack-interface` -> #6 | S3 |
+| #8 | `feat/grin` -> `staging` | S2, locked to this repository at 6ff6fe6 |
+| #9 | `feat/grin-e2e` -> `feat/grin` | native end-to-end tests, symbol gate script |
+| #10 | `feat/grin-ui` -> `feat/slatepack-interface` | S4 and S5, merges #8 and #9 |
+| #11 | `feat/grin-ui` -> `staging` | omnibus of #6 to #10 |
+
+Still open: S6 theme assets and CI, G8 device runs (Android, iOS, sandboxed macOS, Windows), and the Epic/MWC manual retests listed in #6 and #7.
 
 ## 4. Phase S: Stack Wallet work
 
