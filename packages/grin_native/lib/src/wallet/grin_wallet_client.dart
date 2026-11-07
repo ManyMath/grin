@@ -637,12 +637,25 @@ class GrinWalletClient implements GrinWalletApi, Finalizable {
   Future<void> _close() async {
     _closed = true;
     final handle = _handle;
-    try {
-      unwrapFfiResult(bindings.grin_wallet_scan_cancel(handle));
-    } on GrinException {
-      // The wallet is going away either way.
+    // A cancel reaches only a scan that is running. A scan that left the
+    // queue just before this point may not have reached the native library
+    // yet, and its start clears any earlier cancel, so one cancel could be
+    // lost and close() would then wait for the whole scan. Repeat it until
+    // everything queued has settled; the call is cheap and takes no wallet
+    // lock, and nothing new can be queued after _closed is set.
+    final settled = _tail.then((_) => true);
+    while (true) {
+      try {
+        unwrapFfiResult(bindings.grin_wallet_scan_cancel(handle));
+      } on GrinException {
+        // The wallet is going away either way.
+      }
+      final done = await Future.any<bool>([
+        settled,
+        Future<bool>.delayed(const Duration(milliseconds: 100), () => false),
+      ]);
+      if (done) break;
     }
-    await _tail;
     _finalizer.detach(this);
     _eventsFinalizer.detach(this);
     try {
