@@ -1483,6 +1483,22 @@ receive (documented), `processInvoice` has no caller-side amount bound,
 `walletDir` may be relative, and remote error text is echoed in exception
 messages.
 
+### Stack Wallet prerequisites (2026-11-07, D14)
+
+Apple LMDB flags (G3), pending device verification. `hook/build.dart` sets
+`CFLAGS_<target>=-DMDB_USE_POSIX_MUTEX=1 -DMDB_USE_ROBUST=0` for the macOS
+targets (`aarch64-apple-darwin`, `x86_64-apple-darwin`) and the iOS targets
+(`aarch64-apple-ios`, `aarch64-apple-ios-sim`, `x86_64-apple-ios`), the
+flags `flutter_libmwc`'s hook sets for macOS. LMDB comes from
+`lmdb-master-sys` 0.2.6 (through heed and `grin_store`), built by the `cc`
+crate with default features, so `MDB_USE_POSIX_SEM` is not defined and the
+flag replaces the SysV semaphores `mdb.c` picks on `__APPLE__`. The hook
+passes the variable through `RustBuilder.extraCargoEnvironmentVariables`,
+which native_toolchain_rust 1.0.7 merges into the `cargo build`
+environment. None of this can run on the Linux build machine: whether a
+sandboxed macOS app and an iOS device create, open, scan and send with
+these flags is not verified yet (G8).
+
 ### D9. Review items left as they are, and why
 
 Of the review nits (section 13), three were deliberately not changed:

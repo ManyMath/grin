@@ -50,6 +50,14 @@ Future<void> main(List<String> args) => build(args, (input, output) async {
       'MACOSX_DEPLOYMENT_TARGET': '${config.macOS.targetVersion}.0',
     if (config.targetOS == OS.iOS)
       'IPHONEOS_DEPLOYMENT_TARGET': '${config.iOS.targetVersion}.0',
+    // LMDB (built by the cc crate, which reads CFLAGS_<target>) uses SysV
+    // semaphores on Apple targets by default, and the App Sandbox denies
+    // them (EPERM from mdb_env_open). Keep the lock in lock.mdb with pthread
+    // mutexes instead; Apple has no robust mutexes, so turn those off. The
+    // flags match flutter_libmwc's hook. Not yet verified on a device
+    // (docs/architecture.md section 13).
+    if (config.targetOS == OS.macOS || config.targetOS == OS.iOS)
+      'CFLAGS_$variable': '-DMDB_USE_POSIX_MUTEX=1 -DMDB_USE_ROBUST=0',
   };
   final compiler = config.cCompiler;
   if (config.targetOS == OS.android && compiler != null) {
