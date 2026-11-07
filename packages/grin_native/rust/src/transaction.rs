@@ -39,7 +39,7 @@ use crate::handle::{get_session, WalletSession};
 use crate::sidecar::{Sidecar, TxSidecarEntry};
 use crate::slatepack::{
     address_string, decode_with_wallet, kernel_excess_hex, parse_slatepack_address, require_state,
-    slate_fee, state_name,
+    slate_error, slate_fee, state_name,
 };
 
 type Backend = WalletBackend<FfiNodeClient, ExtKeychain>;
@@ -143,6 +143,77 @@ fn logged_amount(entry: &TxLogEntry) -> u64 {
         let fee = entry.fee.map(|f| f.fee()).unwrap_or(0);
         (entry.amount_debited - entry.amount_credited).saturating_sub(fee)
     }
+}
+
+/// Checks a slate a counterparty returned against what this wallet issued,
+/// before anything is signed. The kernel must still be plain: this wallet
+/// only issues plain kernels, and signing a HeightLocked or NRD one the
+/// other side slipped in would lock the funds behind a height this wallet
+/// never chose. The TTL must be the one this wallet set, where it is known
+/// (`issued_ttl` is None when it is not, as for an invoice the payer sets
+/// it on). libwallet restores the amount and fee from the stored context
+/// itself, so those need no check here.
+fn check_returned_slate(returned: &Slate, issued_ttl: Option<u64>) -> Result<(), GrinError> {
+    if returned.kernel_features != 0 || returned.kernel_features_args.is_some() {
+        return Err(slate_error(format!(
+            "the returned slate changed the kernel features to {}; only a plain kernel is accepted",
+            returned.kernel_features
+        )));
+    }
+    if let Some(ttl) = issued_ttl {
+        if returned.ttl_cutoff_height != ttl {
+            return Err(slate_error(format!(
+                "the returned slate changed the TTL cutoff height from {ttl} to {}",
+                returned.ttl_cutoff_height
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Checks the payment proof a recipient returned on an S2 against the one
+/// this wallet asked for in the S1. With a proof requested, the S2 must carry
+/// one for exactly the requested address, signed, with this wallet's sender
+/// address; without one, the S2 must carry none. The Slatepack flow gets
+/// this from libwallet because it locks with the S1; the synchronous send
+/// locks with the S2, so it has to check first.
+fn check_returned_proof(s1: &Slate, s2: &Slate) -> Result<(), GrinError> {
+    let refused = |what: &str| GrinError::new(GrinErrorCode::Transaction, what.to_owned());
+    match (&s1.payment_proof, &s2.payment_proof) {
+        (None, None) => Ok(()),
+        (None, Some(_)) => Err(refused(
+            "the recipient added a payment proof that was not requested",
+        )),
+        (Some(_), None) => Err(refused("the recipient dropped the requested payment proof")),
+        (Some(asked), Some(got)) => {
+            if got.receiver_address != asked.receiver_address {
+                return Err(refused(
+                    "the recipient answered with a payment proof for an address other than the one requested",
+                ));
+            }
+            if got.sender_address != asked.sender_address {
+                return Err(refused(
+                    "the recipient changed the sender address of the payment proof",
+                ));
+            }
+            if got.receiver_signature.is_none() {
+                return Err(refused(
+                    "the recipient did not sign the requested payment proof",
+                ));
+            }
+            Ok(())
+        }
+    }
+}
+
+/// TTL this wallet issued the send with: the TxSent entry's cutoff height
+/// (0 when it set none), or None when no entry exists yet (a late-locked
+/// send is only recorded at finalization).
+fn issued_ttl_for_slate(w: &mut Backend, slate_id: &Uuid) -> Result<Option<u64>, GrinError> {
+    Ok(w.tx_log_iter()?
+        .filter_map(Result::ok)
+        .find(|t| t.tx_slate_id.as_ref() == Some(slate_id) && t.tx_type == TxLogEntryType::TxSent)
+        .map(|t| t.ttl_cutoff_height.unwrap_or(0)))
 }
 
 /// Amount of this wallet's log entry for `slate_id`, 0 if there is none.
@@ -812,6 +883,10 @@ pub unsafe extern "C" fn grin_tx_send_http(handle: u64, args_json: *const c_char
                 ),
             ));
         }
+        // Still nothing locked: an S2 that changed the kernel, the TTL or the
+        // payment proof is refused here and leaves no transaction behind.
+        check_returned_slate(&s2, Some(s1.ttl_cutoff_height))?;
+        check_returned_proof(&s1, &s2)?;
         let s3 = with_backend(&session, |w, mask| {
             if !late_lock {
                 owner::tx_lock_outputs(w, mask, &s2)?;
@@ -891,6 +966,8 @@ pub unsafe extern "C" fn grin_tx_finalize_slatepack(
         // every failure from here on carries the slate id.
         let slate_id = decoded.slate.id;
         let (s3, amount) = with_backend(&session, |w, mask| {
+            let issued_ttl = issued_ttl_for_slate(w, &slate_id)?;
+            check_returned_slate(&decoded.slate, issued_ttl)?;
             let s3 = owner::finalize_tx(w, mask, &decoded.slate)?;
             let amount = amount_for_slate(w, &s3.id)?;
             Ok((s3, amount))
@@ -1055,7 +1132,10 @@ pub unsafe extern "C" fn grin_tx_finalize_invoice(
         // failure from here on carries the slate id.
         let slate_id = decoded.slate.id;
         let (i3, amount) = with_backend(&session, |w, mask| {
-            // Broadcasting happens below, with the wallet mutex released.
+            // The payer may set a TTL on an invoice, so only the kernel is
+            // checked. Broadcasting happens below, with the wallet mutex
+            // released.
+            check_returned_slate(&decoded.slate, None)?;
             let i3 = foreign::finalize_tx(w, mask, &decoded.slate, false)?;
             let amount = amount_for_slate(w, &i3.id)?;
             Ok((i3, amount))
@@ -1181,6 +1261,7 @@ mod tests {
     use super::*;
     use grin_core::global::ChainTypes;
     use grin_core::libtx::tx_fee;
+    use grin_wallet_libwallet::{SlateVersion, VersionedSlate};
     use serde_json::{json, Value};
     use std::ffi::CString;
 
@@ -1370,6 +1451,84 @@ mod tests {
             GrinErrorCode::InvalidArgument
         );
         assert_eq!(invalid(pay(json!(0))), GrinErrorCode::InvalidArgument);
+    }
+
+    /// A V4 slate from JSON, the way a counterparty's wallet would send it.
+    fn slate_from(fields: Value) -> Slate {
+        let v4 = VersionedSlate::into_version(Slate::blank(2, false), SlateVersion::V4).unwrap();
+        let mut j = serde_json::to_value(&v4).unwrap();
+        for (k, v) in fields.as_object().unwrap() {
+            j[k] = v.clone();
+        }
+        Slate::deserialize_upgrade(&j.to_string()).unwrap()
+    }
+
+    const ADDR_A: &str = "tgrin17zq8t8lz8fwu9xrs4lxnvfareuxcw5qz0875nl870ctyahhtapcqza5hqd";
+    const ADDR_B: &str = "tgrin1w0fvmdwtnd23enavfv457eedr2tj3gqp9sx4ghxlm997hcdrgutqyaz0ma";
+    const ADDR_C: &str = "tgrin16przlf9axsw8ag6k584uzgr999av9zjhf82f8eqec022n96atdlqvfna76";
+
+    fn key_hex(addr: &str) -> String {
+        SlatepackAddress::try_from(addr)
+            .unwrap()
+            .pub_key
+            .to_bytes()
+            .to_hex()
+    }
+
+    #[test]
+    fn returned_slates_are_checked() {
+        global::set_local_chain_type(ChainTypes::AutomatedTesting);
+        let same = slate_from(json!({"ttl": 500}));
+        check_returned_slate(&same, Some(500)).unwrap();
+        check_returned_slate(&same, None).unwrap();
+        let no_ttl = slate_from(json!({}));
+        assert_eq!(
+            check_returned_slate(&no_ttl, Some(500)).unwrap_err().code,
+            GrinErrorCode::Slate
+        );
+        check_returned_slate(&no_ttl, None).unwrap();
+        let locked = slate_from(json!({"ttl": 500, "feat": 2, "feat_args": {"lock_hgt": 9}}));
+        assert_eq!(
+            check_returned_slate(&locked, Some(500)).unwrap_err().code,
+            GrinErrorCode::Slate
+        );
+        assert_eq!(
+            check_returned_slate(&locked, None).unwrap_err().code,
+            GrinErrorCode::Slate
+        );
+        let nrd = slate_from(json!({"feat": 3, "feat_args": {"lock_hgt": 1}}));
+        assert_eq!(
+            check_returned_slate(&nrd, None).unwrap_err().code,
+            GrinErrorCode::Slate
+        );
+    }
+
+    #[test]
+    fn returned_proofs_are_checked() {
+        global::set_local_chain_type(ChainTypes::AutomatedTesting);
+        let refused = |s1: &Slate, s2: &Slate| check_returned_proof(s1, s2).unwrap_err().code;
+        let none = slate_from(json!({}));
+        check_returned_proof(&none, &none).unwrap();
+
+        let asked =
+            slate_from(json!({"proof": {"saddr": key_hex(ADDR_A), "raddr": key_hex(ADDR_B)}}));
+        // Not signed yet.
+        assert_eq!(refused(&asked, &asked), GrinErrorCode::Transaction);
+        let sig = "ab".repeat(64);
+        let signed = slate_from(
+            json!({"proof": {"saddr": key_hex(ADDR_A), "raddr": key_hex(ADDR_B), "rsig": sig}}),
+        );
+        check_returned_proof(&asked, &signed).unwrap();
+        let other_receiver = slate_from(
+            json!({"proof": {"saddr": key_hex(ADDR_A), "raddr": key_hex(ADDR_C), "rsig": sig}}),
+        );
+        assert_eq!(refused(&asked, &other_receiver), GrinErrorCode::Transaction);
+        let other_sender = slate_from(
+            json!({"proof": {"saddr": key_hex(ADDR_C), "raddr": key_hex(ADDR_B), "rsig": sig}}),
+        );
+        assert_eq!(refused(&asked, &other_sender), GrinErrorCode::Transaction);
+        assert_eq!(refused(&asked, &none), GrinErrorCode::Transaction);
+        assert_eq!(refused(&none, &signed), GrinErrorCode::Transaction);
     }
 
     #[test]

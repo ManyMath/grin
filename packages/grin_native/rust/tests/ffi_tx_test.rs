@@ -19,7 +19,9 @@ use std::thread;
 
 use grin_core::global::{self, ChainTypes};
 use grin_ffi::*;
-use grin_wallet_libwallet::{Slate, Slatepacker, SlatepackerArgs};
+use grin_wallet_libwallet::{
+    Slate, SlateVersion, SlatepackAddress, Slatepacker, SlatepackerArgs, VersionedSlate,
+};
 use serde_json::{json, Value};
 
 const OK: i32 = 0;
@@ -876,6 +878,208 @@ fn foreign_api(bob: u64) -> (String, thread::JoinHandle<Vec<String>>) {
 
 fn send_http(handle: u64, args: Value) -> Result<Value, (i32, Value)> {
     call!(grin_tx_send_http(handle, cs(&args.to_string()).as_ptr()))
+}
+
+/// Armors a slate plain (unencrypted, no sender), as a hostile party would
+/// after editing it.
+fn armor_slate(slate: &Slate) -> String {
+    let packer = Slatepacker::new(SlatepackerArgs {
+        sender: None,
+        recipients: vec![],
+        dec_key: None,
+    });
+    packer
+        .armor_slatepack(&packer.create_slatepack(slate).unwrap())
+        .unwrap()
+}
+
+/// A hostile foreign API: answers `check_version`, then hands the S1 to
+/// `receiver`'s wallet after `edit` has changed it. Serves exactly two
+/// requests. Returns the base URL and the thread to join.
+fn hostile_foreign_api(
+    receiver: u64,
+    edit: impl Fn(&mut Slate) + Send + 'static,
+) -> (String, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        global::set_local_chain_type(ChainTypes::AutomatedTesting);
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let (_line, body) = read_request(&stream);
+            let req: Value = serde_json::from_str(&body).unwrap();
+            let result = match s(&req["method"]) {
+                "check_version" => {
+                    json!({"foreign_api_version": 2, "supported_slate_versions": ["V4"]})
+                }
+                "receive_tx" => {
+                    let mut s1 = Slate::deserialize_upgrade(&req["params"][0].to_string()).unwrap();
+                    edit(&mut s1);
+                    let s2 = receive(receiver, &armor_slate(&s1)).unwrap();
+                    let d = decode(receiver, &armored(&s2)).unwrap();
+                    serde_json::from_str::<Value>(s(&d["slate_json"])).unwrap()
+                }
+                other => panic!("unexpected method {other}"),
+            };
+            let reply = json!({"jsonrpc": "2.0", "id": 1, "result": {"Ok": result}}).to_string();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                reply.len(),
+                reply
+            )
+            .unwrap();
+        }
+    });
+    (url, server)
+}
+
+/// A hostile recipient cannot make the synchronous send record a payment
+/// proof for a key other than the one asked for, drop the proof, or change
+/// the kernel. Nothing is locked or recorded when the answer is refused.
+#[test]
+fn synchronous_http_send_refuses_a_tampered_answer() {
+    let tmp = tempfile::tempdir().unwrap();
+    let chain = tmp.path().join("chain");
+    let alice = test_wallet(&chain, &tmp.path().join("alice"), "alice");
+    let bob = test_wallet(&chain, &tmp.path().join("bob"), "bob");
+    let carol = test_wallet(&chain, &tmp.path().join("carol"), "carol");
+    mine(alice, 5);
+    let bob_addr = address(bob);
+    let carol_key = SlatepackAddress::try_from(address(carol).as_str())
+        .unwrap()
+        .pub_key;
+    let amount = 10 * GRIN;
+    let before = balance(alice, true);
+    let txs_before = txs(alice, false)["txs"].as_array().unwrap().len();
+
+    let attempt = |url: String, with_proof: bool| {
+        let mut args = json!({
+            "amount": amount,
+            "min_confirms": 1,
+            "recipient_url_or_address": format!("{url}/v2/foreign"),
+        });
+        if with_proof {
+            args["recipient_address"] = json!(bob_addr);
+        }
+        send_http(alice, args).unwrap_err()
+    };
+    let unchanged = || {
+        let b = balance(alice, false);
+        assert_eq!(b["amount_locked"], before["amount_locked"]);
+        assert_eq!(
+            b["amount_currently_spendable"],
+            before["amount_currently_spendable"]
+        );
+        assert_eq!(
+            txs(alice, false)["txs"].as_array().unwrap().len(),
+            txs_before
+        );
+    };
+
+    // The proof's receiver address swapped for a key the server holds
+    // (Carol's wallet signs with it, so the signature itself verifies).
+    let (url, server) = hostile_foreign_api(carol, move |s1| {
+        s1.payment_proof.as_mut().unwrap().receiver_address = carol_key;
+    });
+    let e = attempt(url, true);
+    server.join().unwrap();
+    assert_eq!(e.0, TRANSACTION, "{}", e.1);
+    assert!(
+        s(&e.1["message"]).contains("other than the one requested"),
+        "{}",
+        e.1
+    );
+    unchanged();
+
+    // The requested proof dropped.
+    let (url, server) = hostile_foreign_api(bob, |s1| s1.payment_proof = None);
+    let e = attempt(url, true);
+    server.join().unwrap();
+    assert_eq!(e.0, TRANSACTION, "{}", e.1);
+    assert!(s(&e.1["message"]).contains("dropped"), "{}", e.1);
+    unchanged();
+
+    // A height-locked kernel, which this wallet never issues.
+    let (url, server) = hostile_foreign_api(bob, |s1| {
+        let v4 = VersionedSlate::into_version(s1.clone(), SlateVersion::V4).unwrap();
+        let mut j = serde_json::to_value(&v4).unwrap();
+        j["feat"] = json!(2);
+        j["feat_args"] = json!({"lock_hgt": 1_000_000});
+        *s1 = Slate::deserialize_upgrade(&j.to_string()).unwrap();
+    });
+    let e = attempt(url, false);
+    server.join().unwrap();
+    assert_eq!(e.0, SLATE, "{}", e.1);
+    assert!(s(&e.1["message"]).contains("kernel features"), "{}", e.1);
+    unchanged();
+
+    // An honest answer still goes through after the refusals.
+    let (url, server) = hostile_foreign_api(bob, |_| {});
+    let v = send_http(
+        alice,
+        json!({
+            "amount": amount,
+            "min_confirms": 1,
+            "recipient_url_or_address": format!("{url}/v2/foreign"),
+            "recipient_address": bob_addr,
+        }),
+    )
+    .unwrap();
+    server.join().unwrap();
+    assert_eq!(v["state"], "S3");
+    let a = entry(&txs(alice, false), s(&v["slate_id"]));
+    assert_eq!(a["payment_proof"]["receiver_address"], bob_addr.as_str());
+    close(alice);
+    close(bob);
+    close(carol);
+}
+
+/// The Slatepack flow refuses an S2 that changed the kernel features or
+/// the TTL this wallet set, before anything is signed.
+#[test]
+fn finalize_refuses_a_changed_kernel_or_ttl() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (alice, bob) = alice_and_bob(tmp.path(), 5);
+    let amount = 10 * GRIN;
+
+    let edited_s2 = |edit: &dyn Fn(&mut Value)| {
+        let s1 = init_send(
+            alice,
+            json!({"amount": amount, "min_confirms": 1, "ttl_blocks": 100}),
+        )
+        .unwrap();
+        let d = decode(alice, &armored(&s1)).unwrap();
+        let mut j: Value = serde_json::from_str(s(&d["slate_json"])).unwrap();
+        edit(&mut j);
+        let slate = Slate::deserialize_upgrade(&j.to_string()).unwrap();
+        let s2 = receive(bob, &armor_slate(&slate)).unwrap();
+        (s(&s1["slate_id"]).to_owned(), armored(&s2))
+    };
+
+    let (id, s2) = edited_s2(&|j| {
+        j["feat"] = json!(2);
+        j["feat_args"] = json!({"lock_hgt": 1_000_000});
+    });
+    let e = finalize(alice, &s2, true).unwrap_err();
+    assert_eq!(e.0, SLATE, "{}", e.1);
+    assert_eq!(e.1["details"]["slate_id"], id.as_str());
+    assert_eq!(entry(&txs(alice, false), &id)["slate_state"], "S1");
+    call!(grin_tx_cancel(alice, -1, cs(&id).as_ptr())).unwrap();
+
+    let (id, s2) = edited_s2(&|j| {
+        j.as_object_mut().unwrap().remove("ttl");
+    });
+    let e = finalize(alice, &s2, true).unwrap_err();
+    assert_eq!(e.0, SLATE, "{}", e.1);
+    assert!(s(&e.1["message"]).contains("TTL"), "{}", e.1);
+    call!(grin_tx_cancel(alice, -1, cs(&id).as_ptr())).unwrap();
+
+    // Untouched, the same exchange finalizes.
+    let (_id, s2) = edited_s2(&|_| {});
+    assert_eq!(finalize(alice, &s2, false).unwrap()["state"], "S3");
+    close(alice);
+    close(bob);
 }
 
 #[test]
