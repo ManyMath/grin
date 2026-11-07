@@ -114,7 +114,9 @@ final class GrinHttpSendArgs {
 
   /// A Slatepack address, a v3 onion address or an `http(s)://` URL. An
   /// address that resolves to `.onion` needs a SOCKS proxy in the wallet's
-  /// network settings.
+  /// network settings. An `http(s)://` URL is reached directly when the
+  /// wallet has no proxy, which shows the device's IP address to that
+  /// server; with a proxy every target goes through it.
   final String recipientUrlOrAddress;
 
   /// The confirmations an output needs to be spent.

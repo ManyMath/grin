@@ -91,7 +91,11 @@ abstract interface class GrinWalletApi {
   });
 
   /// Scans the chain from [startHeight] (0 means from the first block) and
-  /// repairs the wallet's outputs. Transaction history is kept.
+  /// repairs the wallet's outputs. Transaction history is kept. With
+  /// [deleteUnconfirmed] the wallet's unconfirmed outputs are dropped and
+  /// their transactions cancelled, which unlocks the inputs of a send that
+  /// is still waiting for its counterparty; leave it false unless that is
+  /// wanted.
   ///
   /// It can take long. Poll [scanProgress] meanwhile. [cancelScan] stops it
   /// at the end of the batch being scanned, and this call then throws
@@ -212,6 +216,15 @@ abstract interface class GrinWalletApi {
   /// the wallet's network settings (see [updateNetwork]). With
   /// [GrinHttpSendArgs.post] the transaction is broadcast.
   ///
+  /// The recipient's answer is checked before anything is locked: it must
+  /// keep a plain kernel and the TTL this wallet set, and when a payment
+  /// proof was requested it must carry one for exactly the requested
+  /// address. An answer that fails those checks throws [GrinSlateException]
+  /// or [GrinTransactionException] and leaves nothing in the history.
+  ///
+  /// A clearnet `http(s)://` target without a SOCKS proxy is reached
+  /// directly, so the recipient's server learns the device's IP address.
+  ///
   /// Throws [GrinHttpException] when the other wallet cannot be reached or
   /// refuses the slate, and [GrinNodeException] (with `slate_id` in its
   /// details) when the transaction was finalized but the broadcast failed;
@@ -238,12 +251,14 @@ abstract interface class GrinWalletApi {
   /// the node; [fluff] skips the Dandelion stem phase. Without it the
   /// transaction is stored and [repost] can broadcast it later.
   ///
-  /// Throws [GrinSlateException] when the text is not an S2,
-  /// [GrinNotFoundException] when this wallet has no open transaction for the
-  /// slate (unknown, or already finalized), [GrinTransactionException] for a
-  /// bad signature, a payment proof mismatch or an expired transaction, and
-  /// [GrinNodeException] (with `slate_id` in its details) when the broadcast
-  /// fails after the transaction was finalized.
+  /// Throws [GrinSlateException] when the text is not an S2, or when the S2
+  /// changed the kernel features or the TTL this wallet set (nothing is
+  /// signed then), [GrinNotFoundException] when this wallet has no open
+  /// transaction for the slate (unknown, or already finalized),
+  /// [GrinTransactionException] for a bad signature, a payment proof
+  /// mismatch or an expired transaction, and [GrinNodeException] (with
+  /// `slate_id` in its details) when the broadcast fails after the
+  /// transaction was finalized.
   Future<GrinFinalizeResult> finalizeSlatepack(
     String armoredS2, {
     bool broadcast = true,
@@ -282,7 +297,8 @@ abstract interface class GrinWalletApi {
   /// Expects the I2 of an invoice this wallet issued with [issueInvoice].
   /// Locks nothing new (the payer's inputs were locked by [processInvoice]).
   /// [broadcast] and [fluff] work as in [finalizeSlatepack], and so do the
-  /// errors, with [GrinSlateException] for anything that is not an I2.
+  /// errors, with [GrinSlateException] for anything that is not an I2 or
+  /// that changed the kernel features (the payer may set a TTL).
   Future<GrinFinalizeResult> finalizeInvoice(
     String armoredI2, {
     bool broadcast = true,
@@ -351,8 +367,10 @@ abstract interface class GrinWalletApi {
   /// Safe to call more than once: every call returns the same future. In
   /// order, it
   /// 1. marks the wallet closed, so new calls throw [StateError],
-  /// 2. calls [cancelScan], so a running scan stops at its next batch
-  ///    boundary and a scan still waiting in the queue is skipped,
+  /// 2. calls [cancelScan], and keeps calling it until the queue has
+  ///    settled, so a running scan stops at its next batch boundary, one
+  ///    that was just starting is caught too, and a scan still waiting in
+  ///    the queue is skipped,
   /// 3. waits for the operations already queued, ignoring their errors,
   /// 4. releases what the backend holds for this wallet,
   /// 5. closes the wallet, emits [GrinWalletClosed] if that worked, and

@@ -1427,6 +1427,61 @@ An independent review of `git diff grin-v1..grin-native-split` found no bugs and
 
 A second independent review of the same range found no defect in the split itself and two minor items, both fixed. web-smoke read only the first single-quoted URI of a directive, so `import "dart:io";` and the conditional URI in `import 'stub.dart' if (dart.library.io) 'dart:io';` passed; it now checks every quoted URI of each directive in either quote style, and the stage first runs the check over fixed directives it must catch or let through. Sections 4, 7 and 10 still named the brief's `crates/grin-ffi/` paths, from before the first build; they now name `packages/grin_native/rust/`, and 8's phase steps keep the brief's wording. grin.git is the url consumers use (9.8); grin_native.git is a mirror. That review's whole-package `dart analyze --fatal-infos` of `grin_native` found no issues, so the narrowed dart-analyze stage hides nothing today.
 
+### Fixes after the independent security review (2026-11-06, D13)
+
+A full implementation review of `grin-native-split` at 47b6c74 with fork
+b5d756b (report kept by the reviewer; its probes were scratch tests, not
+committed) found no fund-loss path and no memory-safety defect (valgrind and
+AddressSanitizer runs of the Rust tests were clean). Of its findings, the
+response size cap, the private `wallet_data`, the required `updateNetwork`
+arguments, the seed file format and the lone-backup error were already on
+the `hardening` branches. The rest was fixed here, on `hardening`:
+
+1. `grin_tx_send_http` locked outputs with the S2 the recipient returned, so
+   a hostile recipient could have the stored payment proof name a key of
+   its choice instead of the address the caller asked for (the Slatepack
+   flow locks with the S1 and refused the same substitution). The S2 is now
+   checked before anything is locked: same proof addresses as requested,
+   signed, or no proof when none was requested (`Transaction`), and a plain
+   kernel with the S1's TTL (`Slate`). `synchronous_http_send_refuses_a_tampered_answer`
+   drives a hostile foreign API that swaps the address, drops the proof and
+   sets a height-locked kernel; nothing is locked or recorded.
+2. `grin_tx_finalize_slatepack` and `grin_tx_finalize_invoice` signed whatever
+   kernel features the returned slate carried; a recipient could impose a
+   HeightLocked kernel the node then refused, leaving the inputs locked. A
+   returned slate must keep a plain kernel, and for a send the TTL this
+   wallet set (`finalize_refuses_a_changed_kernel_or_ttl`).
+3. `grin_wallet_delete` followed a `wallet_data` that was a symbolic link to
+   another wallet's `wallet_data` (the name rule passed). Create, open and
+   delete now refuse a `wallet_data` that is a link at all.
+4. `grin_wallet_delete` with a handle another call still held removed the
+   handle and then returned `WalletBusy`. The session is now removed only
+   when nothing else holds it; otherwise the handle stays usable
+   (`delete_with_a_held_handle_keeps_the_handle`).
+5. `GrinWalletClient.close()` sent one cancel; a scan that had just left the
+   queue could miss it and close() then waited for the whole scan. It now
+   repeats the cancel every 100 ms until the queue has settled.
+6. Fork (hardening 377141e): both HTTP clients refuse redirects (a 3xx is
+   an error; the request never reaches the other origin), stored
+   transaction files are created 0600, and `WalletSeed` zeroizes its bytes
+   on drop and prints only its length in Debug output.
+
+Gates after the changes, on this machine with cargo offline: `cargo fmt
+--check` clean, clippy with and without `test-utils` clean, Rust tests
+`47 passed` (unit), `16 passed` (ffi_e2e_test), `11 passed` (ffi_tx_test),
+`4 passed` (header_test); release build `35 standard, 0 test symbols`;
+`dart analyze --fatal-infos` clean for grin, grin_native (whole package) and
+the consumer; `dart test` `38 passed` (grin), `87 passed, 2 skipped`
+(grin_native through the hook), `1 passed` (consumer); `dart format` 0
+changed; web-smoke `web_smoke ok`. Fork: `cargo fmt --check` clean,
+`grin_wallet_impls` tests `21 passed` (rustls) and `25 passed` (defaults),
+`grin_wallet_libwallet` lib tests `34 passed`.
+
+Left as design notes from the same review: only derivation index 0 can
+receive (documented), `processInvoice` has no caller-side amount bound,
+`walletDir` may be relative, and remote error text is echoed in exception
+messages.
+
 ### D9. Review items left as they are, and why
 
 Of the review nits (section 13), three were deliberately not changed:

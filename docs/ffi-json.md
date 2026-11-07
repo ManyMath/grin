@@ -257,7 +257,12 @@ See 1.1.
   first. The handle matches if it was opened at the same canonical path or
   at another path to the same directory (see the directory guard below). A
   handle that belongs to another directory is `InvalidArgument`; a handle
-  that is not registered is ignored.
+  that is not registered is ignored. A handle that another call still holds
+  is not closed: the call is `WalletBusy`, nothing is deleted, and the
+  handle stays usable.
+- `<wallet_dir>/wallet_data` must be a directory. A symbolic link there is
+  `InvalidArgument` (create and open refuse it too), so a link cannot point
+  a delete at another wallet's data.
 - A missing `wallet_data` counts as already deleted (success). If `handle`
   is registered and its own data directory is gone as well (removed outside
   the library), the handle is closed; if its data directory still exists, it
@@ -282,7 +287,8 @@ removed and made again at the same path is a different one. On Windows it is
 the canonical path, which covers `dir`, `dir/`, `dir/./` and symlinks but not
 other mounts of the same directory. The `wallet_dir` detail of `WalletBusy`
 is the canonical path of the call that was refused. `wallet_data` itself must
-not be a symlink to a directory with another name (`InvalidArgument`).
+not be a symbolic link at all, whatever it points at (`InvalidArgument` from
+create, open and delete); links higher up the path are fine.
 
 ### `grin_wallet_change_password(handle, old_pw, new_pw)`
 
@@ -696,6 +702,13 @@ it with `grin_tx_repost`.
   slatepack or onion target is itself a slatepack key, so a
   `recipient_address` for another key is `InvalidArgument`, checked before
   anything is built or locked (and before the proxy check).
+- The S2 the other wallet returns is checked before anything is locked:
+  same slate id and state S2; a plain kernel (`kernel_features` 0 and no
+  arguments) and the TTL cutoff height the S1 carried, else `Slate`; and
+  the payment proof as requested, else `Transaction`: with a proof
+  requested, the S2 must carry one for exactly the requested address,
+  with this wallet's sender address and a receiver signature; without one,
+  it must carry none. A refused S2 leaves no transaction in the history.
 - Order: build the S1 (nothing locked yet), `check_version` and
   `receive_tx` on the other wallet with the wallet mutex released, lock the
   inputs, finalize, broadcast when `post`. A failed exchange leaves nothing
@@ -725,10 +738,15 @@ it with `grin_tx_repost`.
 - `armored_s2`: the S2 for a transaction this wallet started.
 - Finalizes and, when `broadcast`, posts the transaction. Returns a
   `GrinFinalized` (9.3) with state `S3`.
-- Errors: `Slate` (not an S2), `NotFound` (this wallet has no open
-  transaction for the slate: unknown, or already finalized), `Transaction`
-  (bad signature, payment proof mismatch, expired), `Node`. Every failure
-  after the S2 is decoded carries `{"slate_id"}`.
+- Before signing, the S2 must still carry a plain kernel (`kernel_features`
+  0 and no arguments) and the TTL cutoff height this wallet set on the S1
+  (read from its TxSent entry; not checked for a late-locked send, which has
+  no entry yet). Otherwise `Slate`, and nothing is signed.
+- Errors: `Slate` (not an S2, or a changed kernel or TTL), `NotFound` (this
+  wallet has no open transaction for the slate: unknown, or already
+  finalized), `Transaction` (bad signature, payment proof mismatch,
+  expired), `Node`. Every failure after the S2 is decoded carries
+  `{"slate_id"}`.
 
 ## 10. Invoices, repost, cancel and proofs
 
@@ -775,6 +793,8 @@ it with `grin_tx_repost`.
 
 - `armored_i2`: the I2 for an invoice this wallet issued.
 - Returns a `GrinFinalized` with state `I3`.
+- The I2 must still carry a plain kernel, else `Slate`. The TTL is not
+  compared: the payer sets it when paying.
 - Errors: as `grin_tx_finalize_slatepack`, with `Slate` for anything that
   is not an I2.
 
