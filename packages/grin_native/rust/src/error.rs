@@ -122,6 +122,10 @@ impl std::error::Error for GrinError {}
 impl From<LibwalletError> for GrinError {
     fn from(e: LibwalletError) -> Self {
         use GrinErrorCode as C;
+        // The node client of a wallet with the network off.
+        if matches!(&e, LibwalletError::ClientCallback(m) if m == crate::config::NETWORK_DISABLED) {
+            return crate::config::network_disabled();
+        }
         let message = e.to_string();
         let code = match &e {
             LibwalletError::NotEnoughFunds {

@@ -509,6 +509,7 @@ mod tests {
         assert_eq!(client.node_url(), "http://a");
         let e: GrinError = client.get_chain_tip().unwrap_err().into();
         assert_eq!(e.code, GrinErrorCode::Node);
+        assert_eq!(e.details.unwrap()["reason"], "network_disabled");
         let e = WalletConfig::parse(
             r#"{"wallet_dir":"/w","network":0,"node_url":"ftp://a","network_enabled":false}"#,
         )

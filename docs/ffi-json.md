@@ -155,7 +155,8 @@ and no connection is opened. These are:
 Everything else works from the wallet's own data. As a second line, the
 wallet's node client is replaced by one that refuses every request, so a
 libwallet path that asks the node anyway (the late-lock step of a finalize
-without broadcast) also fails with `Node` without connecting.
+without broadcast) also fails with `Node` and the same reason, without
+connecting.
 `grin_node_test_connection` takes no wallet and is not affected.
 
 ## 4. Memory, logging and diagnostics
