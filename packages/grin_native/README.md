@@ -177,9 +177,10 @@ Stack Wallet lists `grin_native` alone and imports only
 same repository, and `grin` is not published, so it is pinned in
 `dependency_overrides` at the same url and ref: `grin_native` declares
 `grin: ^0.1.0`, which a git consumer would otherwise look up on pub.dev. The
-pin goes away once `grin` is published. Use the grin.git url for both
-entries and move both refs together; grin_native.git on the same host is a
-mirror of the same tree, and pub counts a second url as a second source.
+pin goes away once `grin` is published. Use the same url for both entries
+and move both refs together; pub counts a second url as a second source.
+The repository stays private on git.cypherstack.com for now, so read
+"Private access" below before the first build.
 The hook reads one user-define, `test_utils`, which adds the `grin_test_*`
 functions for tests and must stay false in an app; leaving the block out is
 the same.
@@ -188,14 +189,14 @@ the same.
 dependencies:
   grin_native:
     git:
-      url: ssh://git@git.cypherstack.com:222/sneurlax/grin.git
+      url: ssh://git@git.cypherstack.com:222/sneurlax/grin_native.git
       path: packages/grin_native
       ref: <commit>
 
 dependency_overrides:
   grin:
     git:
-      url: ssh://git@git.cypherstack.com:222/sneurlax/grin.git
+      url: ssh://git@git.cypherstack.com:222/sneurlax/grin_native.git
       path: packages/grin
       ref: <commit>
 
@@ -261,23 +262,54 @@ later step, planned on [dnix](https://github.com/cypherstack/dnix); see
 
 The setting is a user-define, not an environment variable, because the hooks
 runner that `dart test`, `dart run` and `flutter build` use starts hooks with a
-filtered environment: only PATH, HOME, the temp and proxy variables, the
-Android NDK variables, a few Windows ones, and names starting with `CARGO_`,
-`CCACHE_`, `DOTNET_`, `NIX_`, `NUGET_`, `RUSTUP_` or `CONAN_` get through (see
+filtered environment. In hooks_runner 1.5.0, the version Flutter 3.47.2 pins,
+only PATH, HOME, LIBCLANG_PATH, GOPATH, the temp and proxy variables, the
+Android NDK variables, a few Windows ones, and names starting with `CCACHE_`,
+`DOTNET_`, `NIX_`, `NUGET_` or `CONAN_` get through (see
 `includeHookEnvironmentVariable` in
 [hooks_runner's build_runner.dart](https://github.com/dart-lang/native/blob/main/pkgs/hooks_runner/lib/src/build_runner/build_runner.dart)).
+`CARGO_*` and `RUSTUP_*` variables do not reach the hook, so `CARGO_HOME`
+and `RUSTUP_HOME` are ignored there: cargo and rustup inside the hook use
+`$HOME/.cargo` and `$HOME/.rustup`, and rustup installs the pinned toolchain
+into `$HOME/.rustup` if it is not there yet. `SSH_AUTH_SOCK` is dropped as
+well.
 
-### Fetching the fork
+### Private access
 
-The Rust crate depends on a fork of grin-wallet at
-`ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git`, pinned by
-commit in `rust/Cargo.toml` and `rust/Cargo.lock`. The hook passes
-`CARGO_NET_GIT_FETCH_WITH_CLI=true`, so cargo fetches it with the git command
-line and your ssh configuration. The filtered hook environment has no
-`SSH_AUTH_SOCK`, so either the fork's commit is already in cargo's git
-database (run `cargo fetch --manifest-path rust/Cargo.toml` once in a shell
-that has your ssh agent) or the key in `~/.ssh` for that host needs no
-passphrase. The fork's `grin` submodule comes from GitHub over https.
+This repository and the grin-wallet fork it builds against are private on
+git.cypherstack.com for now, so a build needs read access to both, and the
+two are fetched in different ways.
+
+- pub fetches this repository (the `grin_native` and `grin` git entries)
+  over ssh. `dart pub get` and `flutter pub get` run with your full
+  environment, so your ssh agent works.
+- cargo fetches the fork
+  (`ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git`, pinned by
+  commit in `rust/Cargo.toml` and `rust/Cargo.lock`) inside the build hook.
+  The hook passes `CARGO_NET_GIT_FETCH_WITH_CLI=true`, so cargo uses the git
+  command line and your ssh configuration, but the hook's environment has
+  no `SSH_AUTH_SOCK` (see above), so the agent is out of reach.
+
+So before the first build, do one of these:
+
+1. Fetch the fork once from a shell that has your agent, into the cargo
+   home the hook will use:
+
+   ```sh
+   cargo fetch --locked --manifest-path <grin_native>/rust/Cargo.toml
+   ```
+
+   `<grin_native>` is this package's directory: in this repository
+   `packages/grin_native`, in an app the checkout pub made under
+   `~/.pub-cache/git/` (the `rootUri` of `grin_native` in the app's
+   `.dart_tool/package_config.json`). Run it with `CARGO_HOME` unset or set
+   to `$HOME/.cargo`, because the hook ignores any other value. After that
+   cargo finds the pinned commit in its git database and does not go to
+   the network for it. Repeat it when the pinned fork commit changes.
+2. Or keep a key without a passphrase for git.cypherstack.com in `~/.ssh`
+   (a read-only deploy key is enough), which git can use without an agent.
+
+The fork's `grin` submodule comes from GitHub over https and needs no key.
 
 ### Live node smoke test
 

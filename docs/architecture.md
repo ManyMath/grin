@@ -439,458 +439,9 @@ Phase 2 was first built as one package named `grin`. D12 (2026-11-03) split it, 
 3. Run `cargo tree -d`, `cargo test`, `(cd packages/grin && dart test)`, `(cd packages/grin_native && dart test)`, `(cd packages/grin_native/example && flutter test)`, `dart analyze`, `flutter analyze`, the `web-smoke` and `consumer` stages, and the `tool/ci.dart` `nm` check on `hook/build.dart` output built without `test-utils`.
 4. Release artifacts, and the `nm` gate on the exact files a release publishes, are deferred to the dnix pipeline (D11).
 
-## 9. Stack Wallet integration design (design only; no stack_wallet code changes)
+## 9. Stack Wallet integration design
 
-This section is the Phase 5 target contract that [PLAN] §1 item 5 (lines 24-25) leaves for a later stack_wallet branch. It describes how Stack Wallet would consume `grin_native` (which brings `grin` with it), and it changes nothing in stack_wallet. Every stack_wallet fact below was read from refs already present locally with `git show`, `git diff`, `git log`, and one `git merge-tree --write-tree` whose objects went to a scratch object directory outside the repository. No worktree, branch or stash was touched and nothing was fetched. The settled decisions of [PLAN] §1 to §8 are inputs, with the build-hook correction recorded in [PLAN] D1 (lines 458-463).
-
-### Citation keys
-
-| Key | Checkout | Ref |
-|---|---|---|
-| [SW-main] | /home/user/src/stack_wallet/stack_wallet | `cypherstack/main` at a156253bf (2025-10-24) |
-| [SW-stg] | same repository | local `staging` at 7ce7b34f2 (2026-10-19) |
-| [SW-uni] | same repository | local `refactor/epic-mwc-unify` at 6fadd8c0a (2026-09-07) |
-| [SW-gen] | same repository, working tree | generated, gitignored `pubspec.yaml` (`.gitignore:76`); checkout is on `security/rbf-history-authentication` at b778525f0 |
-| [PLAN] | /home/user/src/grin/docs/architecture.md | commit dfb7f04 on main (492 lines; later commits insert sections 9 to 11 above section 12, so numbers above 450 shift). §4.6 rows are cited as `#N` (row N sits on line 275+N) |
-| [GW] | /home/user/src/grin-wallet | fork commit b5d756bd (grin submodule at v5.5.2, dbaff34f) |
-
-Paths are relative to the checkout named by the key.
-
-### 9.1 Branch baseline
-
-| Ref | Tip | Relationship |
-|---|---|---|
-| `cypherstack/main` | a156253bf | Ancestor of local `staging`: 1170 commits behind it, 0 ahead |
-| `staging` (local) | 7ce7b34f2 | Ancestor of `cypherstack/staging` (d6ca375df, 2026-10-29), which is 34 commits further |
-| `refactor/epic-mwc-unify` | 6fadd8c0a | 989 commits ahead of `cypherstack/main`; 5 ahead of and 186 behind local `staging` (220 behind `cypherstack/staging`) |
-
-`git merge-base staging refactor/epic-mwc-unify` is 9517439be, "Merge pull request #1441 from cypherstack/letsexchange-api-inconsistent-return-data-types-fix" (2026-09-04), which is on staging's first-parent chain. The unify branch is therefore staging as of 2026-09-04 plus five commits by sneurlax dated 2026-09-07: 8e8bc9807 (share slatepack and relay server models), 4fc2c7798 (share the native transaction model), eaba50513 (add `MimblewimbleWallet`), 340400c0a (one slatepack UI for Epic Cash and MWC), 6fadd8c0a (MWC genesis time for creation height).
-
-A trial merge of the unify branch into local `staging`, and into `cypherstack/staging`, conflicts in the same five files: `lib/pages/send_view/confirm_transaction_view.dart`, `lib/pages/send_view/send_view.dart`, `lib/pages_desktop_specific/my_stack_view/wallet_view/sub_widgets/desktop_send.dart`, `lib/wallets/wallet/impl/epiccash_wallet.dart` and `lib/wallets/wallet/impl/mimblewimblecoin_wallet.dart`. Staging's own edits to the two wallet files since the merge base are small (`git diff 9517439 staging`: +17/-9 and +10/-7), a shared `calculateRestoreProgress` helper and an epicbox check fix. The unify branch still carries the always-true test `!receiverAddress.startsWith("http://") || !receiverAddress.startsWith("https://")` ([SW-uni] lib/wallets/wallet/impl/epiccash_wallet.dart:643-644) that staging replaced with `shouldCheckEpicbox` in 598898ae8, so the rebase has to keep staging's version.
-
-`cypherstack/main` is unsuitable. It is 1170 staging commits old. Its `EpiccashWallet` extends `Bip39Wallet` with no slatepack code ([SW-main] lib/wallets/wallet/impl/epiccash_wallet.dart:43; "slatepack" does not occur in that file). Only the MWC slatepack screens exist (4 slatepack files under `lib/`, against 8 on staging). Its base `Wallet` lacks the `cancelSend` hook that staging has ([SW-stg] lib/wallets/wallet/wallet.dart:504-506). Its pubspec template has no `NATIVE_PREBUILTS` block ([SW-main] scripts/app_config/templates/pubspec.template.yaml:27-75 holds every marker, ending at `MWEBD`). The unify template lacks that block too (its markers end with `ISAR` at [SW-uni] scripts/app_config/templates/pubspec.template.yaml:356-372 and `MWEBDEXE` at 421-423); only staging has it ([SW-stg] scripts/app_config/templates/pubspec.template.yaml:367-388).
-
-Recommendation: cut the Grin branch from current staging (local `staging`, or `cypherstack/staging` for the newest tip already present locally), land the five unify commits rebased onto it first as their own PR, then add Grin on top. GrinWallet as designed below does not inherit from `MimblewimbleWallet`, so Grin is not blocked if the unify PR stalls. What Grin gains from unify is the single set of slatepack screens from 340400c0a, which would otherwise be forked a third time.
-
-#### What `MimblewimbleWallet` abstracts
-
-Rows cite [SW-uni] lib/wallets/wallet/intermediate/mimblewimble_wallet.dart unless noted.
-
-| Member | Lines | Use for Grin |
-|---|---|---|
-| `abstract class MimblewimbleWallet extends Bip39Wallet` (raw type, so `cryptoCurrency` is typed `Bip39Currency`) | 29 | Grin wants `Bip39Wallet<Grin>` |
-| `syncMutex`, `timer`, `highestPercent` | 32-35 | `highestPercent` is read by the network settings screen (9.1 list below); the rest is unneeded |
-| `walletInfoDataKey` and `ExtraMimblewimbleWalletInfo` (receiving/change index, `slatesToAddresses`, `slatesToCommits`, `lastScannedBlock`, `restoreHeight`, `creationHeight`) | 37-56; lib/wallets/wallet/supporting/mimblewimble_wallet_info_extension.dart:8-62 | `slatesToCommits` exists to recover commit id and from/to addresses later. Grin gets `kernel_excess` and `counterparty_address` from `GrinTxLogEntry` ([PLAN] 4.4, lines 232-247). Only the restore height is worth keeping, and `WalletInfo.restoreHeight` already holds it |
-| `walletDirName`, `currentWalletDirPath()` = `<app root>/<walletDirName>/<walletId>` | 40-41, 288-294 | Same convention suits Grin |
-| `firstBlockTimestamp`, `calculateRestoreHeightFrom` (61 s per block overestimate) | 43-45, 296-307 | Reusable |
-| `getSyncPercent`, which fires `RefreshPercentChangedEvent` and `BlocksRemainingEvent` | 58-75 | Grin fires the same events from `grin_wallet_scan_progress` (#20) |
-| `cancelPendingTransactionAndPost`, "" on success, else the error text | 83-84 | Kept for UI compatibility |
-| `getRelayConfig`, `updateRelayConfig` | 86-88 | No epicbox/mwcmqs equivalent |
-| `createSlatepack`, `decodeSlatepack`, `receiveSlatepack`, `finalizeSlatepack`, `isSlatepack` | 92-108 | The UI-facing contract; keep |
-| `fullDecodeSlatepack`, `analyzeSlatepack` (count `part_sig` in Dart-parsed slate JSON, fall back to `sta`) | 119-243 | Replaced by the slate state from `grin_slatepack_decode` (#24) |
-| `fetchWalletBalances` returning four `double`s | 247-259 | Conflicts with exact `BigInt` nanogrin ([PLAN] §2 row 6, line 38) |
-| `scanOutputs(startHeight, numberOfBlocks)` driven by a Dart loop of 10000-block chunks that persists `lastScannedBlock` per chunk | 267-271, 326-373 | `grin_wallet_scan` chunks inside Rust with cancellable progress (#19-#21) |
-| `pauseListenerForScan`, `resumeListenerAfterScan` | 273-280 | No listener in v1 ([PLAN] §1 item 4, lines 20-23) |
-| `startSync` with hard-coded `minimumConfirmations: 10` | 309-324 | Unneeded |
-| `putSendToAddresses` | 375-398 | Unneeded (see `slatesToCommits`) |
-| Overrides: `isarTransactionVersion => 2`, address filters, custom `refresh`, `updateBalance` through `Decimal.parse(double.toString())`, `updateUTXOs => false`, constant `fees`, `exit` that cancels the timer | 416-609 | Grin wants the version, the filters and `updateUTXOs => false`; the rest differs |
-
-Decision: `GrinWallet extends Bip39Wallet<Grin> with SlatepackInterface<Grin>`. `SlatepackInterface` is a new mixin in `lib/wallets/wallet/wallet_mixin_interfaces/` (where `spark_interface.dart`, `paynym_interface.dart` and the others live, [SW-stg] lib/wallets/wallet/wallet.dart:60-63; `Bip39Wallet` already mixes in `MnemonicInterface` from there, [SW-stg] lib/wallets/wallet/intermediate/bip39_wallet.dart:6-9). `MimblewimbleWallet` mixes in the same interface. Reasons:
-
-1. Six abstract members of `MimblewimbleWallet` would be stubs or wrong for Grin (the relay pair, the listener pair, chunked `scanOutputs`, `double` balances), and its slate analysis repeats work `grin-ffi` does in Rust.
-2. The UI touches only the slatepack members and `cancelPendingTransactionAndPost` ([SW-uni] lib/pages/finalize_view/finalize_view.dart:124-134, lib/pages/receive_view/receive_view.dart:108, lib/pages/receive_view/sub_widgets/slatepack_import_dialog.dart:63, lib/pages/send_view/confirm_transaction_view.dart:168, lib/pages/send_view/send_view.dart:695, lib/pages_desktop_specific/my_stack_view/wallet_view/sub_widgets/desktop_receive.dart:119 and desktop_send.dart:180, lib/pages/wallet_view/transaction_views/tx_v2/transaction_v2_details_view.dart:1508). Relay calls only occur in coin-specific settings screens that cast to the concrete wallet ([SW-uni] lib/pages/settings_views/wallet_settings_view/wallet_settings_view.dart:647-653, 750, 790; lib/pages/settings_views/wallet_settings_view/epicbox_settings/manage_epicbox_view.dart:64).
-3. Staging's base `Wallet.refresh` is generic (chain height, transactions, UTXOs, balance, progress events; [SW-stg] lib/wallets/wallet/wallet.dart:554-755), so Grin does not need `MimblewimbleWallet.refresh`.
-4. Precedent for a direct subclass over an FFI package: `BitcoinFrostWallet<T extends FrostCurrency> extends Wallet<T>` ([SW-stg] lib/wallets/wallet/impl/bitcoin_frost_wallet.dart:38-41) reaches frostdart only through `frostInterface` from `lib/wl_gen/interfaces/frost_interface.dart` (import at :27, calls at :63-65; direct frostdart imports are commented out at :5-7).
-
-Interface sketch (names proposed; the state enum replaces the string labels the UI matches today):
-
-```dart
-enum SlateState { s1, s2, s3, i1, i2, i3, unknown }
-
-mixin SlatepackInterface<T extends CryptoCurrency> on Wallet<T> {
-  bool isSlatepack(String data);
-  Future<({SlateState state, Amount? amount, Amount? fee, String slateId,
-      String? senderAddress, String? recipientAddress, bool wasEncrypted})>
-      inspectSlatepack(String slatepack);
-  Future<SlatepackResult> createSlatepack({required Amount amount,
-      String? recipientAddress, String? message, bool encrypt = false,
-      int? minimumConfirmations});
-  Future<ReceiveResult> receiveSlatepack(String slatepack);
-  Future<FinalizeResult> finalizeSlatepack(String slatepack);
-  Future<String> cancelPendingTransactionAndPost(String txSlateId);
-
-  bool get supportsInvoices => false; // GrinWallet overrides with true
-  Future<SlatepackResult> issueInvoice({required Amount amount, String? payerAddress}) =>
-      throw UnsupportedError("invoices");
-  Future<SlatepackResult> processInvoice(String i1) => throw UnsupportedError("invoices");
-  Future<FinalizeResult> finalizeInvoice(String i2) => throw UnsupportedError("invoices");
-  Future<String?> pendingSlatepackFor(String txid) async => null;
-}
-```
-
-The result types exist ([SW-uni] lib/models/slatepack_models.dart:1-7, 31-37, 61-68, 94-98). `MimblewimbleWallet` implements `inspectSlatepack` with its current `analyzeSlatepack`. These [SW-uni] sites change from `MimblewimbleWallet` to `SlatepackInterface`: finalize_view.dart:122, receive_view.dart:104, slatepack_import_dialog.dart:58, confirm_transaction_view.dart:154 and 316, send_view.dart:689, lib/pages/wallet_view/wallet_view.dart:1020, transaction_v2_details_view.dart:1483. One more site, lib/pages/settings_views/wallet_settings_view/wallet_network_settings_view/wallet_network_settings_view.dart:357-363, reads `highestPercent`; GrinWallet exposes the same getter and that branch gains a `coin is Grin` case.
-
-### 9.2 Grin coin definition
-
-These refs have no `Coin` enum. `CryptoCurrency.identifier` "should also match the old `Coin` enum name" and keys persistent storage ([SW-stg] lib/wallets/crypto_currency/crypto_currency.dart:46-50). A coin is registered here (all [SW-stg] unless noted):
-
-1. `lib/wallets/crypto_currency/coins/grin.dart`, exported from `lib/wallets/crypto_currency/crypto_currency.dart:5-29`.
-2. `case const (Grin): return GrinWallet(net);` in `Wallet._loadWallet` (lib/wallets/wallet/wallet.dart:355-437; Epic at 382-383).
-3. `Grin(CryptoCurrencyNetwork.main)` and `Grin(CryptoCurrencyNetwork.test)` in the `_supportedCoins` list written by scripts/app_config/configure_stack_wallet.sh:98-136, and `GRIN` in both marker lists of that script (`process_pubspec_deps.dart` at :23-34, `gen_interfaces.dart` at :36-48). The Campfire and Stack Duo scripts leave it out.
-4. A `%%ENABLE_GRIN%%` block in scripts/app_config/templates/pubspec.template.yaml (9.8). `tool/process_pubspec_deps.dart:19-54` uncomments every block whose marker is listed, so one marker can wrap both a `dependencies` block and a `dependency_overrides` block.
-5. `lib/wl_gen/interfaces/libgrin_interface.dart` plus `tool/wl_templates/GRIN_libgrin_interface_impl.template.dart`, modelled on `LibEpicCashInterface` ([SW-uni] lib/wl_gen/interfaces/libepiccash_interface.dart:1-134) and its template ([SW-uni] tool/wl_templates/EPIC_libepiccash_interface_impl.template.dart:1-21, whose `//ON` and `//OFF` sections are selected by tool/gen_interfaces.dart:41-83). Only the template imports `package:grin_native`. An OFF build has no `package:grin_native` and therefore no `package:grin`, so the interface cannot expose `GrinWalletClient`, `GrinBalance`, `GrinTxLogEntry` or `GrinException`. It declares Stack-side mirrors instead, as `MimblewimbleTransaction` does ([SW-uni] lib/wl_gen/interfaces/mimblewimble_transaction.dart:3-42) and as `BadHttpAddressException` does for errors (libepiccash_interface.dart:134), plus a typed facade `abstract class GrinSession` that mirrors the client one to one. That reads better than Epic's `DynamicObject` wrapper (lib/utilities/dynamic_object.dart:11-25; [SW-uni] EPIC template:183-213).
-6. A `PriceAPI._coinToIdMap` entry (lib/services/price.dart:28-45; Epic at :36). The CoinGecko id `grin` is an assumption.
-7. A `testNodeConnection` case (lib/utilities/test_node_connection.dart:116-170; Epic at :144-146) calling the stateless `grin_node_test_connection` (#7).
-8. A `Wallets.deleteWallet` branch (lib/services/wallets.dart:149-171 covers Epic and MWC).
-9. Coin icon and theme assets (lib/themes/coin_icon_provider.dart:31 for Epic).
-10. An audit of the 108 lines in 24 files on [SW-uni] that test `coin is Epiccash` or `coin is Mimblewimblecoin`. An optional `MimblewimbleCurrency extends Bip39Currency` intermediate would let the shared ones read `coin is MimblewimbleCurrency`, the way `FrostCurrency` ([SW-stg] lib/wallets/crypto_currency/intermediate/frost_currency.dart:6-16) serves [SW-uni] wallet_view.dart:1037.
-
-Field mapping against `Epiccash` ([SW-uni] lib/wallets/crypto_currency/coins/epiccash.dart, same line numbers as [SW-stg]):
-
-| Member | Epiccash (line) | Grin |
-|---|---|---|
-| base class | `Bip39Currency` (12) | `Bip39Currency` (BIP39 mnemonic, [PLAN] #4, #5) |
-| networks | main only, others throw (16-23) | `main` and `test` |
-| `identifier` / `mainNetId` | "epicCash" (14) | "grin"; test "grinTestNet" (the pattern of "bitcoinTestNet", [SW-stg] lib/wallets/crypto_currency/coins/bitcoin.dart:24) |
-| `prettyName`, `ticker` | "Epic Cash", "EPIC" (19-20) | "Grin", "GRIN"; test "tGrin", "tGRIN" |
-| `uriScheme` | "epic" (15) | "grin" |
-| `genesisHash` | "not used in epiccash" (46-49) | "not used in grin" |
-| `minConfirms` | 3 (51-53) | 10 (grin-wallet's default `minimum_confirmations`, [GW] libwallet/src/api_impl/types.rs:119) |
-| `minCoinbaseConfirms` | inherited, equals `minConfirms` (crypto_currency.dart:67) | 1440 (`COINBASE_MATURITY = DAY_HEIGHT`, [GW] grin/core/src/consensus.rs:56-63); synthetic coinbase inputs make `isCoinbase()` true (9.5) |
-| `torSupport` | not overridden, so false (crypto_currency.dart:64), which makes Stack show `TorWarningDialog` when Tor is on ([SW-stg] lib/pages/wallets_view/sub_widgets/wallet_list_item.dart:68-83) | true: node traffic and HTTP send use Stack's SOCKS proxy |
-| `validateAddress` | http(s) URL, else `libEpic.validateSendAddressSync` (55-69) | `libGrin.validateAddressSync(address, network)` over `grin_address_validate` (#6) |
-| `getAddressType` | `mimbleWimble` if valid (170-176) | same |
-| `defaultNode` | `https://epic.stackwallet.com`, port 3413, Tor and clearnet enabled (71-93) | main: a Stack-run host on 3413 (grin-wallet's default `check_node_api_http_addr` is `http://127.0.0.1:3413`, [GW] config/src/types.rs:69); test: 13413 (grin's testnet convention; the host is an open item) |
-| `defaultSeedPhraseLength` / `possibleMnemonicLengths` | 24 / [24, 12] (95-96, 107-108) | 24 / [24, 12] |
-| `fractionDigits` / `satsPerCoin` | 8 / 10^8 (98-99, 113-114) | 9 / 10^9, nanogrin ([PLAN] line 38) |
-| `hasBuySupport`, `hasMnemonicPassphraseSupport` | false, false (101-105) | false, false |
-| `defaultAddressType` | `AddressType.mimbleWimble` (110-111) | same ([SW-stg] lib/models/isar/models/blockchain_data/address.dart:164) |
-| `targetBlockTimeSeconds` | 60 (116-117) | 60 |
-| `defaultDerivePathType` | throws (119-122) | throws |
-| `defaultBlockExplorer` | throws (124-132) | throws in v1; a kernel explorer URL is an open item |
-| helpers | `isSlateJson`, `isEpicboxAddress`, `isHttpAddress`, `getTransactionMethod` (134-168) | `isSlatepack` (armor check), `isHttpAddress`, `getTransactionMethod` returning `slatepack` or the automatic method |
-
-```dart
-class Grin extends Bip39Currency {
-  Grin(super.network) {
-    _idMain = "grin";
-    switch (network) {
-      case CryptoCurrencyNetwork.main:
-        _id = _idMain; _name = "Grin"; _ticker = "GRIN";
-      case CryptoCurrencyNetwork.test:
-        _id = "grinTestNet"; _name = "tGrin"; _ticker = "tGRIN";
-      default:
-        throw Exception("Unsupported network: $network");
-    }
-  }
-  // identifier, mainNetId, prettyName, ticker: late finals as in Epiccash.
-  @override String get uriScheme => "grin";
-  @override String get genesisHash => "not used in grin";
-  @override int get minConfirms => 10;
-  @override int get minCoinbaseConfirms => 1440;
-  @override bool get torSupport => true;
-  @override int get fractionDigits => 9;
-  @override BigInt get satsPerCoin => BigInt.from(1000000000);
-  @override int get targetBlockTimeSeconds => 60;
-  @override int get defaultSeedPhraseLength => 24;
-  @override List<int> get possibleMnemonicLengths => [24, 12];
-  @override bool get hasBuySupport => false;
-  @override bool get hasMnemonicPassphraseSupport => false;
-  @override AddressType get defaultAddressType => AddressType.mimbleWimble;
-
-  /// 0 = Mainnet, 1 = Testnet ([PLAN] 4.2 item 5).
-  int get ffiNetwork => network == CryptoCurrencyNetwork.main ? 0 : 1;
-
-  @override
-  bool validateAddress(String address) =>
-      libGrin.validateAddressSync(address: address, network: ffiNetwork);
-  @override
-  AddressType? getAddressType(String address) =>
-      validateAddress(address) ? AddressType.mimbleWimble : null;
-  @override
-  NodeModel defaultNode({required bool isPrimary}) => /* see table */;
-  // defaultDerivePathType and defaultBlockExplorer throw, as in Epiccash.
-}
-```
-
-`CryptoCurrency.validateAddress` is synchronous ([SW-stg] lib/wallets/crypto_currency/crypto_currency.dart:73), so `package:grin_native` provides `GrinWalletClient.validateAddressSync(address, network)` (also declared on `GrinWalletBackend`, so a fake can supply it), the same native check as `validateAddress` run on the calling isolate (stateless, microseconds). Added on 2026-11-02 after the independent review found it missing (section 13).
-
-Restore height: GrinWallet keeps a `firstBlockTimestamp` as `MimblewimbleWallet` does (mimblewimble_wallet.dart:43-45). The Grin mainnet genesis time is 2019-01-15 16:01:26 UTC, 1547568086 ([GW] grin/core/src/genesis.rs:160). The restore screen needs a Grin branch beside Epic and MWC ([SW-uni] lib/pages/add_wallet_views/restore_wallet_view/restore_wallet_view.dart:225-267) that stores only the height.
-
-### 9.3 GrinWallet mapped onto GrinWalletClient
-
-Calls go through `libGrin` and `GrinSession` (9.2 item 5), which forward one to one. On the plugin side the interface is `GrinWalletApi` (5.2), so `GrinWallet` can hold a `GrinWalletApi` (and take a `GrinWalletBackend`) and Stack Wallet's tests can pass fakes without loading the native library. The C functions are fixed by [PLAN] §4.6. Dart names other than `open`, `create`, `delete` (line 359), `close` (349-356), `getBalance` (326), `cancelScan` (370) and `updateNetwork` are proposals. In the table, "base" is [SW-stg] lib/wallets/wallet/wallet.dart, "MW" is [SW-uni] mimblewimble_wallet.dart, "E" and "M" are the [SW-uni] Epic and MWC wallet impls.
-
-Storage and configuration. GrinWallet keeps the seed password under `${walletId}_password`, generated with `generatePassword()` as Epic does (E:543-558), and treats its presence as the provisioned marker as MWC does (M:605-611). The mnemonic stays in the `MnemonicInterface` slot that `Wallet.create` writes (base 208-216); it is generated in Dart by `bip39.generateMnemonic` ([SW-uni] lib/pages/add_wallet_views/new_wallet_recovery_phrase_warning_view/new_wallet_recovery_phrase_warning_view.dart:217-223). Nothing else is persisted: no config JSON (MWC stores one at M:618-621 and M:1037-1041 and patches `wallet_dir` on iOS at M:579-591) and no `.api_secret` file (M:411-420). The wallet directory is recomputed on each open as `StackFileSystem.applicationRootDirectory()/grin/<walletId>` (MW `currentWalletDirPath`, 288-294; the root honours the desktop override, [SW-stg] lib/utilities/stack_file_system.dart:21-36). For an app without such a root, the example app's `WalletPaths.defaultWalletDirectory` (`packages/grin_native/example/lib/src/wallet_paths.dart`) returns `<application support>/grin/<walletId>`; it is example code to copy and not part of the library.
-
-| Wallet or UI method | GrinWalletClient call (C function) | Notes |
-|---|---|---|
-| `init()`, new wallet | `GrinWalletClient.create(config, mnemonic, password)` (`grin_wallet_create`, #8) | `config`: wallet dir, network, node URL, API secret, SOCKS proxy (9.4), min confirms. Restore height = `calculateRestoreHeightFrom(now - 2 days)` as E:577-580. Then `getAddress(0)`, lifecycle observer, Tor subscriptions, `super.init()` (base 802-812) |
-| `init()`, existing wallet | `GrinWalletClient.open(config, password)` (#9) | Awaits any pending close first and reuses a live client (9.7). Epic re-opens on every `init()` (E:597-611) and MWC caches its handle (M:80-109); neither closes on exit. `GrinWalletBusyException` per 9.7 |
-| `exit()` | `client.close()` (#10) | Order in 9.7. Replaces Epic's listener stop (E:1140-1144) and MW's timer cancel (MW 602-609) |
-| `recover(isRescan: false)` | `create`, then `client.scan(startHeight: restoreHeight, deleteUnconfirmed: false)` (#19) polled with `client.scanProgress()` (#20) | Inside `refreshMutex.protect` as E:731. Progress feeds `RefreshPercentChangedEvent` and `BlocksRemainingEvent` as MW 58-75. Then `unawaited(refresh())` |
-| `recover(isRescan: true)` | `client.scan(startHeight: restoreHeight, deleteUnconfirmed: false)` | Keeps tx history (#19). No delete-and-recover with rewritten txids (E:732-836), no `deleteWalletBlockchainData` (M:796-806). `deleteUnconfirmed: true` only behind an explicit "clear pending" option, since it would drop in-flight slatepack transactions (assumption about grin-wallet semantics) |
-| scan cancel | `client.cancelScan()` (#21, lock-free) | Used by the lifecycle observer and on Tor changes (9.4) |
-| `refresh()` | base `refresh()` (554-755), not overridden | Runs the next four rows; periodic timer from `ensurePeriodicRefreshTimer` (599-607) |
-| `updateChainHeight()` | `client.getChainHeight()` (#17) | `info.updateCachedChainHeight` as MW 564-571 |
-| `updateTransactions()` | `client.getTxs(refreshFromNode: true)` (#23) | The one node refresh per cycle. Builds `TransactionV2` (9.5) and caches `armored_slatepack` by txid for `pendingSlatepackFor` |
-| `updateBalance()` | `client.getBalance(refreshFromNode: false)` (#18) | `Amount(rawValue: <BigInt>, fractionDigits: 9)` with no `double`. total = total + awaiting_finalization (as MW presents it, 529-533), spendable = spendable, pendingSpendable = total - spendable, blockedTotal = 0 (MW 539-541). Field semantics follow upstream summary info (assumption) |
-| `updateUTXOs()` | none | Returns false (MW 558-562) |
-| `estimateFeeFor(amount, feeRate)` | `client.estimateFee(amount, minConfirms, false, false)` (#22) | `feeRate` ignored; Grin fees follow transaction weight |
-| `fees` | none | Constant `FeeObject` as MW 582-594 |
-| `prepareSend` | `client.estimateFee(amount, minConfirms, selectionStrategyIsAll: false, amountIncludesFee: amount == spendable)` (#22) | Locks nothing. Insufficient funds arrive typed with required and available (#22). Sets `otherData.transactionMethod` as M:771-785. `amount_includes_fee` replaces the "subtract the fee when sending everything" step (E:704-718) |
-| `cancelSend` | none | `prepareSend` holds no native resource (base hook 504-506) |
-| `confirmSend`, automatic method | `client.sendHttp(args)` (`grin_tx_send_http`, #26) | Recipient is `grin1`/`tgrin1` (onion) or `http(s)://`. Onion needs a proxy (9.4), which Rust also enforces ([PLAN] line 227). Returns `txData.copyWith(txid: slateId)` |
-| `createSlatepack`, Slatepack method (S1) | `client.initSend(args)` (`grin_tx_init_send`, #25) | Locks outputs. With a slatepack `recipientAddress`, encrypts to it and requests a payment proof (args field names are an assumption) |
-| `inspectSlatepack` | `client.decodeSlatepack(armored)` (#24), or the static form with `network` when no wallet is open | State, amount, fee, id, addresses |
-| `receiveSlatepack` (S1 to S2) | `client.receiveSlatepack(s1, message: null)` (#27) | S2 is encrypted back to the sender when S1 named one |
-| `finalizeSlatepack` (S2 to S3) | `client.finalizeSlatepack(s2, broadcast: true, fluff: false)` (#28) | A failed broadcast leaves a finalized transaction to repost |
-| `issueInvoice` (I1) | `client.issueInvoice(args)` (#29) | |
-| `processInvoice` (I1 to I2) | `client.processInvoice(i1, args)` (#30) | Locks the payer's inputs (#30), so the UI confirms amount and fee first |
-| `finalizeInvoice` (I2 to I3) | `client.finalizeInvoice(i2, broadcast: true, fluff: false)` (#31) | |
-| `cancelPendingTransactionAndPost(slateId)` | `client.cancelTx(txId: <cached log id>, slateId)` (#33) | Returns "" on success to keep the UI contract (MW 83-84; [SW-uni] transaction_v2_details_view.dart:1507-1513) |
-| `repostTransaction(txid)` (new) | `client.repost(txId, slateId, fluff: false)` (#32) | For finalized, unconfirmed outgoing transactions |
-| `exportPaymentProof(txid)`, `verifyPaymentProof(json)` (new) | #34, #35 | |
-| `checkSaveInitialReceivingAddress()` and the receive address | `client.getAddress(0)` (#16) | One slatepack address at index 0, as Epic only uses index 0 (E:391-401). GrinWallet is not a `MultiAddressInterface`, and `generateNewAddress` only acts for those ([SW-uni] receive_view.dart:157-160) |
-| `updateNode()` | `client.updateNetwork(nodeUrl, apiSecret, socksProxy)` (#15) | Also on Tor events (9.4); LMDB stays open |
-| `pingCheck()` | static `GrinWalletClient.testConnection(nodeUrl, apiSecret, socksProxy)` (#7) | Stateless, so it never waits behind a scan |
-| `getMnemonic()` | `MnemonicInterface` (secure storage) | `grin_wallet_get_mnemonic` (#14) only matters for a "verify seed" feature |
-| delete via `Wallets.deleteWallet` | `GrinWalletClient.delete(walletDir)` (#12) | Runs after the awaited `exit()` ([SW-stg] lib/services/wallets.dart:117-119) |
-
-GrinWallet opens inside `init()`, as Epic and MWC do, instead of implementing `ExternalWallet.open()` ([SW-stg] lib/wallets/wallet/intermediate/external_wallet.dart:6-12, called for `ExternalWallet` only at lib/widgets/wallet_card.dart:165-168). That split exists "to prevent db lock collision errors"; the `OPEN_DIRS` guard turns such a collision into a typed error, and 9.7 keeps GrinWallet from causing one.
-
-### 9.4 Tor proxy wiring through the event bus
-
-Event classes ([SW-stg]):
-
-- `TorConnectionStatusChangedEvent { TorConnectionStatus newStatus; String message; }` with `enum TorConnectionStatus { disconnected, connecting, connected }` (lib/services/event_bus/events/global/tor_connection_status_changed_event.dart:12-22). It is fired by the Tor service implementation's `_updateStatusAndFireEvent` (tool/wl_templates/TOR_tor_service_impl.template.dart:127-135), from `start()` (connecting, then connected or disconnected, :69-104) and `disable()` (disconnected, :108-125). No class is named `TorConnectionChangedEvent`.
-- `TorPreferenceChangedEvent { TorStatus status; String? message; }` with `enum TorStatus { enabled, disabled }` (lib/services/event_bus/events/global/tor_status_changed_event.dart:13-26), fired by the `Prefs.useTor` setter (lib/utilities/prefs.dart:1135-1150).
-
-`TorService` ([SW-stg] lib/services/tor_service.dart:10-37) offers `sharedInstance`, `status`, `getProxyInfo()` returning `({InternetAddress host, int port})` and throwing when not connected (the implementation returns loopback IPv4 and the Tor port, TOR template:44-50), `start()` and `disable()`. The killswitch is `prefs.torKillSwitch` (lib/utilities/prefs.dart:554).
-
-Existing patterns ([SW-stg]). `LibMoneroWallet` subscribes to both events in its constructor (lib/wallets/wallet/intermediate/lib_monero_wallet.dart:55-89), holds a mutex while Tor is connecting (59-78), calls `updateNode()` on a preference change (81-85), and derives the proxy as `AppConfig.hasFeature(AppFeature.tor) && prefs.useTor && !node.forceNoTor ? TorService.sharedInstance.getProxyInfo() : null` (516-519), passed as `"host:port"` (532-536). It never cancels the subscriptions (fields at 1626-1627; `exit()` at 733-742 leaves them). `ElectrumXClient` implements the killswitch: Tor wanted but not connected falls back to clearnet unless the killswitch is set, in which case it throws (lib/electrumx_rpc/electrumx_client.dart:228-248). Neither legacy Mimblewimble wallet passes a proxy; Epic only throws `NodeTorMismatchConfigException` on a node and Tor mismatch ([SW-uni] epiccash_wallet.dart:1146-1168).
-
-GrinWallet:
-
-```dart
-// Proxy string for grin-ffi, null for clearnet, or a throw when Tor is
-// required and unavailable.
-String? _socksProxy(NodeModel node) {
-  if (!AppConfig.hasFeature(AppFeature.tor) || !prefs.useTor || node.forceNoTor) {
-    return null;
-  }
-  final tor = TorService.sharedInstance;
-  if (tor.status != TorConnectionStatus.connected) {
-    if (prefs.torKillSwitch) throw GrinTorRequiredException();
-    return null; // node traffic may fall back, as ElectrumXClient does
-  }
-  final p = tor.getProxyInfo();
-  return "${p.host.address}:${p.port}"; // grin-ffi adds socks5h itself
-}
-```
-
-- The proxy string is `host:port` with an IPv4 literal host (a `socks5h://` or `socks5://` prefix is accepted and ignored); host names and IPv6 are rejected, and grin-ffi always connects with `socks5h`, so onion and DNS resolution stay inside Tor (docs/ffi-json.md, config_json table).
-- The proxy goes into the create/open config ([PLAN] #8, #9; `config.rs` carries it, line 68), so the first node call is already proxied.
-- Subscriptions are made in `init()` after the client opens and cancelled in `exit()`, unlike `LibMoneroWallet`, because Wallet objects outlive closed wallets.
-- `TorPreferenceChangedEvent`, and `TorConnectionStatusChangedEvent` with `connected` or `disconnected`, run `_applyNetwork()`: the Epic-style mismatch guard, then `client.cancelScan()` (lock-free, #21) so the update need not wait behind a whole scan, then `client.updateNetwork(...)` (#15), then `unawaited(refresh())`. `connecting` takes a mutex, as LibMoneroWallet does (59-78), that `confirmSend`, `createSlatepack` and `processInvoice` wait on. The Tor port is re-read on every `connected`, since a restart can change it.
-- Killswitch on and Tor down: GrinWallet does not call `updateNetwork` with a null proxy. The session keeps the old proxy, whose port is closed, so node calls fail instead of leaking, and refresh reports `unableToSync` through base refresh's error path (base 569-591).
-- Sends: with `useTor` on, `confirmSend` refuses whenever `_socksProxy` is null, for every recipient type, because a clearnet `http(s)://` send would show the user's IP to the recipient. Onion recipients always need a proxy, also enforced in Rust ([PLAN] line 227).
-
-Tor toggled mid-send. Handle-based calls are serialized in the client's op queue ([PLAN] lines 324-341), so `updateNetwork` runs after an in-flight `grin_tx_send_http`, and that send keeps the proxy it read when it started ([PLAN] 4.3, lines 224-227). `updateNetwork` is a queued operation in `GrinWalletClient`; only `scanProgress()` and `cancelScan()` bypass the queue (#20, #21). If Tor stops during the send, the SOCKS connection drops:
-
-- Before S2 returns: per the [PLAN] 4.3 order (line 228) outputs are locked only after `send_tx` returns, so nothing is locked (assumption about grin-wallet's `init_send_tx`). The UI reports the network error.
-- During `post_tx`: the transaction is finalized and its inputs locked. GrinWallet reports "finalized, not broadcast" and the details screen offers Repost (#32) once a connection is back.
-- Tor turned on while a clearnet `http(s)://` send is in flight: the send completes on clearnet, because it began before the change. The UI copy says so.
-
-### 9.5 TransactionV2 construction
-
-[PLAN] names `GrinTxLogEntry` (line 100) and fixes only the joined fields (`kernel_excess`, `payment_proof`, `armored_slatepack`, `counterparty_address`; 4.4, lines 232-247). The rest of the field list below mirrors upstream `TxLogEntry` and is an assumption. `TransactionV2`'s fields are at [SW-stg] lib/models/isar/models/blockchain_data/v2/transaction_v2.dart:15-58, unique on `(txid, walletId)` (22-23). Bare `transaction_v2.dart` line numbers in this subsection are [SW-stg] and identical on [SW-uni]; "E" and "M" are the [SW-uni] Epic and MWC wallet impls.
-
-| GrinTxLogEntry field (assumed) | TransactionV2 | Notes |
-|---|---|---|
-| `tx_slate_id` | `txid` (else `"grin-log-<id>"`), `otherData.slateId` | Stable from S1 to confirmation and across non-destructive rescans, so rows upsert by txid via `mainDB.updateOrPutTransactionV2s` (base 536-541). That retires Epic's `_fuzzyEquals` dedupe (E:483-520, E:1028-1092) and MWC's delete-all (M:1014-1019). Local notes already key on `slateId ?? txid` ([SW-uni] transaction_v2_details_view.dart:936-939) |
-| `kernel_excess` | `hash` (else txid), `otherData.kernelExcess` | Hex; later an explorer link |
-| `tx_type` | `type`, `otherData.grinTxType` | `TxReceived`, `ConfirmedCoinbase`, `TxReceivedCancelled` to incoming; `TxSent`, `TxSentCancelled` to outgoing; `TxReverted` by the sign of credited minus debited; `sentToSelf` when the counterparty is the wallet's own address. `subType` = `none` as E:1024 |
-| `confirmed`, a confirmed height, `kernel_lookup_min_height` | `height` | Confirmed: the confirmed height, else `kernel_lookup_min_height`, else 1. Unconfirmed: null. Epic uses `kernelLookupMinHeight ?? 1` (E:1019), a lookup lower bound that overstates confirmations under the non-Monero formula `currentChainHeight - (height - 1)` (transaction_v2.dart:118-123). `GrinTxLogEntry.confirmedHeight` carries it: the height of the wallet's own outputs in the transaction (`confirmed_height` in `grin_txs_get`, docs/ffi-json.md 9), null while unconfirmed and for a send without change, where `kernel_lookup_min_height` remains the fallback. Added on 2026-11-02 after the independent review (section 13) |
-| `creation_ts` | `timestamp` (seconds) | As E:1017-1018 |
-| `amount_debited` | one `InputV2`, `walletOwns: true`, addresses `[own address]` | `coinbase` set for `ConfirmedCoinbase`, so `isCoinbase()` (transaction_v2.dart:375-376) applies `minCoinbaseConfirms` |
-| `amount_credited` | one owned `OutputV2`, addresses `[own address]` | Receipt or change |
-| debited - credited - fee (outgoing only) | one unowned `OutputV2`, addresses `[counterparty]` | Received = credited and sent = debited - credited, so `getAmountSentFromThisWallet(subtractFee: true)` is the amount sent (transaction_v2.dart:183-214), and the details list built from outputs ([SW-uni] transaction_v2_details_view.dart:252-262) shows the recipient with its real amount next to the change. Epic puts the counterparty on its only output and MWC on its only input (E:957-974 against M:918-935), so both list change against the recipient's address |
-| `fee` | `otherData.overrideFee` (`Amount.toJsonString()`) | As E:1006-1009; 0 for incoming |
-| `counterparty_address` | `otherData.counterpartyAddress` and the address lists above | From `payment_proof`, else the sidecar ([PLAN] line 247) |
-| `payment_proof` | `otherData.hasPaymentProof` | Enables "Export payment proof" |
-| `armored_slatepack` | `otherData.pendingSlateState` (S1, S2, I1 or I2) | The armored text stays in the sidecar and in GrinWallet's per-refresh cache. Storing 1-2 KB per row would cost a JSON decode on every getter call, since `_getFromOtherData` decodes per access (transaction_v2.dart:367-373) |
-| `ttl_cutoff_height` | `otherData.ttlCutoffHeight` | Expiry hint for pending slatepacks |
-| cancelled types, `reverted_after` | `otherData.isCancelled` (existing key), `otherData.isReverted` | |
-| participant messages | none | Slate v4 has none (assumption), so `numberOfMessages` and `onChainNote` stay unset |
-
-`otherData.isGrinTransaction = true` is a new `TxV2OdKeys.isGrinTransaction` beside the Epic and MWC flags (transaction_v2.dart:405-424).
-
-Fast path. `_isMonero()` (transaction_v2.dart:241-244) changes two things: amounts come from `moneroAmount` (156-170, 183-193), and confirmations drop the `- 1` (118-123). Grin needs neither, because the synthetic inputs and outputs make the generic sums right and Grin heights follow the Bitcoin-style count. Grin does need its own `statusLabel` branch, since the Epic and MWC branches (269-339) key off `numberOfMessages`, which Grin lacks:
-
-| Condition, checked in order | Label |
-|---|---|
-| incoming and `slateId == null` | "Restored Funds" (as Epic, 269-272) |
-| `isCancelled` / `isReverted` | "Cancelled" / "Reverted" |
-| confirmed | "Received" / "Sent (confirmed)" |
-| outgoing, pending S1 | "Sending (waiting for response)" |
-| incoming, pending S2 | "Receiving (waiting for sender to finalize)" |
-| incoming, pending I1 | "Invoice issued (waiting for payer)" |
-| outgoing, pending I2 | "Paying invoice (waiting for invoicer)" |
-| kernel excess set, unconfirmed | "Sending" / "Receiving" plus `prettyConfirms()` |
-
-Caching the decoded `otherData` would help every coin but is out of scope here.
-
-### 9.6 Slatepack and invoice UI flows
-
-Screen paths are [SW-uni].
-
-Receive, Slatepack only ([PLAN] §1 item 4):
-
-1. The receive screen (`lib/pages/receive_view/receive_view.dart`; desktop `lib/pages_desktop_specific/my_stack_view/wallet_view/sub_widgets/desktop_receive.dart`) shows the `grin1` address, with copy that says it lets a sender encrypt a Slatepack and request a payment proof, and that automatic Tor receive is not available in this version. Without that text senders will pick the automatic method and fail, since nothing listens.
-2. "Import Slatepack" (shown for Mimblewimble coins at receive_view.dart:763-766) opens `SlatepackEntryDialog`, which pastes or scans a QR code (lib/pages/receive_view/sub_widgets/slatepack_entry_dialog.dart:43-63).
-3. `inspectSlatepack` replaces `fullDecodeSlatepack` (receive_view.dart:106-112) and routes on the state. S1 opens `SlatepackImportDialog`, which shows the amount (today parsed from slate JSON at slatepack_import_dialog.dart:116-126) and on accept calls `receiveSlatepack`; S2 appears in `SlatepackResponseDialog` (slatepack_import_dialog.dart:270, opened at receive_view.dart:142-151) for the user to return to the sender. I1 goes to the pay-invoice flow, S2 and I2 go to finalize, S3 and I3 report "already finalized". The string test `slatepackType.contains("S1")` (slatepack_import_dialog.dart:61) becomes a switch on `SlateState`.
-
-Send:
-
-1. `SlatepackMethodToggle` (lib/widgets/slatepack_method_toggle.dart:23-61, "Automatic" or "Slatepack", state in `pSelectedSlatepackMethod`) picks the method. For Grin, "Automatic" means Tor/HTTP and needs a `grin1` address or an `http(s)://` URL; `MimblewimbleTransactionMethod.relay` is documented as the relay server (lib/utilities/enums/mimblewimble_transaction_method.dart:6-7), so either the comment widens or an `http` value is added.
-2. Automatic: send view, `prepareSend`, `ConfirmTransactionView`, `confirmSend`, `sendHttp`. The confirm screen checks Tor before calling (9.4).
-3. Slatepack: today `createSlatepack` runs from `ConfirmTransactionView._handleSlatepackCreation` (confirm_transaction_view.dart:152-237, chosen when `otherData.transactionMethod == 'slatepack'` at 316-329) and also straight from the mobile send view, skipping the confirm screen (send_view.dart:684-751; desktop desktop_send.dart:180). For Grin both paths go through the confirm screen, because `initSend` locks outputs (#25) and the user should see the fee first. S1 appears in `SlatepackDialog` (lib/pages/send_view/sub_widgets/slatepack_dialog.dart). If the user typed a `grin1` address, S1 is encrypted to it and asks for a payment proof.
-4. Finalize: the "Finalize" nav item shown for `MimblewimbleWallet` (wallet_view.dart:1020-1036) opens `FinalizeView` (lib/pages/finalize_view/finalize_view.dart:117-141), which rejects anything but S2 after Dart-side analysis (129-132). For Grin it accepts S2 (`finalizeSlatepack`) and I2 (`finalizeInvoice`), and broadcasts.
-
-Invoice, Grin only (`supportsInvoices`):
-
-1. I1 on the invoicer: a "Request with invoice" action on the receive screen takes an amount and an optional payer `grin1` for encryption, calls `issueInvoice`, and shows I1 in `SlatepackDialog`.
-2. I2 on the payer: importing I1 (the receive screen import, or a "Pay invoice" entry on the send screen) shows the amount and an `estimateFee` result; on confirm, `processInvoice` locks inputs (#30) and shows I2.
-3. I3 on the invoicer: `FinalizeView` given I2 calls `finalizeInvoice(broadcast: true)` (#31).
-
-Showing a pending slatepack again. `transaction_v2_details_view.dart` gains a "Show Slatepack" action on Grin rows that have `pendingSlateState`. The text comes from `pendingSlatepackFor(txid)`, served from the last `getTxs` result (the sidecar's `armored_slatepack`, [PLAN] lines 236-238 and #23) or from `getTxs(refreshFromNode: false)` on a miss, and opens in `SlatepackDialog`. The existing cancel button for unconfirmed, uncancelled Mimblewimble transactions (transaction_v2_details_view.dart:1450-1530, calling `cancelPendingTransactionAndPost` at 1483-1508) maps to `grin_tx_cancel`. New actions: Repost (finalized, unconfirmed, kernel excess set) and Export payment proof (confirmed outgoing with `hasPaymentProof`). The slate id row (1391-1430) and the local note (908-960) work once their `coin is Epiccash || coin is Mimblewimblecoin` guards include Grin; the on-chain note row (866-900) does not apply.
-
-Copy, QR, share. `SlatepackDialog` already copies (slatepack_dialog.dart:38-48) and renders the whole slatepack as a QR code (153-160); share is a stub that says "Share functionality coming soon" (50-57). `share_plus` ^12.0.2 and `file_picker` ^10.3.3 are already dependencies ([SW-stg] scripts/app_config/templates/pubspec.template.yaml:187, 192), so share can send the text or a file and import can read a file. Armored slatepacks are long (not measured here; roughly 1-2 KB encrypted is an assumption), which makes a single QR code dense, so copy and share stay primary and the QR code secondary. Slatepacks carry no key material, but an unencrypted one shows the amount to anything that reads the clipboard; the dialog states whether the slatepack is encrypted (`wasEncrypted` is already in `SlatepackResult`, slatepack_models.dart:1-7).
-
-### 9.7 Lifecycle
-
-Stack facts ([SW-stg]). One `Wallet` per wallet id lives in `Wallets._wallets` (lib/services/wallets.dart:117). Opening a wallet calls `init()` on that same instance every time (lib/widgets/wallet_card.dart:163-175; also lib/pages/wallets_view/sub_widgets/favorite_card.dart:146-151, wallet_list_item.dart:121-126, lib/pages_desktop_specific/my_stack_view/coin_wallets_table.dart:104-109), inside `showLoading` without `onException`, which logs the error and drops it (lib/utilities/show_loading.dart:62-86). Leaving the wallet view calls `exit()` without awaiting it when sync is "current wallet only" or the wallet is not in the startup list (lib/pages/wallet_view/wallet_view.dart:294-312; desktop lib/pages_desktop_specific/my_stack_view/wallet_view/desktop_wallet_view.dart:111, 119). Base `exit()` only cancels timers (lib/wallets/wallet/wallet.dart:757-800). The app's lifecycle handler does nothing for wallets on `paused` or `detached` (lib/main.dart:600-663).
-
-GrinWallet:
-
-1. `init()`: (a) await `_closing` if an earlier `exit()` is still running; (b) if `_session` is open, refresh the cached address, run `super.init()` and return; (c) build the config (9.3); (d) `create` or `open`; (e) attach a `GrinLifecycleObserver` (example code in `packages/grin_native/example`, taking a `GrinWalletApi`; [PLAN] lines 369-370 describe the original); (f) subscribe to the two Tor events; (g) `getAddress(0)`; (h) `super.init()`.
-2. Background and foreground: the observer cancels a running scan on `paused` or `detached` (mobile only). The next periodic refresh (150 s, base 599-607) or the next `init()` restarts an unfinished restore scan. Whether `grin_wallet_scan` persists its progress per batch is open; if it does not, GrinWallet stores `scanned_height` from `scanProgress` in `WalletInfo.otherData` and resumes from there.
-3. `exit()`: (a) cancel the Tor subscriptions; (b) dispose the observer; (c) set `_closing = _session.close()` and await it; (d) drop the address and slatepack caches; (e) `super.exit()`. `close()` rejects new calls, cancels a scan, drains the queue, detaches the finalizer and calls `grin_wallet_close` ([PLAN] lines 349-356), so `OPEN_DIRS` is clear when it returns and an immediate reopen cannot see `WalletBusy` (line 356).
-4. A call that arrives after `exit()` began (a refresh timer that already fired, a late UI action) gets the client's `StateError`. GrinWallet reports "wallet is closed" and does not reopen on its own.
-
-What `WalletBusy` means to the app. The canonical wallet directory is held by a live `WalletSession` ([PLAN] 4.5 item 5, lines 266-268). Inside Stack a wallet id maps to one instance and `init()` awaits that instance's own close, so the remaining causes are a client dropped without `close()` whose orphaned operation is still draining ([PLAN] lines 286, 342-348) or another process using the same directory. Handling follows [PLAN] §5 item 5 (lines 357-359):
-
-- No retry loop. `init()` catches the Stack-side `GrinWalletBusyException`, leaves `_session` null, fires `NodeConnectionStatusChangedEvent(disconnected)` and `WalletSyncStatusChangedEvent(unableToSync)`, and every action then throws a readable "this wallet is still closing; reopen it in a moment" error, which the slatepack and send dialogs already display (for example receive_view.dart:114-123 on [SW-uni]).
-- Because `showLoading` drops `init()` errors on the open path, the open handlers should pass `onException` for `SlatepackInterface` wallets, or the wallet view should show a banner from the sync status.
-- Delete: `Wallets.deleteWallet` awaits `exit()` and then runs the coin branch (wallets.dart:117-119, 149-171). If `GrinWalletClient.delete` returns busy, the files stay, the error is shown and the user can retry by hand. Dart never removes the directory itself.
-
-Ordering guarantees GrinWallet relies on ([PLAN] #10, #11 at lines 285-286, and 342-356): close and the finalizer only cancel scans and unregister the session; LMDB closes in `Drop` when the last `Arc` goes; the directory lease is released after the backend closes; `close()` is idempotent and returns the same pending future on a second call.
-
-### 9.8 pubspec consumption
-
-Stack Wallet's precedent for two packages from one git repository is `coinlib_flutter` in `dependencies` with `coinlib` pinned in `dependency_overrides` at the same url and ref, under the comment "coinlib_flutter requires this" ([SW-stg] scripts/app_config/templates/pubspec.template.yaml:224-228 and 323-328). The optional ISAR source build overrides three packages from one repository the same way (349-365). Stack Wallet lists only `grin_native` under `dependencies` and imports only `package:grin_native/...`; `grin` is transitive, because `grin_native` depends on it and re-exports it (5.2). The one `grin` entry is a `dependency_overrides` pin at the same url and ref, and pub needs it: `grin_native` declares `grin: ^0.1.0` (packages/grin_native/pubspec.yaml), a hosted constraint. Inside this repository the workspace satisfies it; a git consumer would look `grin` up on pub.dev, where this package is not published. The pin replaces every constraint on `grin` and goes away once `grin` is published. It is a pin and not a dependency of the app: no Stack Wallet file imports `package:grin`. Template additions, written in the template's commented form; the `dependencies` block sits next to the EPIC and MWC blocks ([SW-stg] pubspec.template.yaml:53-65):
-
-```yaml
-dependencies:
-  # ...
-# %%ENABLE_GRIN%%
-#  grin_native:
-#    git:
-#      url: ssh://git@git.cypherstack.com:222/sneurlax/grin.git
-#      path: packages/grin_native
-#      ref: <commit>
-# %%END_ENABLE_GRIN%%
-
-dependency_overrides:
-  # ...
-  # grin_native requires this; keep url and ref identical to grin_native's
-# %%ENABLE_GRIN%%
-#  grin:
-#    git:
-#      url: ssh://git@git.cypherstack.com:222/sneurlax/grin.git
-#      path: packages/grin
-#      ref: <commit>
-# %%END_ENABLE_GRIN%%
-```
-
-Generated result with both markers enabled:
-
-```yaml
-dependencies:
-  grin_native:
-    git:
-      url: ssh://git@git.cypherstack.com:222/sneurlax/grin.git
-      path: packages/grin_native
-      ref: <commit>
-dependency_overrides:
-  grin:
-    git:
-      url: ssh://git@git.cypherstack.com:222/sneurlax/grin.git
-      path: packages/grin
-      ref: <commit>
-```
-
-Notes:
-
-- The url is `ssh://git@git.cypherstack.com:222/sneurlax/grin.git` for both entries. `sneurlax/grin_native.git` on the same host holds the same tree as a mirror; consumers do not use it. Pub treats two urls as two sources even at the same commit, so mixing them in one app gives source conflicts or pins that drift apart, and the dependency and the override advance to the same ref together.
-- Nothing goes into the `hooks.user_defines` block for `grin_native` today. The hook reads one key, `hooks.user_defines.grin_native.test_utils`, and Stack Wallet leaves it unset, so Stack never links `grin_test_*` ([PLAN] D1, D12). Everything else is fixed: the hook always builds `rust/` with the host toolchain, so Stack Wallet's build machines need rustup (the toolchain is pinned by `rust/rust-toolchain.toml`) and the NDK Flutter provides, as they do for the pre-kit `flutter_libepiccash` and `flutter_libmwc` source builds. The `tor_ffi_plugin`, `flutter_libepiccash` and `flutter_libmwc` entries in the NATIVE_PREBUILTS block ([SW-stg] pubspec.template.yaml:374-387) are untouched.
-- Prebuilt artifacts, and the user-define that selects them, arrive with the dnix pipeline (D11). The template block at :373-388 then gains a `grin_native` entry in dnix's form, next to the dnix entries `flutter_libepiccash` and `flutter_libmwc` already carry on their GitHub main branches (10.2).
-- The template already notes that entries for packages outside the dependency graph are ignored ([SW-stg] pubspec.template.yaml:369-370), which covers app configs that leave `GRIN` off.
-
-### 9.9 Breaking changes versus the legacy plugin APIs
-
-Legacy call sites are in [SW-uni] lib/wallets/wallet/impl/epiccash_wallet.dart (E) and lib/wallets/wallet/impl/mimblewimblecoin_wallet.dart (M), against [SW-uni] lib/wl_gen/interfaces/libepiccash_interface.dart (LE) and libmwc_interface.dart (LM). MW is [SW-uni] mimblewimble_wallet.dart.
-
-| # | Legacy | Where | GrinWalletClient |
-|---|---|---|---|
-| 1 | The wallet handle is a `DynamicObject` around a Dart `EpicWallet` (Epic) or a `String` marked "Process-scoped Rust pointer" (MWC); [PLAN] documents the raw pointer and plaintext key behind it (§2 row 1, line 33) | E:43; M:42-43; LE:14-34; LM:13-20; EPIC template:183-213 | `GrinWalletClient` (Finalizable) holding a u64 registry handle; no secret enters Dart ([PLAN] lines 33, 342-348) |
-| 2 | Config is a JSON string built per call, with `"chain": "mainnet"` hard-coded and `api_listen_*` fields | E:252-278 (268); M:422-442 (438) | Typed config with an explicit network; testnet works |
-| 3 | MWC persists the config JSON in secure storage and rewrites `wallet_dir` on iOS | M:579-591, 618-621, 1037-1041, 1077-1088 | Nothing persisted; directory recomputed per open |
-| 4 | Node API secret written to `<wallet_dir>/.api_secret` | M:411-420 | `api_secret` argument to open, `updateNetwork` and `testConnection` (#7, #15) |
-| 5 | Balances are four `double`s, converted with `Decimal.parse(double.toString())` | LE:92-104; LM:120-132; MW:247-259, 529-546 | `BigInt` nanogrin fields (#18) |
-| 6 | Amounts and fees as strings through `int.parse`; the fee goes through `Decimal.parse(...).toBigInt().toInt()` and silently becomes 0 on failure | E:947-949, 294-302; M:908-910, 456-464 | `BigInt` fields; the estimate returns `fee`, `net_amount`, `inputs_count` (#22) |
-| 7 | Errors as strings: `cancelPendingTransactionAndPost` returns `e.toString()`, slatepack results carry `error: e.toString()`, and the UI string-matches "insufficient funds" and "wallet not open" | MW:83-84; E:86-89, 151-154; M:122-125, 192-195; [SW-uni] confirm_transaction_view.dart:216-220 | Sealed `GrinException` hierarchy, with typed insufficient funds (required, available) and `GrinWalletBusyException` ([PLAN] line 36, #22, lines 357-359) |
-| 8 | A `BadEpicHttpAddressException` mapping that cannot fire: the template returns the `Future` from inside `try` without `await` | EPIC template:263-282 | Typed errors thrown from the awaited isolate call |
-| 9 | Transaction type is an opaque `Enum` tested through `txTypeIsReceived` and friends | LE:10-12; LM:9-11; E:935-937, 1003-1005 | Typed transaction type in `GrinTxLogEntry` |
-| 10 | Relay listeners: epicbox start, stop and health check per wallet; MWC's `stopMwcMqsListener()` takes no wallet, so it is process-global | LE:76-80; E:444-478, 1140-1144; LM:104-109; M:297-318, 555-576 | None in v1, and no callbacks from Rust ([PLAN] §1 item 4) |
-| 11 | Addresses depend on relay config (`getAddressInfo(epicboxConfig)`, mwcmqs address) | E:403-408; M:516-540 | Slatepack address from a derivation index (#16) |
-| 12 | Slates inspected in Dart (`part_sig` counting, `sta` fallback); Epic exchanges bare slate JSON | MW:159-243; E:119-174, 228-240; M:325-332 | `grin_slatepack_decode` returns state, amounts, id and addresses (#24) |
-| 13 | Slate-to-commit bookkeeping (`slatesToCommits`) in `WalletInfo.otherData` to recover commit id and addresses | MW:375-398; E:679-685, 931-945 | `kernel_excess` and `counterparty_address` in `GrinTxLogEntry` ([PLAN] 4.4) |
-| 14 | No close on `exit()` (Epic stops its listener, MWC only cancels a timer); Epic re-opens on every `init()`; close happens only before recover or delete | E:1140-1144, 597-611, 817-821, 860-864, 1184; MW:602-609; M:80-109 | Ordered, idempotent `close()`; `WalletBusy` instead of a silent double open ([PLAN] 4.5, 5.1) |
-| 15 | Rescan deletes and recovers the wallet and rewrites txids with a rescan counter (Epic), or wipes Isar data (MWC) | E:732-836; M:796-806 | Non-destructive `grin_wallet_scan` with cancel and progress (#19-#21) |
-| 16 | Dart-side chunked scan loop with a persisted `lastScannedBlock`; the plugin polls worker progress | MW:326-373; [PLAN] §2 row 8 (line 40) | Lock-free `grin_wallet_scan_progress` during the scan (#20) |
-| 17 | Process-global chain type in Rust | [PLAN] §2 row 2 (line 34); config `chain` at E:268, M:438 | Per-thread chain type and `network: u8` on stateless calls ([PLAN] 4.2) |
-| 18 | No SOCKS proxy; Tor handled only by a mismatch exception; `torSupport` false | E:1146-1168; [SW-stg] crypto_currency.dart:64 | Proxy at open and through `updateNetwork`; `torSupport => true` |
-| 19 | Synchronous address validation in the coin class | [SW-uni] epiccash.dart:68; mimblewimblecoin.dart:56 | `GrinWalletClient.validateAddressSync(address, network)` over `grin_address_validate` (#6) |
-| 20 | "Send everything" computed by subtracting the fee estimate from the amount | E:704-718; M:750-769 | `amount_includes_fee` (#22) |
-
-Kept as is on purpose: the generated per-wallet password in secure storage (E:543-558), the mnemonic in `MnemonicInterface`, `TransactionV2` with synthetic inputs and outputs, and the slatepack result models.
-
-### 9.10 Assumptions and open items
-
-1. Dart method names on `GrinWalletClient` and `GrinWalletApi` beyond those [PLAN] names (9.3).
-2. Resolved: `GrinWalletClient.validateAddressSync` (9.2).
-3. `GrinTxLogEntry` fields beyond [PLAN] 4.4; the confirmed-height field is resolved (`confirmedHeight`, 9.5).
-4. Testnet node port 13413 and the absence of participant messages in slate v4 (the other Grin constants in 9.2 are now cited from the fork).
-5. A Stack-run default node, and the CoinGecko id `grin`.
-6. (resolved: the proxy string is `host:port`, see 9.4.)
-7. A failure before `tx_lock_outputs` locks nothing; `refresh_from_node: true` runs grin-wallet's incremental update, so no Dart scan loop is needed for routine sync.
-8. Whether `grin_wallet_scan` persists progress per batch (9.7).
-9. The contents of `GrinWalletEvent` ([PLAN] lines 103, 323 name it without fields).
-10. Armored slatepack sizes for QR codes.
-11. How `grin_native`'s pubspec declares `grin` (the override covers any form), and whether pub needs the override at all for a git dependency on `grin_native`.
-
-### Sources read
-
-- [PLAN] /home/user/src/grin/docs/architecture.md at commit dfb7f04, whole file; [GW] consensus.rs, genesis.rs, libwallet api_impl/types.rs, config/src/types.rs for the constants in 9.2; /home/user/src/grin/docs/ffi-json.md for the proxy format.
-- [SW-uni] lib/wallets/wallet/intermediate/mimblewimble_wallet.dart; lib/wallets/wallet/supporting/mimblewimble_wallet_info_extension.dart; lib/wallets/wallet/impl/epiccash_wallet.dart; lib/wallets/wallet/impl/mimblewimblecoin_wallet.dart; lib/wallets/crypto_currency/coins/epiccash.dart; lib/wallets/crypto_currency/coins/mimblewimblecoin.dart; lib/wallets/wallet/wallet.dart (diff against staging); lib/wallets/isar/models/wallet_info.dart (WalletInfoKeys); lib/wl_gen/interfaces/libepiccash_interface.dart; lib/wl_gen/interfaces/libmwc_interface.dart; lib/wl_gen/interfaces/mimblewimble_transaction.dart; tool/wl_templates/EPIC_libepiccash_interface_impl.template.dart; tool/wl_templates/MWC_libmwc_interface_impl.template.dart; lib/models/slatepack_models.dart; lib/utilities/slatepack_terms.dart; lib/utilities/enums/mimblewimble_transaction_method.dart; lib/widgets/slatepack_method_toggle.dart; lib/pages/receive_view/receive_view.dart; lib/pages/receive_view/sub_widgets/slatepack_entry_dialog.dart; lib/pages/receive_view/sub_widgets/slatepack_import_dialog.dart; lib/pages/send_view/send_view.dart; lib/pages/send_view/confirm_transaction_view.dart; lib/pages/send_view/sub_widgets/slatepack_dialog.dart; lib/pages/finalize_view/finalize_view.dart; lib/pages/epic_finalize_view/epic_finalize_view.dart; lib/pages/wallet_view/wallet_view.dart; lib/pages/wallet_view/transaction_views/tx_v2/transaction_v2_details_view.dart; lib/pages/settings_views/wallet_settings_view/wallet_settings_view.dart; lib/pages/settings_views/wallet_settings_view/wallet_network_settings_view/wallet_network_settings_view.dart; lib/pages/add_wallet_views/new_wallet_recovery_phrase_warning_view/new_wallet_recovery_phrase_warning_view.dart; lib/pages/add_wallet_views/restore_wallet_view/restore_wallet_view.dart; lib/services/wallets.dart; lib/pages_desktop_specific/my_stack_view/wallet_view/sub_widgets/desktop_receive.dart and desktop_send.dart (grep); lib/pages/settings_views/wallet_settings_view/epicbox_settings/manage_epicbox_view.dart (grep); lib/pages/wallet_view/transaction_views/all_transactions_view.dart (grep); scripts/app_config/templates/pubspec.template.yaml; `git diff --name-status 9517439 refactor/epic-mwc-unify`; `git grep` over lib/ for Mimblewimble predicates and slatepack files.
-- [SW-stg] lib/wallets/wallet/wallet.dart; lib/wallets/wallet/intermediate/bip39_wallet.dart; lib/wallets/wallet/intermediate/external_wallet.dart; lib/wallets/wallet/intermediate/cryptonote_wallet.dart; lib/wallets/wallet/intermediate/lib_monero_wallet.dart; lib/wallets/wallet/impl/bitcoin_frost_wallet.dart; lib/wallets/wallet/impl/stellar_wallet.dart; lib/wallets/wallet/impl/epiccash_wallet.dart and mimblewimblecoin_wallet.dart (exit, diff against 9517439); lib/wallets/crypto_currency/crypto_currency.dart; lib/wallets/crypto_currency/coins/epiccash.dart, mimblewimblecoin.dart, bitcoin.dart, bitcoin_frost.dart; lib/wallets/crypto_currency/intermediate/bip39_currency.dart and frost_currency.dart; lib/wallets/isar/models/wallet_info.dart; lib/models/isar/models/blockchain_data/v2/transaction_v2.dart; lib/models/isar/models/blockchain_data/address.dart; lib/models/node_model.dart; lib/services/tor_service.dart; lib/services/event_bus/events/global/tor_connection_status_changed_event.dart; lib/services/event_bus/events/global/tor_status_changed_event.dart; tool/wl_templates/TOR_tor_service_impl.template.dart; tool/wl_templates/FROST_frost_interface_impl.template.dart; lib/wl_gen/interfaces/frost_interface.dart; lib/electrumx_rpc/electrumx_client.dart; lib/utilities/prefs.dart; lib/utilities/tor_plain_net_option_enum.dart; lib/utilities/dynamic_object.dart; lib/utilities/stack_file_system.dart; lib/utilities/show_loading.dart; lib/utilities/test_node_connection.dart; lib/services/price.dart; lib/services/wallets.dart; lib/widgets/wallet_card.dart; lib/pages/wallet_view/wallet_view.dart; lib/pages/wallets_view/sub_widgets/wallet_list_item.dart; lib/pages/wallets_view/sub_widgets/favorite_card.dart, lib/pages_desktop_specific/my_stack_view/coin_wallets_table.dart, lib/pages_desktop_specific/my_stack_view/wallet_view/desktop_wallet_view.dart and lib/themes/coin_icon_provider.dart (grep); lib/main.dart; lib/app_config.dart; scripts/app_config/templates/pubspec.template.yaml; scripts/app_config/configure_stack_wallet.sh; tool/process_pubspec_deps.dart; tool/gen_interfaces.dart; scripts/build_app.sh (grep); `git grep` for exit callers, `cancelSend`, Tor listeners, killswitch, `torSupport`.
-- [SW-main] lib/wallets/wallet/impl/epiccash_wallet.dart; lib/wallets/wallet/impl/mimblewimblecoin_wallet.dart; lib/models/isar/models/blockchain_data/v2/transaction_v2.dart (diff against unify); lib/wallets/wallet/wallet.dart (`cancelSend` check); scripts/app_config/templates/pubspec.template.yaml; `git ls-tree` for slatepack files and lib/wl_gen.
-- [SW-gen] pubspec.yaml lines 1-80 and 360-400 (generated working-tree file, read only).
-- Ref metadata: `git rev-parse`, `git merge-base`, `git rev-list --count`, `git log` for cypherstack/main, staging, cypherstack/staging, refactor/epic-mwc-unify; `git merge-tree --write-tree` of unify into staging and into cypherstack/staging with a scratch object directory.
-
----
+Superseded on 2026-11-07 by `docs/stack-wallet-integration.md`, the implementation plan. The design that stood here was written against Stack Wallet staging 7ce7b34f2 and the unmerged `refactor/epic-mwc-unify` branch; section 12 of the plan lists what in it was stale, and the git history of this file keeps the text.
 
 ## 10. Epic/MWC migration foundation
 
@@ -1266,7 +817,7 @@ Three entries change a settled decision of the brief: D1 (the hook), D2 (the loc
 
 - The brief named the keys `native_build`, `prebuilt_manifest_url` and `prebuilt_manifest_sha256` and, in the same decision, required modelling the hook on `wt/tor` and pinning `native_prebuilt_hook` at `85f7eb097604e5b99db3f90bccbcada3336836b8`. Those two halves cannot both hold: the kit at that ref reads a `build` user-define (`dart/native_prebuilt_hook/lib/src/hook.dart` L60, L94-100; `lib/src/build_mode.dart` L22-30) and loads release hashes from the package's own `hook/prebuilt_hashes.json` (`lib/src/prebuilt_hashes.dart` L8-13, L36-43); it has no notion of a manifest URL in the consumer's pubspec. The hook was first built on the kit's contract (`build: prebuilt | source | dev | cargo`, plus a `grin`-specific `test_utils`), and that is what this document described until 2026-11-02.
 - On 2026-11-02 the user directed that the Nix work and native-build-kit be removed (D11). The hook is now `hook/build.dart` calling `RustBuilder` on `rust/` directly, the shape of the pre-kit `tor` plugin hook, keeping the environment handling of the kit-era cargo mode: Android NDK API-level clang as compiler and linker, Linux `cc` and `ar` from the code config, the Apple deployment floors, `strip = none` on Apple (the Xcode PATH finding in section 13), `CARGO_NET_GIT_FETCH_WITH_CLI` for the ssh git dependency, and `--locked`. The only user-define is `test_utils` (bool, default false), which adds `--features test-utils`; the root workspace pubspec sets it for this repository's tests, and apps leave it unset.
-- Consequence for consumers: there is nothing to configure (9.8). Stack Wallet's build machines compile `rust/` with rustup (toolchain pinned by `rust/rust-toolchain.toml`) and the NDK Flutter provides, as they do for the pre-kit Epic Cash and MWC plugins.
+- Consequence for consumers: there is nothing to configure (`packages/grin_native/README.md`). Stack Wallet's build machines compile `rust/` with rustup (toolchain pinned by `rust/rust-toolchain.toml`) and the NDK Flutter provides, as they do for the pre-kit Epic Cash and MWC plugins.
 - To reverse: the kit-based hook, flake, scripts and pin test are in the history of `grin-v1` up to commit `0e756af`.
 
 ### D2. Local wiring to the fork before it was pushed used a git URL rewrite, not a Cargo `[patch]` (wiring removed on 2026-11-02)
@@ -1278,7 +829,7 @@ Three entries change a settled decision of the brief: D1 (the hook), D2 (the loc
 
 ### D3. Toolchain pin
 
-- `rust-toolchain.toml` pins `1.94.0` (the active toolchain on the build machine; `rustup toolchain list`), with the target list the hook may be asked to build (`armv7-linux-androideabi`, `aarch64-linux-android`, `x86_64-linux-android`, `aarch64-apple-ios`, `aarch64-apple-ios-sim`, `x86_64-apple-ios`, `x86_64-pc-windows-msvc`, `aarch64-pc-windows-msvc`, `aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin`, `x86_64-apple-darwin`). It is the only toolchain pin.
+- `rust-toolchain.toml` pinned `1.94.0` (the active toolchain on the build machine; `rustup toolchain list`) until 2026-11-07 and now pins `1.99.1` (D14): Rust before 1.98 can emit Apple binaries that the iOS 27 and macOS 27 `dyld` rejects, and Stack Wallet, Epic and MWC are on 1.99.1. The target list is unchanged: the hook may be asked to build (`armv7-linux-androideabi`, `aarch64-linux-android`, `x86_64-linux-android`, `aarch64-apple-ios`, `aarch64-apple-ios-sim`, `x86_64-apple-ios`, `x86_64-pc-windows-msvc`, `aarch64-pc-windows-msvc`, `aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin`, `x86_64-apple-darwin`). It is the only toolchain pin. The hook runs `rustup run <channel>`, and since the hooks runner drops `RUSTUP_HOME` (D14), rustup installs the pinned toolchain into `$HOME/.rustup` when it is missing there.
 
 ### D4. Package names
 
@@ -1289,11 +840,13 @@ Three entries change a settled decision of the brief: D1 (the hook), D2 (the loc
 
 - The `HttpSlateSender` unit tests in the fork run under `#[tokio::test(flavor = "multi_thread", worker_threads = 2)]`. The default current-thread test runtime deadlocks: the test body calls the synchronous `SlateSender::send_tx`, which detects an active runtime and blocks the test thread on a helper thread (`client.rs` L292-311), while the mock server task needs that same test thread to make progress.
 
-### D6. The Cargo workspace lives at `packages/grin/rust`, not at the repository root
+### D6. The Cargo workspace lives at `packages/grin_native/rust` (first `packages/grin/rust`), not at the repository root
+
+- Paths, as of D12: the crate is `packages/grin_native/rust/` and the hook `packages/grin_native/hook/build.dart`. The bullets below were written before the split and name `packages/grin`; read `packages/grin_native` for each.
 
 - Decided while the build went through the kit, whose hook resolved the flake and its config files from the package root, so everything the Nix build read had to sit under `packages/grin`. With the kit gone the constraint that remains is `native_toolchain_rust`'s `RustBuilder`, which is pointed at a path inside the package and reads `rust-toolchain.toml` from the crate directory it is pointed at. The layout also matches the plugins Stack Wallet already builds (`rust/` inside `tor`, `flutter_libepiccash` and `flutter_libmwc`) and what dnix expects (`rust.workspace` and `rust.crate` under the package), so it stays.
 - Layout: `packages/grin/rust/` is the `grin-ffi` crate and its own single-crate Cargo workspace (`Cargo.toml` with `[package]` and an empty `[workspace]`, `Cargo.lock`, `rust-toolchain.toml`, `.cargo/config.toml`, `build.rs`, `cbindgen.toml`, `include/grin_ffi.h`, `src/`, `tests/`), built by `packages/grin/hook/build.dart`. Section 3's tree shows the layout as built; the brief's `crates/grin-ffi` wording predates it.
-- The pub workspace root (`/home/user/src/grin/pubspec.yaml`) stays at the repository root with `tool/` and `docs/`.
+- The pub workspace root (`pubspec.yaml` of this repository, now checked out at `/home/user/src/stack_wallet/grin`) stays at the repository root with `tool/` and `docs/`.
 
 ### D7. Withdrawn: the grin-wallet fork as a flake input
 
@@ -1554,7 +1107,7 @@ Removed with the kit on 2026-11-02 (D11). What was found is kept because dnix al
 
 Decided on 2026-11-03. It supersedes D4. The first build kept the contract and the native implementation together in `grin` (hook, Rust crate, bindings, `GrinWalletClient`, models) and put Flutter glue in `grin_flutter`. Native assets need no Flutter package (they build in `dart test`, `dart run` and Flutter alike), so `grin_flutter` was left holding two helpers that belong in an app. The contract and the native backend are split so that another backend, such as a pure Dart implementation, can implement the same interfaces, and so that code using only the contract never runs the Rust build. Consumers still see one package: `grin_native` re-exports `grin`.
 
-- Dependency chain: app -> `grin_native` -> `grin`. An app lists `grin_native` alone (Stack Wallet: 9.8) and imports only `package:grin_native/...`. `lib/grin_native.dart` does `export 'package:grin/grin.dart';` in full, so one import gives everything. Both packages are pure Dart; there is no Flutter package.
+- Dependency chain: app -> `grin_native` -> `grin`. An app lists `grin_native` alone and imports only `package:grin_native/...`. A git consumer such as Stack Wallet also needs a `dependency_overrides` entry for `grin` at the same url and ref, because `grin_native` declares `grin: ^0.1.0`, which pub would otherwise look up on pub.dev, and `grin` is not published (`packages/grin_native/README.md`, "Using it from Stack Wallet"). Inside this repository the workspace resolves it. `lib/grin_native.dart` does `export 'package:grin/grin.dart';` in full, so one import gives everything. Both packages are pure Dart; there is no Flutter package.
 - `packages/grin` (`name: grin`) holds the models, exceptions, units, events and two interfaces: `GrinWalletApi` (one open wallet, every instance operation of the client) and `GrinWalletBackend` (`generateMnemonic`, `validateMnemonic`, `validateAddress`, `validateAddressSync`, `testNodeConnection`, `create`, `open`, `delete`, `decodeSlatepackWithoutWallet`). It has no hook, no `dart:ffi`, no `dart:isolate` and no runtime dependencies.
 - Native-only members are kept off the interfaces: `nativeHandle`, `runQueued`, `initLogs` and the finalizers. A fake therefore never has to implement them, and the interfaces describe behaviour that any backend can provide.
 - The interface is named `GrinWalletApi` and not `GrinWallet` because Stack Wallet's own wallet class for Grin is `GrinWallet` (5.1 point 1, section 9).
@@ -1562,8 +1115,24 @@ Decided on 2026-11-03. It supersedes D4. The first build kept the contract and t
 - `package:grin/codec.dart` is a separate public library, not exported by `grin.dart`, that exposes the JSON helpers to backend packages. It replaces what would otherwise be `implementation_imports` of `grin`'s `src/` by `grin_native`.
 - The native asset id changed from `package:grin/src/ffi/bindings.g.dart` to `package:grin_native/src/ffi/bindings.g.dart` (`ffigen.yaml` moved with the bindings), and the user-define key from `hooks.user_defines.grin` to `hooks.user_defines.grin_native` (`test_utils`). Anything that set the old key must set the new one.
 - D6's Cargo workspace is now at `packages/grin_native/rust`, moved with `git mv`. The Rust code and the C ABI are unchanged (35 exported symbols), and so is `docs/ffi-json.md` apart from the paths in its first lines.
+- The example app is a member of this pub workspace, so it inherits the workspace `hooks.user_defines.grin_native.test_utils: true` and its builds export the `grin_test_*` functions. They are not release artifacts. An app outside the workspace gets the default, false.
 - `grin_flutter` is removed. The re-export became `grin_native.dart`'s export of `grin`. The path_provider helper became example code, `WalletPaths` in `lib/src/wallet_paths.dart`, with the same behaviour. `GrinLifecycleObserver` became example code in `lib/src/lifecycle_observer.dart` and takes a `GrinWalletApi`. Their tests are `example/test/helpers_test.dart`.
 - The example app moved from `grin_flutter/example` to `packages/grin_native/example` and was renamed `grin_native_example`; its Android, iOS, macOS, Linux and Windows identifiers changed from `grin_flutter_example` and `grinFlutterExample` to `grin_native_example` and `grinNativeExample`. It depends on `grin_native` only.
 - New gates in `tool/ci.dart`: `web-smoke` rejects `dart:ffi`, `dart:io`, `dart:isolate` and foreign package imports in `packages/grin/lib`, then compiles `packages/grin/tool/web_smoke.dart` to JavaScript (catching `dart:ffi` again) and runs it with node when installed; `consumer` analyzes and tests `packages/grin_native/test_consumer` (pub name `grin_native_test_consumer`), a pure Dart package that depends on `grin_native` alone, never imports `package:grin/`, and pays by Slatepack between two wallets on the in-process test chain through `GrinWalletApi`. `tool/regen_bindings.dart`, `tool/regtest.sh`, `tool/verify-apple.sh` and `tool/verify-windows.ps1` point at `packages/grin_native`.
 - Section 13 is a dated record and still names the earlier paths and the example ids `grin_flutter_example`; D1 to D11 are left as written.
 - To reverse: the layout before the split is in the history of `grin-v1`.
+
+### D14. Stack Wallet prerequisites: new-wallet flag, last scanned height, network off, invoice amount check, Rust 1.99.1, Apple LMDB flags
+
+Decided on 2026-11-07, as Phase G of `docs/stack-wallet-integration.md` (G2 to G6, G9 to G11). The C ABI grows from 35 to 36 standard exports; three signatures change. Nothing was published with the old signatures, and the header, the bindings and every caller changed together.
+
+- New wallet (G4). `grin_wallet_create` and `grin_test_create_wallet` take a trailing `is_new_wallet: bool`; Dart has `GrinWalletBackend.create({required config, String? mnemonic, required password, bool isNewWallet = false})` and `GrinTestChain.createWallet(..., isNewWallet)`. libwallet's lifecycle provider stores `InitNeedsScanning` for any mnemonic, so a wallet Stack creates from a freshly generated phrase would run a full scan from genesis on its first refresh, which `cancelScan` cannot stop. With the flag, create opens the wallet and saves `InitNoScanning` through a wallet batch before it returns, so a failure removes the new directory as for any other create error. A C parameter, not a `config_json` key, because `config_json` is shared with `grin_wallet_open`, where the flag means nothing; bool arguments are already the convention (`refresh_from_node`, `broadcast`). The fork is unchanged.
+- Last scanned height (G5). `grin_wallet_get_last_scanned_height(handle) -> {"height"}`, the wallet's `last_scanned_block` height, 0 before any scan; `Future<int> GrinWalletApi.lastScannedHeight()`, queued like other operations.
+- Network off (G6). `config_json` takes `network_enabled` (default true) and `grin_wallet_update_network` a trailing `network_enabled: bool`; Dart has `GrinWalletConfig.networkEnabled` (default true) and `updateNetwork({required nodeUrl, required apiSecret, required socksProxy, required bool networkEnabled})`. Two layers: every entry point that would reach the node or another wallet checks the flag first and fails with `Node` and `{"reason": "network_disabled"}` (the list is in `docs/ffi-json.md` 3.1), and the session's node client becomes a `Disabled` variant of `FfiNodeClient` that fails every request without connecting, for any libwallet path the first layer does not name. The entry check is needed because libwallet's `update_wallet_state` turns client errors into "not refreshed" rather than an error. `grin_node_test_connection` takes no wallet and ignores it. The URL is still validated while the network is off.
+- Invoice amount (G10). `grin_tx_process_invoice`'s `args_json` takes `expected_amount` (u64 nanogrin or null); `GrinProcessInvoiceArgs.expectedAmount` (`BigInt?`). It is compared with the decoded I1 before `process_invoice_tx`, so a mismatch records and locks nothing. Error: `Transaction` with `{"invoice_amount", "expected_amount"}`.
+- Rust 1.99.1 (G2), see D3. The only source change is `AtomicU8::fetch_update` to `try_update` in `handle.rs`, which the new clippy reports as deprecated.
+- Apple LMDB flags (G3): `CFLAGS_<target>=-DMDB_USE_POSIX_MUTEX=1 -DMDB_USE_ROBUST=0` on macOS and iOS targets, through `RustBuilder.extraCargoEnvironmentVariables`. Pending device verification (section 13).
+- Slatepack lengths (G9) are in section 13.
+- Docs (G11): the hooks runner keeps neither `CARGO_*` nor `RUSTUP_*` nor `SSH_AUTH_SOCK` (hooks_runner 1.5.0), so `packages/grin_native/README.md` now says so and has a "Private access" section on prefetching the fork. The consumer url is `ssh://git@git.cypherstack.com:222/sneurlax/grin_native.git`, the repository the `cypherstack` remote points at, for both pub entries (the plan's section 0); the earlier note in section 13 that consumers use `grin.git` no longer holds.
+- Tests: Rust `new_wallet_flag_skips_the_full_scan` (stored status for each combination, kept across a reopen, completed by the first refresh) and `network_disabled_opens_no_connection` (every gated entry point against a counting TCP listener; zero connections until the network is turned on), the invoice test refuses a wrong `expected_amount` and checks nothing is locked or logged, and a config unit test. The libwallet reorg window is 2880 blocks, longer than any test chain the default suite mines, so the scan-from-tip behaviour itself is checked by `new_wallet_refresh_scans_only_the_reorg_window`, which is `#[ignore]` and runs with `cargo test --release --features test-utils --test ffi_e2e_test -- --ignored`. Dart tests mirror these through `GrinWalletClient` and `GrinTestChain`.
+- To reverse: revert the commits named in `docs/stack-wallet-integration.md` section 3.
