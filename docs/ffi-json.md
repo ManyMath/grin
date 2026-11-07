@@ -90,10 +90,10 @@ Values are append-only; Dart maps them by number.
 | 6 | `WalletExists` | `grin_wallet_create` on a directory that already has `wallet.seed`, or that has leftover wallet data (`db/` or an LMDB file) without one. | `{"wallet_dir": string}` (as given); for leftover data also `"reason": "leftover_wallet_data"` and `"path"` (what was found, relative to `wallet_data`) |
 | 7 | `InvalidHandle` | Handle is 0, unknown, or already closed. | null |
 | 8 | `Lifecycle` | Other wallet open/close/seed failures from the lifecycle provider, including a damaged `wallet.seed` and a password change that failed after the old password was verified. | null; for a failed password change `{"seed_present": bool, "backup_file": string or null}` |
-| 9 | `Node` | The node could not be reached or gave an unusable answer, including a failed broadcast and a cancel that could not refresh first. | null, or `{"slate_id"}` (section 9.1) |
+| 9 | `Node` | The node could not be reached or gave an unusable answer, including a failed broadcast and a cancel that could not refresh first; or the wallet's network is turned off (section 3.1). | null, or `{"slate_id"}` (section 9.1); `{"reason": "network_disabled"}` while the network is off |
 | 10 | `InsufficientFunds` | Not enough spendable funds. | `{"required": u64, "available": u64}` |
 | 11 | `Slate` | Slate or Slatepack could not be parsed, encrypted, decrypted or is in the wrong state. | null, or `{"slate_id"}` (section 9.1) |
-| 12 | `Transaction` | Transaction building or bookkeeping failed, or a payment proof does not verify. | null, or `{"slate_id"}` (section 9.1) |
+| 12 | `Transaction` | Transaction building or bookkeeping failed, a payment proof does not verify, or an invoice does not ask for the expected amount. | null, or `{"slate_id"}` (section 9.1); `{"invoice_amount": u64, "expected_amount": u64}` for an amount mismatch |
 | 13 | `NotFound` | Transaction, stored finalized transaction or payment proof does not exist. | null, or `{"slate_id"}` (section 9.1) |
 | 14 | `Cancelled` | A running scan was stopped between batches by `grin_wallet_scan_cancel` or by closing the wallet. | `{"scanned_height": u64, "tip_height": u64}`, or null when the handle was closed before the scan started |
 | 15 | `Io` | File system error. | null |
@@ -116,7 +116,8 @@ Used by `grin_wallet_create` and `grin_wallet_open`.
   "node_url": "https://grinnode.example.com:3413",
   "node_api_secret": null,
   "socks_proxy": "127.0.0.1:9050",
-  "request_timeout_secs": 30
+  "request_timeout_secs": 30,
+  "network_enabled": true
 }
 ```
 
@@ -128,9 +129,34 @@ Used by `grin_wallet_create` and `grin_wallet_open`.
 | `node_api_secret` | string or null | no | Node foreign API secret. Empty string is the same as null. |
 | `socks_proxy` | string or null | no | `"host:port"` with an IPv4 literal host, optionally prefixed `socks5h://` or `socks5://`. Host names are rejected (resolving them would leak a DNS query) and so is IPv6. Traffic uses `socks5h`, so `.onion` names resolve inside Tor. |
 | `request_timeout_secs` | u64 or null | no | Default 30. Must be greater than 0. |
+| `network_enabled` | bool or null | no | Default true. False turns the network off (3.1). `node_url` is still required and checked. |
 
 Unknown keys are ignored. A missing required key or a wrong type is `Json`;
 a bad value is `InvalidArgument`.
+
+### 3.1 Network off
+
+With `network_enabled` false (in `config_json`, or through
+`grin_wallet_update_network`), every call that would contact the node or
+send over HTTP fails at once with `Node` and
+`{"reason": "network_disabled"}`, before anything is read, built or locked,
+and no connection is opened. These are:
+
+- always: `grin_wallet_get_chain_height`, `grin_wallet_scan`,
+  `grin_tx_estimate_fee`, `grin_tx_init_send`, `grin_tx_send_http`,
+  `grin_tx_receive_slatepack`, `grin_tx_issue_invoice`,
+  `grin_tx_process_invoice`, `grin_tx_repost`, `grin_tx_cancel` and
+  `grin_payment_proof_verify`;
+- with `refresh_from_node` true: `grin_wallet_get_balance` and
+  `grin_txs_get`;
+- with `broadcast` true: `grin_tx_finalize_slatepack` and
+  `grin_tx_finalize_invoice`.
+
+Everything else works from the wallet's own data. As a second line, the
+wallet's node client is replaced by one that refuses every request, so a
+libwallet path that asks the node anyway (the late-lock step of a finalize
+without broadcast) also fails with `Node` without connecting.
+`grin_node_test_connection` takes no wallet and is not affected.
 
 ## 4. Memory, logging and diagnostics
 
@@ -207,11 +233,23 @@ See 1.1.
 
 ## 6. Wallet lifecycle
 
-### `grin_wallet_create(config_json, mnemonic, password)`
+### `grin_wallet_create(config_json, mnemonic, password, is_new_wallet)`
 
 - `mnemonic`: nullable. NULL creates a new 24-word seed; otherwise a 12 to 24
-  word BIP39 mnemonic to restore. A restored wallet needs a
-  `grin_wallet_scan` to find its outputs.
+  word BIP39 mnemonic.
+- `is_new_wallet`: whether a given mnemonic was just generated and has no
+  history on the chain. libwallet stores a scan status with each wallet:
+  `InitNoScanning` for one created without a mnemonic, `InitNeedsScanning`
+  for one created with a mnemonic. The first refresh from the node
+  (`update_wallet_state`, behind every `refresh_from_node` and
+  `grin_tx_cancel`) starts `REORG_RESCAN_WINDOW` (2880) blocks below the
+  last scanned block, and for `InitNoScanning` it takes the tip as the last
+  scanned block. With a mnemonic and `is_new_wallet` true, create stores
+  `InitNoScanning` in the same call, so the first refresh scans only the
+  last 2880 blocks. With `is_new_wallet` false the wallet keeps
+  `InitNeedsScanning` and its first refresh scans from the first block (or
+  find its outputs earlier with `grin_wallet_scan`). Without a mnemonic the
+  flag changes nothing.
 - `password`: required, may be empty.
 - Creates `<wallet_dir>/wallet_data` (and parents), the encrypted
   `wallet.seed` and the database, then opens the wallet.
@@ -315,14 +353,15 @@ create, open and delete); links higher up the path are fine.
 - Errors: `InvalidHandle`, `InvalidArgument`, `InvalidUtf8`,
   `InvalidPassword`, `WalletNotFound`, `Lifecycle`, `Io`.
 
-### `grin_wallet_update_network(handle, node_url, api_secret, socks_proxy)`
+### `grin_wallet_update_network(handle, node_url, api_secret, socks_proxy, network_enabled)`
 
 - `node_url` required; `api_secret` and `socks_proxy` nullable (section 3
   rules). Keeps the wallet's request timeout. Does not reopen the database
   and does not contact the node.
-- Replaces all three settings. NULL `socks_proxy` means connect directly and
+- Replaces all four settings. NULL `socks_proxy` means connect directly and
   NULL `api_secret` means send no secret; neither keeps the previous value.
-  The Dart `updateNetwork` therefore requires both arguments.
+  `network_enabled` false turns the network off (3.1), true turns it on.
+  The Dart `updateNetwork` therefore requires every argument.
 - The node client and the stored node settings (used for the proxy of
   `grin_tx_send_http`) change together while the wallet lock is held, so
   no call that holds the wallet lock sees one without the other.
@@ -350,7 +389,8 @@ create, open and delete); links higher up the path are fine.
 
 - `refresh_from_node`: update outputs and transactions from the node first.
   If the node cannot be reached the stored state is returned with
-  `refreshed_from_node: false`.
+  `refreshed_from_node: false`. While the network is off (3.1) it is `Node`
+  instead.
 - Returns:
 
 ```json
@@ -401,6 +441,21 @@ create, open and delete); links higher up the path are fine.
   that still holds a closed wallet cannot start a new scan (`Cancelled`
   without details). The database closes and the directory is released when
   the stopped scan returns.
+
+### `grin_wallet_get_last_scanned_height(handle)`
+
+- Returns `{"height": u64}`: the height of the last scanned block record
+  in the wallet database (libwallet's `last_scanned_block`), saved by
+  `grin_wallet_scan` after each batch and by every refresh from the node.
+  0 when the wallet has never scanned, including a new `InitNoScanning`
+  wallet before its first refresh.
+- After a cancelled or failed scan, `height + 1` is where the next scan can
+  start, so a caller that lost the `Cancelled` details does not have to
+  reconstruct it.
+- Reads the database under the wallet lock and contacts no node, so it
+  works with the network off. The Dart client queues it like other wallet
+  operations, so during a scan it answers after the scan.
+- Errors: `InvalidHandle`, `Lifecycle`.
 
 ### `grin_wallet_scan_progress(handle)`
 
@@ -769,7 +824,7 @@ it with `grin_tx_repost`.
 ### `grin_tx_process_invoice(handle, armored_i1, args_json)`
 
 ```json
-{"min_confirms": 10, "selection_strategy_is_all": false, "ttl_blocks": null}
+{"min_confirms": 10, "selection_strategy_is_all": false, "ttl_blocks": null, "expected_amount": 30000000000}
 ```
 
 | Key | Type | Default |
@@ -777,6 +832,13 @@ it with `grin_tx_repost`.
 | `min_confirms` | u64 | 10 |
 | `selection_strategy_is_all` | bool | false |
 | `ttl_blocks` | u64 or null | null (1 to 1,000,000,000 when given) |
+| `expected_amount` | u64 or null | null (no check) |
+
+- `expected_amount` is the nanogrin amount the payer confirmed. When it is
+  given and the I1 asks for a different amount, the call fails with
+  `Transaction` and `{"invoice_amount": u64, "expected_amount": u64}`
+  right after the I1 is decoded, before libwallet records or locks
+  anything.
 
 - Pays the invoice: selects inputs, signs, and locks the inputs in the same
   call (libwallet's `process_invoice_tx` does not lock them by itself).
@@ -785,7 +847,8 @@ it with `grin_tx_repost`.
 - An I1 whose amount is above 2^63 - 1 is `InvalidArgument`, before
   anything is selected or locked.
 - Errors: `Slate` (not an I1), `InsufficientFunds`, `Transaction`
-  (already paid or cancelled, expired), `Json`, `InvalidArgument`. A
+  (already paid or cancelled, expired, not the expected amount), `Json`,
+  `InvalidArgument`. A
   failure after libwallet saved the payment (locking the inputs, armoring
   the I2) carries `{"slate_id"}`.
 
@@ -863,7 +926,7 @@ it with `grin_tx_repost`.
 Declared in the header only under `#ifdef GRIN_FFI_TEST_UTILS` and exported
 only by builds with `--features test-utils`. Release artifacts export none.
 
-### `grin_test_create_wallet(chain_dir, wallet_dir, client_id, network, mnemonic, password)`
+### `grin_test_create_wallet(chain_dir, wallet_dir, client_id, network, mnemonic, password, is_new_wallet)`
 
 - Starts (on first use per `chain_dir`) an in-process chain at
   AutomatedTesting (coinbase maturity 3) with a wallet proxy thread, then
@@ -871,7 +934,8 @@ only by builds with `--features test-utils`. Release artifacts export none.
   `wallet.seed` exists (the mnemonic is then ignored), connected to that chain
   as `client_id`.
 - `client_id`: non-empty, unique per chain, not `"node"`. Reusing an id
-  re-attaches that wallet. `mnemonic` nullable as in `grin_wallet_create`.
+  re-attaches that wallet. `mnemonic` nullable and `is_new_wallet` as in
+  `grin_wallet_create`; both are ignored when the wallet is opened.
 - Takes the same directory guard as `grin_wallet_open`. The handle works with
   every handle function.
 - Every `network` is accepted so tests can check keychains and address

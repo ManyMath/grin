@@ -394,18 +394,49 @@ void main() {
         'min_confirms': 10,
         'selection_strategy_is_all': false,
         'ttl_blocks': null,
+        'expected_amount': null,
       });
       expect(
-        const GrinProcessInvoiceArgs(
+        GrinProcessInvoiceArgs(
           minimumConfirmations: 1,
           selectionStrategyIsAll: true,
           ttlBlocks: 20,
+          expectedAmount: BigInt.from(30000000000),
         ).toJson(),
         {
           'min_confirms': 1,
           'selection_strategy_is_all': true,
           'ttl_blocks': 20,
+          'expected_amount': 30000000000,
         },
+      );
+    });
+
+    test('GrinProcessInvoiceArgs.expectedAmount', () {
+      final tooBig = BigInt.one << 63;
+      for (final bad in [BigInt.from(-1), tooBig]) {
+        expect(
+          () => GrinProcessInvoiceArgs(expectedAmount: bad).toJson(),
+          throwsA(
+            isA<ArgumentError>().having(
+              (e) => e.name,
+              'name',
+              'expectedAmount',
+            ),
+          ),
+        );
+      }
+      expect(
+        GrinProcessInvoiceArgs(expectedAmount: BigInt.two),
+        GrinProcessInvoiceArgs(expectedAmount: BigInt.two),
+      );
+      expect(
+        GrinProcessInvoiceArgs(expectedAmount: BigInt.two),
+        isNot(const GrinProcessInvoiceArgs()),
+      );
+      expect(
+        GrinProcessInvoiceArgs(expectedAmount: BigInt.two).toString(),
+        contains('expectedAmount: 2'),
       );
     });
 

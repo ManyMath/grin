@@ -53,6 +53,7 @@ final class GrinProcessInvoiceArgs {
     this.minimumConfirmations = 10,
     this.selectionStrategyIsAll = false,
     this.ttlBlocks,
+    this.expectedAmount,
   });
 
   /// The confirmations an output needs to be spent.
@@ -66,26 +67,46 @@ final class GrinProcessInvoiceArgs {
   /// no limit.
   final int? ttlBlocks;
 
+  /// The amount in nanogrin the payer agreed to pay, or null for no check.
+  /// When set and the invoice asks for any other amount, `processInvoice`
+  /// throws `GrinTransactionException` (with `invoice_amount` and
+  /// `expected_amount` in its details) and nothing is recorded or locked.
+  /// Must fit the native 64-bit argument; [toJson] throws [ArgumentError]
+  /// for one that does not.
+  final BigInt? expectedAmount;
+
   /// The `args_json` of `grin_tx_process_invoice`.
-  Map<String, Object?> toJson() => <String, Object?>{
-    'min_confirms': minimumConfirmations,
-    'selection_strategy_is_all': selectionStrategyIsAll,
-    'ttl_blocks': ttlBlocks,
-  };
+  Map<String, Object?> toJson() {
+    final expected = expectedAmount;
+    return <String, Object?>{
+      'min_confirms': minimumConfirmations,
+      'selection_strategy_is_all': selectionStrategyIsAll,
+      'ttl_blocks': ttlBlocks,
+      'expected_amount': expected == null
+          ? null
+          : amountToNative(expected, 'expectedAmount'),
+    };
+  }
 
   @override
   bool operator ==(Object other) =>
       other is GrinProcessInvoiceArgs &&
       other.minimumConfirmations == minimumConfirmations &&
       other.selectionStrategyIsAll == selectionStrategyIsAll &&
-      other.ttlBlocks == ttlBlocks;
+      other.ttlBlocks == ttlBlocks &&
+      other.expectedAmount == expectedAmount;
 
   @override
-  int get hashCode =>
-      Object.hash(minimumConfirmations, selectionStrategyIsAll, ttlBlocks);
+  int get hashCode => Object.hash(
+    minimumConfirmations,
+    selectionStrategyIsAll,
+    ttlBlocks,
+    expectedAmount,
+  );
 
   @override
   String toString() =>
       'GrinProcessInvoiceArgs(minimumConfirmations: $minimumConfirmations, '
-      'selectionStrategyIsAll: $selectionStrategyIsAll)';
+      'selectionStrategyIsAll: $selectionStrategyIsAll, '
+      'expectedAmount: $expectedAmount)';
 }

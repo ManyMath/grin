@@ -4,15 +4,18 @@
 #![cfg(feature = "test-utils")]
 
 use std::ffi::{c_void, CStr, CString};
+use std::net::TcpListener;
 use std::os::raw::c_char;
 use std::path::{Path, PathBuf};
 use std::ptr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use grin_ffi::test_support::{retain_session, set_scan_test_hooks};
 use grin_ffi::*;
-use grin_wallet_libwallet::ScannedBlockInfo;
+use grin_wallet_libwallet::{ScannedBlockInfo, WalletInitStatus};
 use serde_json::{json, Value};
 
 const OK: i32 = 0;
@@ -113,11 +116,21 @@ fn config(dir: &str, network: u8) -> CString {
 }
 
 fn create(dir: &str, network: u8, mnemonic: Option<&str>) -> Result<u64, (i32, Value)> {
+    create_with(dir, network, mnemonic, false)
+}
+
+fn create_with(
+    dir: &str,
+    network: u8,
+    mnemonic: Option<&str>,
+    is_new: bool,
+) -> Result<u64, (i32, Value)> {
     let m = mnemonic.map(cs);
     let v = call!(grin_wallet_create(
         config(dir, network).as_ptr(),
         m.as_ref().map_or(ptr::null(), |m| m.as_ptr()),
         cs(PASSWORD).as_ptr(),
+        is_new,
     ))?;
     Ok(v["handle"].as_u64().unwrap())
 }
@@ -166,6 +179,24 @@ fn last_scanned_block(handle: u64) -> ScannedBlockInfo {
         .unwrap()
 }
 
+/// The scan status libwallet keeps for the wallet.
+fn init_status(handle: u64) -> WalletInitStatus {
+    let session = retain_session(handle).expect("session is registered");
+    let mut w = session.wallet.lock();
+    w.lc_provider()
+        .unwrap()
+        .wallet_inst()
+        .unwrap()
+        .init_status()
+        .unwrap()
+}
+
+fn last_scanned_height(handle: u64) -> u64 {
+    call!(grin_wallet_get_last_scanned_height(handle)).unwrap()["height"]
+        .as_u64()
+        .unwrap()
+}
+
 fn test_wallet(chain: &Path, dir: &Path, client_id: &str) -> u64 {
     let v = call!(grin_test_create_wallet(
         cs(&path_str(chain)).as_ptr(),
@@ -174,6 +205,7 @@ fn test_wallet(chain: &Path, dir: &Path, client_id: &str) -> u64 {
         AUTOMATED,
         ptr::null(),
         cs(PASSWORD).as_ptr(),
+        false,
     ))
     .unwrap();
     v["handle"].as_u64().unwrap()
@@ -530,6 +562,7 @@ fn network_settings() {
         cs("http://127.0.0.1:2").as_ptr(),
         cs("secret").as_ptr(),
         cs("127.0.0.1:9050").as_ptr(),
+        true,
     ))
     .unwrap();
     assert_eq!(
@@ -538,6 +571,7 @@ fn network_settings() {
             cs(UNREACHABLE_NODE).as_ptr(),
             ptr::null(),
             cs("localhost:9050").as_ptr(),
+            true,
         ))),
         INVALID_ARGUMENT
     );
@@ -547,6 +581,7 @@ fn network_settings() {
             cs("ftp://x").as_ptr(),
             ptr::null(),
             ptr::null(),
+            true,
         ))),
         INVALID_ARGUMENT
     );
@@ -558,6 +593,7 @@ fn network_settings() {
         cs(with_password).as_ptr(),
         ptr::null(),
         ptr::null(),
+        true,
     ))
     .unwrap_err();
     assert_eq!(e.0, INVALID_ARGUMENT, "{}", e.1);
@@ -567,6 +603,7 @@ fn network_settings() {
         cs(UNREACHABLE_NODE).as_ptr(),
         ptr::null(),
         cs("").as_ptr(),
+        true,
     ))
     .unwrap();
     assert_eq!(code_of(call!(grin_wallet_get_chain_height(h))), NODE);
@@ -1074,7 +1111,8 @@ fn error_paths() {
         code_of(call!(grin_wallet_create(
             ptr::null(),
             ptr::null(),
-            pw.as_ptr()
+            pw.as_ptr(),
+            false
         ))),
         INVALID_ARGUMENT
     );
@@ -1082,7 +1120,8 @@ fn error_paths() {
         code_of(call!(grin_wallet_create(
             config(&dir, AUTOMATED).as_ptr(),
             ptr::null(),
-            ptr::null()
+            ptr::null(),
+            false
         ))),
         INVALID_ARGUMENT
     );
@@ -1116,7 +1155,8 @@ fn error_paths() {
         code_of(call!(grin_wallet_create(
             config(&dir, AUTOMATED).as_ptr(),
             ptr::null(),
-            bad.as_ptr()
+            bad.as_ptr(),
+            false
         ))),
         INVALID_UTF8
     );
@@ -1141,7 +1181,8 @@ fn error_paths() {
         code_of(call!(grin_wallet_create(
             cs(&bad_net.to_string()).as_ptr(),
             ptr::null(),
-            pw.as_ptr()
+            pw.as_ptr(),
+            false
         ))),
         INVALID_ARGUMENT
     );
@@ -1153,7 +1194,8 @@ fn error_paths() {
         code_of(call!(grin_wallet_create(
             cs(&bad_proxy.to_string()).as_ptr(),
             ptr::null(),
-            pw.as_ptr()
+            pw.as_ptr(),
+            false
         ))),
         INVALID_ARGUMENT
     );
@@ -1227,4 +1269,324 @@ fn lone_seed_backup_is_reported_not_treated_as_empty() {
     let h = open(&dir, AUTOMATED).unwrap();
     assert_eq!(address(h, 0), addr);
     close(h);
+}
+
+#[test]
+fn new_wallet_flag_skips_the_full_scan() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = |name: &str| path_str(&tmp.path().join(name));
+
+    // A restored wallet needs a full scan, unless the caller says the
+    // mnemonic is new. Without a mnemonic the flag changes nothing.
+    let restored = create_with(&dir("restored"), AUTOMATED, Some(MNEMONIC), false).unwrap();
+    assert!(matches!(
+        init_status(restored),
+        WalletInitStatus::InitNeedsScanning
+    ));
+    let fresh = create_with(&dir("fresh"), AUTOMATED, Some(MNEMONIC), true).unwrap();
+    assert!(matches!(
+        init_status(fresh),
+        WalletInitStatus::InitNoScanning
+    ));
+    for (name, is_new) in [("generated", false), ("generated_new", true)] {
+        let h = create_with(&dir(name), AUTOMATED, None, is_new).unwrap();
+        assert!(matches!(init_status(h), WalletInitStatus::InitNoScanning));
+        close(h);
+    }
+    assert_eq!(last_scanned_height(restored), 0);
+    assert_eq!(last_scanned_height(fresh), 0);
+    // The flag keeps the same seed: only the scan status differs.
+    assert_eq!(address(fresh, 0), address(restored, 0));
+    close(restored);
+    close(fresh);
+
+    // The status is stored, so it survives a reopen.
+    let h = open(&dir("fresh"), AUTOMATED).unwrap();
+    assert!(matches!(init_status(h), WalletInitStatus::InitNoScanning));
+    close(h);
+    assert_eq!(
+        code_of(call!(grin_wallet_get_last_scanned_height(h))),
+        INVALID_HANDLE
+    );
+
+    // On the test chain the first refresh completes the status and records
+    // the tip as scanned. A chain shorter than libwallet's reorg window
+    // (2880 blocks) cannot show the shorter scan itself.
+    let chain = tmp.path().join("chain");
+    let miner = test_wallet(&chain, &tmp.path().join("miner"), "miner");
+    let v = call!(grin_test_create_wallet(
+        cs(&path_str(&chain)).as_ptr(),
+        cs(&dir("chain_fresh")).as_ptr(),
+        cs("fresh").as_ptr(),
+        AUTOMATED,
+        cs(MNEMONIC).as_ptr(),
+        cs(PASSWORD).as_ptr(),
+        true,
+    ))
+    .unwrap();
+    let h = v["handle"].as_u64().unwrap();
+    assert!(matches!(init_status(h), WalletInitStatus::InitNoScanning));
+    assert_eq!(call!(grin_test_mine_blocks(miner, 3)).unwrap()["height"], 3);
+    let b = call!(grin_wallet_get_balance(h, true, 1)).unwrap();
+    assert_eq!(b["refreshed_from_node"], true);
+    assert!(matches!(init_status(h), WalletInitStatus::InitComplete));
+    assert_eq!(last_scanned_height(h), 3);
+    assert_eq!(last_scanned_height(h), last_scanned_block(h).height);
+
+    // grin_wallet_scan saves its last batch the same way.
+    assert_eq!(last_scanned_height(miner), 0);
+    call!(grin_wallet_scan(miner, 0, false)).unwrap();
+    assert_eq!(last_scanned_height(miner), 3);
+    close(h);
+    close(miner);
+}
+
+/// A TCP listener on a free local port that counts the connections it
+/// accepts and closes each one at once. Returns its `http://` URL.
+fn counting_listener() -> (String, Arc<AtomicUsize>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let count = Arc::new(AtomicUsize::new(0));
+    let seen = count.clone();
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            seen.fetch_add(1, Ordering::SeqCst);
+            drop(stream);
+        }
+    });
+    (url, count)
+}
+
+/// Waits up to five seconds for `count` to pass `above`.
+fn wait_above(count: &AtomicUsize, above: usize) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if count.load(Ordering::SeqCst) > above {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    false
+}
+
+fn network_off(r: Result<Value, (i32, Value)>, what: &str) {
+    let (code, e) = r.expect_err(what);
+    assert_eq!(code, NODE, "{what}: {e}");
+    assert_eq!(e["details"]["reason"], "network_disabled", "{what}: {e}");
+}
+
+#[test]
+fn network_disabled_opens_no_connection() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = path_str(&tmp.path().join("w"));
+    let (node, node_hits) = counting_listener();
+    let (peer, peer_hits) = counting_listener();
+    let off = |enabled: Option<bool>| {
+        cs(&json!({
+            "wallet_dir": dir,
+            "network": AUTOMATED,
+            "node_url": node,
+            "request_timeout_secs": 2,
+            "network_enabled": enabled,
+        })
+        .to_string())
+    };
+
+    let v = call!(grin_wallet_create(
+        off(Some(false)).as_ptr(),
+        ptr::null(),
+        cs(PASSWORD).as_ptr(),
+        false,
+    ))
+    .unwrap();
+    let h = v["handle"].as_u64().unwrap();
+    let some = cs("x");
+    let send = cs(&json!({"amount": 1_000_000_000u64, "min_confirms": 1}).to_string());
+    let send_http = cs(&json!({
+        "amount": 1_000_000_000u64,
+        "recipient_url_or_address": peer,
+    })
+    .to_string());
+    let invoice = cs(&json!({"amount": 1_000_000_000u64}).to_string());
+
+    network_off(call!(grin_wallet_get_chain_height(h)), "chain height");
+    network_off(call!(grin_wallet_get_balance(h, true, 1)), "balance");
+    network_off(call!(grin_txs_get(h, true)), "txs");
+    network_off(call!(grin_wallet_scan(h, 0, false)), "scan");
+    network_off(
+        call!(grin_tx_estimate_fee(h, 1_000_000_000, 1, false, false)),
+        "estimate",
+    );
+    network_off(call!(grin_tx_init_send(h, send.as_ptr())), "init send");
+    network_off(call!(grin_tx_send_http(h, send_http.as_ptr())), "send http");
+    network_off(
+        call!(grin_tx_receive_slatepack(h, some.as_ptr(), ptr::null())),
+        "receive",
+    );
+    network_off(
+        call!(grin_tx_finalize_slatepack(h, some.as_ptr(), true, false)),
+        "finalize",
+    );
+    network_off(call!(grin_tx_issue_invoice(h, invoice.as_ptr())), "invoice");
+    network_off(
+        call!(grin_tx_process_invoice(h, some.as_ptr(), cs("{}").as_ptr())),
+        "pay invoice",
+    );
+    network_off(
+        call!(grin_tx_finalize_invoice(h, some.as_ptr(), true, false)),
+        "finalize invoice",
+    );
+    network_off(call!(grin_tx_repost(h, 0, ptr::null(), false)), "repost");
+    network_off(call!(grin_tx_cancel(h, 0, ptr::null())), "cancel");
+    network_off(
+        call!(grin_payment_proof_verify(h, some.as_ptr())),
+        "verify proof",
+    );
+
+    // What needs no node still works.
+    let b = call!(grin_wallet_get_balance(h, false, 1)).unwrap();
+    assert_eq!(b["refreshed_from_node"], false);
+    assert_eq!(call!(grin_txs_get(h, false)).unwrap()["txs"], json!([]));
+    assert!(address(h, 0).starts_with("tgrin1"));
+    assert_eq!(last_scanned_height(h), 0);
+    assert_eq!(progress(h)["is_scanning"], false);
+    // A finalize without broadcast reaches the slate check.
+    assert_eq!(
+        code_of(call!(grin_tx_finalize_slatepack(
+            h,
+            some.as_ptr(),
+            false,
+            false
+        ))),
+        GrinErrorCode::Slate as i32
+    );
+    // The URL is still checked while the network is off.
+    assert_eq!(
+        code_of(call!(grin_wallet_update_network(
+            h,
+            cs("ftp://x").as_ptr(),
+            ptr::null(),
+            ptr::null(),
+            false,
+        ))),
+        INVALID_ARGUMENT
+    );
+
+    thread::sleep(Duration::from_millis(200));
+    assert_eq!(node_hits.load(Ordering::SeqCst), 0);
+    assert_eq!(peer_hits.load(Ordering::SeqCst), 0);
+
+    // The stateless check ignores the wallet setting, and shows that the
+    // listener counts.
+    assert_eq!(
+        code_of(call!(grin_node_test_connection(
+            cs(&node).as_ptr(),
+            ptr::null(),
+            ptr::null(),
+        ))),
+        NODE
+    );
+    assert!(wait_above(&node_hits, 0));
+
+    // Turned on, the wallet reaches the node; turned off again, it does not.
+    call!(grin_wallet_update_network(
+        h,
+        cs(&node).as_ptr(),
+        ptr::null(),
+        ptr::null(),
+        true,
+    ))
+    .unwrap();
+    let before = node_hits.load(Ordering::SeqCst);
+    let e = call!(grin_wallet_get_chain_height(h)).unwrap_err();
+    assert_eq!(e.0, NODE, "{}", e.1);
+    assert!(e.1["details"].is_null(), "{}", e.1);
+    assert!(wait_above(&node_hits, before));
+    call!(grin_wallet_update_network(
+        h,
+        cs(&node).as_ptr(),
+        ptr::null(),
+        ptr::null(),
+        false,
+    ))
+    .unwrap();
+    close(h);
+
+    // The setting comes from the config on open as well; null means on.
+    let h = open_cfg(&off(Some(false)));
+    thread::sleep(Duration::from_millis(200));
+    let before = node_hits.load(Ordering::SeqCst);
+    network_off(call!(grin_wallet_get_balance(h, true, 1)), "balance");
+    network_off(call!(grin_wallet_get_chain_height(h)), "chain height");
+    thread::sleep(Duration::from_millis(200));
+    assert_eq!(node_hits.load(Ordering::SeqCst), before);
+    close(h);
+    let h = open_cfg(&off(None));
+    assert_eq!(code_of(call!(grin_wallet_get_chain_height(h))), NODE);
+    assert!(wait_above(&node_hits, before));
+    close(h);
+    assert_eq!(peer_hits.load(Ordering::SeqCst), 0);
+}
+
+fn open_cfg(config: &CString) -> u64 {
+    call!(grin_wallet_open(config.as_ptr(), cs(PASSWORD).as_ptr())).unwrap()["handle"]
+        .as_u64()
+        .unwrap()
+}
+
+/// libwallet's reorg window: how far below the last scanned block a
+/// refresh starts.
+const REORG_WINDOW: u64 = 2880;
+
+/// The full behaviour behind `is_new_wallet`, on a chain longer than the
+/// reorg window. It mines about 2,900 blocks, which takes minutes even in a
+/// release build, so it only runs when asked:
+/// `cargo test --release --features test-utils --test ffi_e2e_test -- --ignored`
+#[test]
+#[ignore = "mines more than 2880 blocks; run in release with --ignored"]
+fn new_wallet_refresh_scans_only_the_reorg_window() {
+    let tmp = tempfile::tempdir().unwrap();
+    let chain = tmp.path().join("chain");
+    let wallet = |name: &str, is_new: bool| -> u64 {
+        let v = call!(grin_test_create_wallet(
+            cs(&path_str(&chain)).as_ptr(),
+            cs(&path_str(&tmp.path().join(name))).as_ptr(),
+            cs(name).as_ptr(),
+            AUTOMATED,
+            cs(MNEMONIC).as_ptr(),
+            cs(PASSWORD).as_ptr(),
+            is_new,
+        ))
+        .unwrap();
+        v["handle"].as_u64().unwrap()
+    };
+
+    // One coinbase to the mnemonic at height 1, then bury it.
+    let early = wallet("early", false);
+    call!(grin_test_mine_blocks(early, 1)).unwrap();
+    close(early);
+    let miner = test_wallet(&chain, &tmp.path().join("miner"), "miner");
+    let tip = call!(grin_test_mine_blocks(miner, REORG_WINDOW + 10)).unwrap()["height"]
+        .as_u64()
+        .unwrap();
+    assert_eq!(tip, REORG_WINDOW + 11);
+
+    // Marked new, the first refresh starts inside the window and does not
+    // find the old coinbase.
+    let fresh = wallet("fresh", true);
+    let b = call!(grin_wallet_get_balance(fresh, true, 1)).unwrap();
+    assert_eq!(b["refreshed_from_node"], true);
+    assert_eq!(b["total"], 0, "{b}");
+    assert_eq!(last_scanned_height(fresh), tip);
+
+    // Restored, the first refresh scans from the first block and finds it.
+    let restored = wallet("restored", false);
+    let b = call!(grin_wallet_get_balance(restored, true, 1)).unwrap();
+    assert_eq!(b["refreshed_from_node"], true);
+    assert!(b["total"].as_u64().unwrap() > 0, "{b}");
+    assert_eq!(last_scanned_height(restored), tip);
+
+    close(fresh);
+    close(restored);
+    close(miner);
 }

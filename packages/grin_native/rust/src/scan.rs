@@ -45,6 +45,11 @@ struct ScanOut {
 }
 
 #[derive(Serialize)]
+struct HeightOut {
+    height: u64,
+}
+
+#[derive(Serialize)]
 struct ProgressOut {
     is_scanning: bool,
     cancel_requested: bool,
@@ -199,6 +204,7 @@ pub extern "C" fn grin_wallet_scan(
 ) -> GrinFfiResult {
     ffi_guard! {
         let session = get_session(handle)?;
+        session.require_network()?;
         let state = &session.scan_state;
 
         match state.begin_scan() {
@@ -270,6 +276,21 @@ pub extern "C" fn grin_wallet_scan(
                     "tip_height": tip,
                 }))),
         }
+    }
+}
+
+/// Returns `{"height": u64}`, the height of the last block the wallet saved
+/// as scanned (by `grin_wallet_scan` or a refresh from the node), or 0 when
+/// it has never scanned. Reads the wallet database and contacts no node.
+#[no_mangle]
+pub extern "C" fn grin_wallet_get_last_scanned_height(handle: u64) -> GrinFfiResult {
+    ffi_guard! {
+        let session = get_session(handle)?;
+        let height = {
+            let mut w = session.wallet.lock();
+            w.lc_provider()?.wallet_inst()?.last_scanned_block()?.height
+        };
+        to_json(&HeightOut { height })
     }
 }
 

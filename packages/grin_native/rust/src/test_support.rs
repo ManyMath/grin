@@ -441,7 +441,9 @@ struct HeightOut {
 
 /// Creates (or opens, if `wallet.seed` exists) a wallet in
 /// `<wallet_dir>/wallet_data` connected to the in-process chain in
-/// `chain_dir` as `client_id`. Returns `{"handle": u64}`.
+/// `chain_dir` as `client_id`. `is_new_wallet` works as in
+/// `grin_wallet_create` and is ignored when the wallet is opened. Returns
+/// `{"handle": u64}`.
 // # Safety
 // Every pointer argument must be NULL or point to a NUL-terminated string
 // that stays valid and unchanged until the call returns.
@@ -453,6 +455,7 @@ pub unsafe extern "C" fn grin_test_create_wallet(
     network: u8,
     mnemonic: *const c_char,
     password: *const c_char,
+    is_new_wallet: bool,
 ) -> GrinFfiResult {
     ffi_guard! {
         let chain_type = chain_type_from_u8(network)?;
@@ -480,7 +483,10 @@ pub unsafe extern "C" fn grin_test_create_wallet(
         let mode = if data_dir.join(SEED_FILE).exists() {
             OpenMode::Open
         } else {
-            OpenMode::Create(mnemonic)
+            OpenMode::Create {
+                mnemonic,
+                is_new: is_new_wallet,
+            }
         };
         let client = test_chain.client(client_id);
         let opened = open_backend(FfiNodeClient::Local(client.clone()), &data_dir, password, mode)
@@ -507,6 +513,7 @@ pub unsafe extern "C" fn grin_test_create_wallet(
             api_secret: None,
             socks_proxy: None,
             timeout: Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS),
+            enabled: true,
         };
         let handle = register_session(|h| {
             let mut s = WalletSession::new(h, chain_type, wallet, mask, node, lease);

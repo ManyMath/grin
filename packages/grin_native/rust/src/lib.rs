@@ -41,7 +41,10 @@ pub use crate::lifecycle::{
 };
 pub use crate::logging::grin_init_logs;
 pub use crate::proof::{grin_payment_proof_export, grin_payment_proof_verify};
-pub use crate::scan::{grin_wallet_scan, grin_wallet_scan_cancel, grin_wallet_scan_progress};
+pub use crate::scan::{
+    grin_wallet_get_last_scanned_height, grin_wallet_scan, grin_wallet_scan_cancel,
+    grin_wallet_scan_progress,
+};
 pub use crate::slatepack::grin_slatepack_decode;
 #[cfg(feature = "test-utils")]
 pub use crate::test_support::{grin_test_create_wallet, grin_test_mine_blocks, grin_test_panic};

@@ -50,8 +50,9 @@ final class _FakeBackend implements GrinWalletBackend {
     required GrinWalletConfig config,
     String? mnemonic,
     required String password,
+    bool isNewWallet = false,
   }) async {
-    calls.add('create');
+    calls.add(isNewWallet ? 'create new' : 'create');
     wallets.add(config.walletDir);
     return _FakeWallet(config);
   }

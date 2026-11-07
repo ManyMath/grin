@@ -27,6 +27,7 @@ void main() {
     final alice = await wallet('alice');
     final bob = await wallet('bob');
     expect(alice.network, GrinNetwork.automatedTesting);
+    expect(await alice.lastScannedHeight(), 0);
     expect(
       (await alice.getAddress()).slatepackAddress,
       isNot((await bob.getAddress()).slatepackAddress),
@@ -44,6 +45,8 @@ void main() {
 
     final balance = await alice.getBalance(minimumConfirmations: 1);
     expect(balance.refreshedFromNode, isTrue);
+    // A refresh records the tip as scanned.
+    expect(await alice.lastScannedHeight(), height);
     expect(balance.amountCurrentlySpendable, greaterThan(BigInt.zero));
     expect(balance.total, greaterThanOrEqualTo(balance.spendable));
     expect((await bob.getBalance(minimumConfirmations: 1)).total, BigInt.zero);
@@ -52,6 +55,7 @@ void main() {
     final result = await alice.scan();
     expect(result.tipHeight, height);
     expect(result.scannedHeight, result.tipHeight);
+    expect(await alice.lastScannedHeight(), result.scannedHeight);
 
     final progress = alice.scanProgress();
     expect(progress.isScanning, isFalse);
@@ -70,6 +74,39 @@ void main() {
 
     final after = await alice.getBalance(minimumConfirmations: 1);
     expect(after.amountCurrentlySpendable, balance.amountCurrentlySpendable);
+  });
+
+  test('a new wallet from a mnemonic refreshes from the tip', () async {
+    final root = await makeTempDir('grin_chain_');
+    final chainDir = Directory(p.join(root.path, 'chain'))..createSync();
+    Future<GrinWalletClient> wallet(String id, {String? mnemonic}) async {
+      final client = await GrinTestChain.createWallet(
+        chainDir: chainDir.path,
+        walletDir: p.join(root.path, id),
+        clientId: id,
+        mnemonic: mnemonic,
+        isNewWallet: mnemonic != null,
+        password: 'pw',
+      );
+      addTearDown(client.close);
+      return client;
+    }
+
+    final miner = await wallet('miner');
+    final fresh = await wallet('fresh', mnemonic: knownMnemonic);
+    final height = await GrinTestChain.mineBlocks(miner, 3);
+    expect(await fresh.lastScannedHeight(), 0);
+    final balance = await fresh.getBalance(minimumConfirmations: 1);
+    expect(balance.refreshedFromNode, isTrue);
+    expect(balance.total, BigInt.zero);
+    expect(await fresh.lastScannedHeight(), height);
+
+    // The flag does not change the keys.
+    final restored = await createTestWallet(
+      await makeTempDir(),
+      mnemonic: knownMnemonic,
+    );
+    expect(await restored.getAddress(), await fresh.getAddress());
   });
 
   test('reusing a client id re-attaches the same wallet', () async {

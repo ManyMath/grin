@@ -211,6 +211,12 @@ impl WalletSession {
         self.node.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// Fails with a Node error, before anything is read or sent, when the
+    /// wallet's network is turned off.
+    pub fn require_network(&self) -> Result<(), GrinError> {
+        self.node_settings().require_enabled()
+    }
+
     /// Clones the wallet's node client so network calls run without the
     /// wallet mutex held.
     pub fn node_client(&self) -> Result<FfiNodeClient, GrinError> {

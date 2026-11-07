@@ -268,11 +268,47 @@ void main() {
     final spendable = (await balanceOf(w.alice)).spendable;
     expect(spendable, reward * BigInt.from(3));
 
+    // An invoice for another amount than the one confirmed is refused
+    // before anything is recorded or locked.
+    final txsBefore = (await w.alice.getTransactions(refreshFromNode: false))
+        .transactions
+        .length;
+    await expectLater(
+      w.alice.processInvoice(
+        i1.armoredSlatepack,
+        GrinProcessInvoiceArgs(
+          minimumConfirmations: 1,
+          selectionStrategyIsAll: true,
+          expectedAmount: amount - BigInt.one,
+        ),
+      ),
+      throwsA(
+        isA<GrinTransactionException>()
+            .having(
+              (e) => e.details?['invoice_amount'],
+              'invoice_amount',
+              amount.toInt(),
+            )
+            .having(
+              (e) => e.details?['expected_amount'],
+              'expected_amount',
+              (amount - BigInt.one).toInt(),
+            ),
+      ),
+    );
+    final untouched = await balanceOf(w.alice, refresh: false);
+    expect(untouched.spendable, spendable);
+    expect(untouched.amountLocked, BigInt.zero);
+    final txsAfter = await w.alice.getTransactions(refreshFromNode: false);
+    expect(txsAfter.transactions, hasLength(txsBefore));
+    expect(txsAfter.bySlateId(slateId), isNull);
+
     final i2 = await w.alice.processInvoice(
       i1.armoredSlatepack,
-      const GrinProcessInvoiceArgs(
+      GrinProcessInvoiceArgs(
         minimumConfirmations: 1,
         selectionStrategyIsAll: true,
+        expectedAmount: amount,
       ),
     );
     expect(i2.state, GrinSlateState.i2);
@@ -589,5 +625,69 @@ void main() {
       ),
       throwsA(isA<GrinInvalidAddressException>()),
     );
+  });
+
+  test('armored Slatepack lengths', () async {
+    // One 60 grin coinbase input and one change output per send. The
+    // numbers go to stdout so docs/architecture.md section 13 can record
+    // them; the bounds only catch a large change.
+    final w = await setUpWallets(blocks: 6);
+    final amount = BigInt.from(10) * grin;
+    final lengths = <String, int>{};
+
+    final s1Plain = await w.alice.initSend(
+      GrinSendArgs(amount: amount, minimumConfirmations: 1),
+    );
+    expect(s1Plain.isEncrypted, isFalse);
+    lengths['S1 plain'] = s1Plain.armoredSlatepack.length;
+    final s2FromPlain = await w.bob.receiveSlatepack(s1Plain.armoredSlatepack);
+    lengths['S2 (reply to plain S1, encrypted to sender)'] =
+        s2FromPlain.armoredSlatepack.length;
+    final s3FromPlain = await w.alice.finalizeSlatepack(
+      s2FromPlain.armoredSlatepack,
+      broadcast: false,
+    );
+    lengths['S3 (from plain S1)'] = s3FromPlain.armoredSlatepack.length;
+    await w.alice.cancelTransaction(slateId: s1Plain.slateId);
+    await w.bob.cancelTransaction(slateId: s1Plain.slateId);
+
+    final s1 = await w.alice.initSend(
+      GrinSendArgs(
+        amount: amount,
+        minimumConfirmations: 1,
+        recipientAddress: w.bobAddress,
+      ),
+    );
+    expect(s1.isEncrypted, isTrue);
+    lengths['S1 encrypted, payment proof'] = s1.armoredSlatepack.length;
+    final s2 = await w.bob.receiveSlatepack(s1.armoredSlatepack);
+    lengths['S2 encrypted, payment proof'] = s2.armoredSlatepack.length;
+    final s3 = await w.alice.finalizeSlatepack(s2.armoredSlatepack);
+    lengths['S3 (with payment proof)'] = s3.armoredSlatepack.length;
+    await GrinTestChain.mineBlocks(w.alice, 1);
+
+    final i1Plain = await w.bob.issueInvoice(GrinInvoiceArgs(amount: amount));
+    expect(i1Plain.isEncrypted, isFalse);
+    lengths['I1 plain'] = i1Plain.armoredSlatepack.length;
+    await w.bob.cancelTransaction(slateId: i1Plain.slateId);
+    final i1 = await w.bob.issueInvoice(
+      GrinInvoiceArgs(amount: amount, recipientAddress: w.aliceAddress),
+    );
+    expect(i1.isEncrypted, isTrue);
+    lengths['I1 encrypted'] = i1.armoredSlatepack.length;
+    final i2 = await w.alice.processInvoice(
+      i1.armoredSlatepack,
+      GrinProcessInvoiceArgs(minimumConfirmations: 1, expectedAmount: amount),
+    );
+    lengths['I2 encrypted'] = i2.armoredSlatepack.length;
+    final i3 = await w.bob.finalizeInvoice(i2.armoredSlatepack);
+    lengths['I3'] = i3.armoredSlatepack.length;
+
+    for (final entry in lengths.entries) {
+      stdout.writeln('slatepack length: ${entry.key}: ${entry.value}');
+    }
+    for (final length in lengths.values) {
+      expect(length, inInclusiveRange(200, 6000));
+    }
   });
 }

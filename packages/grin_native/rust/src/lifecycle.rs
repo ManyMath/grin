@@ -13,7 +13,7 @@ use grin_util::secp::key::SecretKey;
 use grin_util::ZeroingString;
 use grin_wallet_config::GRIN_WALLET_DIR;
 use grin_wallet_impls::DefaultWalletImpl;
-use grin_wallet_libwallet::{Error as LibwalletError, WalletInst};
+use grin_wallet_libwallet::{Error as LibwalletError, WalletInitStatus, WalletInst};
 use rand::RngCore;
 use serde::Serialize;
 use zeroize::{Zeroize, Zeroizing};
@@ -57,7 +57,13 @@ struct SeedFileShape {
 
 /// What `open_backend` does before opening.
 pub(crate) enum OpenMode {
-    Create(Option<ZeroingString>),
+    /// Creates the seed and database first. With a mnemonic and `is_new`,
+    /// the wallet is stored as needing no scan, as one without a mnemonic
+    /// is, so its first refresh starts near the chain tip.
+    Create {
+        mnemonic: Option<ZeroingString>,
+        is_new: bool,
+    },
     Open,
 }
 
@@ -102,14 +108,28 @@ pub(crate) fn open_backend(
     let mask = {
         let lc = wallet.lc_provider()?;
         lc.set_top_level_directory(top)?;
-        match mode {
-            OpenMode::Create(mnemonic) => {
-                lc.create_wallet(None, mnemonic, 32, password.clone(), false)?
+        let skip_scan = match mode {
+            OpenMode::Create { mnemonic, is_new } => {
+                let restored = mnemonic.is_some();
+                lc.create_wallet(None, mnemonic, 32, password.clone(), false)?;
+                is_new && restored
             }
-            OpenMode::Open => check_seed_file(data_dir)?,
+            OpenMode::Open => {
+                check_seed_file(data_dir)?;
+                false
+            }
+        };
+        let mask = lc
+            .open_wallet(None, password, true, false)
+            .map_err(|e| seed_error(e, OPEN_SEED_FAILED, data_dir))?;
+        if skip_scan {
+            // create_wallet stored InitNeedsScanning for the mnemonic.
+            let backend = lc.wallet_inst()?;
+            let mut batch = backend.batch(mask.as_ref())?;
+            batch.save_init_status(WalletInitStatus::InitNoScanning)?;
+            batch.commit()?;
         }
-        lc.open_wallet(None, password, true, false)
-            .map_err(|e| seed_error(e, OPEN_SEED_FAILED, data_dir))?
+        mask
     };
     Ok((Arc::new(grin_util::Mutex::new(wallet)), mask))
 }
@@ -311,7 +331,10 @@ fn wallet_not_found(wallet_dir: &str) -> GrinError {
 }
 
 /// Creates a wallet in `<wallet_dir>/wallet_data` and opens it. `mnemonic`
-/// may be NULL to generate a new 24-word seed. Returns `{"handle": u64}`.
+/// may be NULL to generate a new 24-word seed. With a mnemonic,
+/// `is_new_wallet` true marks the wallet as needing no scan, so its first
+/// refresh starts near the chain tip; false restores it and the first
+/// refresh scans from the first block. Returns `{"handle": u64}`.
 // # Safety
 // Every pointer argument must be NULL or point to a NUL-terminated string
 // that stays valid and unchanged until the call returns.
@@ -320,6 +343,7 @@ pub unsafe extern "C" fn grin_wallet_create(
     config_json: *const c_char,
     mnemonic: *const c_char,
     password: *const c_char,
+    is_new_wallet: bool,
 ) -> GrinFfiResult {
     ffi_guard! {
         let config = WalletConfig::parse(read_str(&config_json, "config_json")?)?;
@@ -360,12 +384,15 @@ pub unsafe extern "C" fn grin_wallet_create(
                 "path": found,
             })))
         } else {
-            config.node.http_client().and_then(|c| {
+            config.node.node_client().and_then(|c| {
                 open_backend(
-                    FfiNodeClient::Http(c),
+                    c,
                     &data_dir,
                     password,
-                    OpenMode::Create(mnemonic),
+                    OpenMode::Create {
+                        mnemonic,
+                        is_new: is_new_wallet,
+                    },
                 )
             })
         };
@@ -416,9 +443,8 @@ pub unsafe extern "C" fn grin_wallet_open(
         if !data_dir.join(SEED_FILE).is_file() {
             return Err(wallet_not_found(&config.wallet_dir));
         }
-        let client = config.node.http_client()?;
-        let (wallet, mask) =
-            open_backend(FfiNodeClient::Http(client), &data_dir, password, OpenMode::Open)?;
+        let client = config.node.node_client()?;
+        let (wallet, mask) = open_backend(client, &data_dir, password, OpenMode::Open)?;
 
         let chain_type = config.chain_type;
         let handle = register_session(|h| {
@@ -583,6 +609,8 @@ pub unsafe extern "C" fn grin_wallet_get_mnemonic(
 
 /// Points the wallet at another node (and optional SOCKS proxy) without
 /// reopening the database. `api_secret` and `socks_proxy` may be NULL.
+/// `network_enabled` false turns the network off: every call that would
+/// contact the node or send over HTTP then fails with Node at once.
 // # Safety
 // Every pointer argument must be NULL or point to a NUL-terminated string
 // that stays valid and unchanged until the call returns.
@@ -592,6 +620,7 @@ pub unsafe extern "C" fn grin_wallet_update_network(
     node_url: *const c_char,
     api_secret: *const c_char,
     socks_proxy: *const c_char,
+    network_enabled: bool,
 ) -> GrinFfiResult {
     ffi_guard! {
         let session = get_session(handle)?;
@@ -599,8 +628,8 @@ pub unsafe extern "C" fn grin_wallet_update_network(
         let secret = read_opt_nonempty(&api_secret, "api_secret")?;
         let proxy = read_opt_nonempty(&socks_proxy, "socks_proxy")?;
         let timeout = session.node_settings().timeout;
-        let settings = NodeSettings::new(url, secret, proxy, timeout)?;
-        let client = settings.http_client()?;
+        let settings = NodeSettings::new(url, secret, proxy, timeout, network_enabled)?;
+        let client = settings.node_client()?;
         // Both change while the wallet mutex is held, with the settings
         // lock taken inside it (the only place the two are held together),
         // so a reader holding the wallet mutex never sees the new client
@@ -608,7 +637,7 @@ pub unsafe extern "C" fn grin_wallet_update_network(
         let mut w = session.wallet.lock();
         let backend = w.lc_provider()?.wallet_inst()?;
         let mut node = session.node_settings();
-        *backend.w2n_client() = FfiNodeClient::Http(client);
+        *backend.w2n_client() = client;
         *node = settings;
         Ok(None)
     }

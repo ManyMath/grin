@@ -82,6 +82,7 @@ void main() {
             nodeUrl: 'http://127.0.0.1:2',
             apiSecret: null,
             socksProxy: null,
+            networkEnabled: true,
           ),
           throwsStateError,
         );

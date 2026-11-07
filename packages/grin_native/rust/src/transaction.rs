@@ -436,6 +436,7 @@ pub extern "C" fn grin_tx_estimate_fee(
 ) -> GrinFfiResult {
     ffi_guard! {
         let session = get_session(handle)?;
+        session.require_network()?;
         check_amount(amount)?;
         let args = InitTxArgs {
             amount,
@@ -660,6 +661,9 @@ fn tx_out(
 pub extern "C" fn grin_txs_get(handle: u64, refresh_from_node: bool) -> GrinFfiResult {
     ffi_guard! {
         let session = get_session(handle)?;
+        if refresh_from_node {
+            session.require_network()?;
+        }
         let mask = session.mask();
         let (refreshed, txs) = owner::retrieve_txs(
             session.wallet.clone(),
@@ -756,6 +760,7 @@ impl SendArgs {
 pub unsafe extern "C" fn grin_tx_init_send(handle: u64, args_json: *const c_char) -> GrinFfiResult {
     ffi_guard! {
         let session = get_session(handle)?;
+        session.require_network()?;
         let args: SendArgs = parse_args(args_json, "args_json")?;
         args.check()?;
         let recipient = args.recipient()?;
@@ -814,6 +819,7 @@ struct SendHttpOut {
 pub unsafe extern "C" fn grin_tx_send_http(handle: u64, args_json: *const c_char) -> GrinFfiResult {
     ffi_guard! {
         let session = get_session(handle)?;
+        session.require_network()?;
         let args: SendHttpArgs = parse_args(args_json, "args_json")?;
         args.send.check()?;
         let target = parse_address(&args.recipient_url_or_address)?;
@@ -922,6 +928,7 @@ pub unsafe extern "C" fn grin_tx_receive_slatepack(
 ) -> GrinFfiResult {
     ffi_guard! {
         let session = get_session(handle)?;
+        session.require_network()?;
         let armored = read_str(&armored_s1, "armored_s1")?;
         // Slate v4 has no message field; read only to check the argument.
         let _ = read_opt_str(&message, "message")?;
@@ -959,6 +966,9 @@ pub unsafe extern "C" fn grin_tx_finalize_slatepack(
 ) -> GrinFfiResult {
     ffi_guard! {
         let session = get_session(handle)?;
+        if broadcast {
+            session.require_network()?;
+        }
         let armored = read_str(&armored_s2, "armored_s2")?;
         let decoded = decode_with_wallet(&session, armored, ADDRESS_INDEX)?;
         require_state(&decoded.slate, SlateState::Standard2)?;
@@ -1010,6 +1020,7 @@ pub unsafe extern "C" fn grin_tx_issue_invoice(
 ) -> GrinFfiResult {
     ffi_guard! {
         let session = get_session(handle)?;
+        session.require_network()?;
         let args: InvoiceArgs = parse_args(args_json, "args_json")?;
         args.check()?;
         let payer = args
@@ -1044,11 +1055,32 @@ struct PayInvoiceArgs {
     selection_strategy_is_all: Option<bool>,
     #[serde(default)]
     ttl_blocks: Option<u64>,
+    /// Nanogrin the payer agreed to pay. When set, an I1 asking for any
+    /// other amount is refused before anything is recorded or locked.
+    #[serde(default)]
+    expected_amount: Option<u64>,
 }
 
 impl PayInvoiceArgs {
     fn check(&self) -> Result<(), GrinError> {
         check_ttl_blocks(self.ttl_blocks)
+    }
+
+    /// Compares the invoice amount with `expected_amount`, if given.
+    fn check_amount(&self, invoice_amount: u64) -> Result<(), GrinError> {
+        match self.expected_amount {
+            Some(expected) if expected != invoice_amount => Err(GrinError::new(
+                GrinErrorCode::Transaction,
+                format!(
+                    "the invoice asks for {invoice_amount} nanogrin, not the expected {expected}"
+                ),
+            )
+            .with_details(serde_json::json!({
+                "invoice_amount": invoice_amount,
+                "expected_amount": expected,
+            }))),
+            _ => Ok(()),
+        }
     }
 }
 
@@ -1064,12 +1096,14 @@ pub unsafe extern "C" fn grin_tx_process_invoice(
 ) -> GrinFfiResult {
     ffi_guard! {
         let session = get_session(handle)?;
+        session.require_network()?;
         let armored = read_str(&armored_i1, "armored_i1")?;
         let args: PayInvoiceArgs = parse_args(args_json, "args_json")?;
         args.check()?;
         let decoded = decode_with_wallet(&session, armored, ADDRESS_INDEX)?;
         let i1 = &decoded.slate;
         require_state(i1, SlateState::Invoice1)?;
+        args.check_amount(i1.amount)?;
         // The amount comes from the invoicer, and libwallet adds the fee to
         // it unchecked, as for a send.
         if i1.amount > MAX_AMOUNT {
@@ -1125,6 +1159,9 @@ pub unsafe extern "C" fn grin_tx_finalize_invoice(
 ) -> GrinFfiResult {
     ffi_guard! {
         let session = get_session(handle)?;
+        if broadcast {
+            session.require_network()?;
+        }
         let armored = read_str(&armored_i2, "armored_i2")?;
         let decoded = decode_with_wallet(&session, armored, ADDRESS_INDEX)?;
         require_state(&decoded.slate, SlateState::Invoice2)?;
@@ -1189,6 +1226,7 @@ pub unsafe extern "C" fn grin_tx_repost(
 ) -> GrinFfiResult {
     ffi_guard! {
         let session = get_session(handle)?;
+        session.require_network()?;
         let (tx_id, slate_id) = tx_selector(tx_id, slate_id)?;
         let slate = with_backend(&session, |w, _mask| {
             if let Some(entry) = repost_entry(w, tx_id, slate_id.as_ref())? {
@@ -1249,6 +1287,7 @@ pub unsafe extern "C" fn grin_tx_cancel(
 ) -> GrinFfiResult {
     ffi_guard! {
         let session = get_session(handle)?;
+        session.require_network()?;
         let (tx_id, slate_id) = tx_selector(tx_id, slate_id)?;
         let mask = session.mask();
         owner::cancel_tx(session.wallet.clone(), mask.as_ref(), &None, tx_id, slate_id)?;

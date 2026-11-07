@@ -219,15 +219,108 @@ void main() {
       nodeUrl: 'http://127.0.0.1:2',
       apiSecret: null,
       socksProxy: null,
+      networkEnabled: true,
     );
     await expectLater(
       wallet.updateNetwork(
         nodeUrl: 'not a url',
         apiSecret: null,
         socksProxy: null,
+        networkEnabled: true,
       ),
       throwsA(isA<GrinException>()),
     );
+  });
+
+  test('with the network off nothing connects', () async {
+    final node = await _CountingServer.start();
+    final peer = await _CountingServer.start();
+    final dir = await makeTempDir();
+    final config = GrinWalletConfig(
+      walletDir: dir.path,
+      network: GrinNetwork.automatedTesting,
+      nodeUrl: node.url,
+      requestTimeout: const Duration(seconds: 2),
+      networkEnabled: false,
+    );
+    final wallet = await GrinWalletClient.create(
+      config: config,
+      mnemonic: knownMnemonic,
+      isNewWallet: true,
+      password: 'pw',
+    );
+    addTearDown(wallet.close);
+
+    final offline = throwsA(
+      isA<GrinNodeException>().having(
+        (e) => e.details?['reason'],
+        'reason',
+        'network_disabled',
+      ),
+    );
+    await expectLater(wallet.getChainHeight(), offline);
+    await expectLater(wallet.getBalance(), offline);
+    await expectLater(wallet.getTransactions(), offline);
+    await expectLater(wallet.scan(), offline);
+    await expectLater(wallet.estimateFee(amount: BigInt.one), offline);
+    await expectLater(
+      wallet.initSend(GrinSendArgs(amount: BigInt.one)),
+      offline,
+    );
+    await expectLater(
+      wallet.sendHttp(
+        GrinHttpSendArgs(amount: BigInt.one, recipientUrlOrAddress: peer.url),
+      ),
+      offline,
+    );
+    await expectLater(
+      wallet.issueInvoice(GrinInvoiceArgs(amount: BigInt.one)),
+      offline,
+    );
+    await expectLater(wallet.cancelTransaction(txId: 0), offline);
+
+    // What needs no node still works.
+    final balance = await wallet.getBalance(refreshFromNode: false);
+    expect(balance.refreshedFromNode, isFalse);
+    expect(await wallet.lastScannedHeight(), 0);
+    expect((await wallet.getAddress()).slatepackAddress, startsWith('tgrin1'));
+    await Future<void>.delayed(const Duration(milliseconds: 200));
+    expect(node.connections, 0);
+    expect(peer.connections, 0);
+
+    // The stateless check is not affected and shows that the server counts.
+    await expectLater(
+      GrinWalletClient.testNodeConnection(nodeUrl: node.url),
+      throwsA(isA<GrinNodeException>()),
+    );
+    expect(await node.waitAbove(0), isTrue);
+
+    final before = node.connections;
+    await wallet.updateNetwork(
+      nodeUrl: node.url,
+      apiSecret: null,
+      socksProxy: null,
+      networkEnabled: true,
+    );
+    await expectLater(
+      wallet.getChainHeight(),
+      throwsA(
+        isA<GrinNodeException>().having((e) => e.details, 'details', isNull),
+      ),
+    );
+    expect(await node.waitAbove(before), isTrue);
+
+    await wallet.updateNetwork(
+      nodeUrl: node.url,
+      apiSecret: null,
+      socksProxy: null,
+      networkEnabled: false,
+    );
+    final after = node.connections;
+    await expectLater(wallet.getChainHeight(), offline);
+    await Future<void>.delayed(const Duration(milliseconds: 200));
+    expect(node.connections, after);
+    expect(peer.connections, 0);
   });
 
   test('testNodeConnection reports an unreachable node', () async {
@@ -352,4 +445,34 @@ void main() {
     // The queue is still usable after the failure.
     expect(await wallet.runQueued(() async => 4), 4);
   });
+}
+
+/// A local TCP server that counts connections and closes each one at once.
+final class _CountingServer {
+  _CountingServer._(this._socket) {
+    _socket.listen((client) {
+      connections++;
+      client.destroy();
+    });
+    addTearDown(_socket.close);
+  }
+
+  static Future<_CountingServer> start() async => _CountingServer._(
+    await ServerSocket.bind(InternetAddress.loopbackIPv4, 0),
+  );
+
+  final ServerSocket _socket;
+  int connections = 0;
+
+  String get url => 'http://127.0.0.1:${_socket.port}';
+
+  /// Waits up to five seconds for more than [count] connections.
+  Future<bool> waitAbove(int count) async {
+    final deadline = DateTime.now().add(const Duration(seconds: 5));
+    while (DateTime.now().isBefore(deadline)) {
+      if (connections > count) return true;
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+    }
+    return false;
+  }
 }

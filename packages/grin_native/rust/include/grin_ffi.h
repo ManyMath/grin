@@ -110,11 +110,15 @@ struct GrinFfiResult grin_node_test_connection(const char *node_url,
 
 /*
  Creates a wallet in `<wallet_dir>/wallet_data` and opens it. `mnemonic`
- may be NULL to generate a new 24-word seed. Returns `{"handle": u64}`.
+ may be NULL to generate a new 24-word seed. With a mnemonic,
+ `is_new_wallet` true marks the wallet as needing no scan, so its first
+ refresh starts near the chain tip; false restores it and the first
+ refresh scans from the first block. Returns `{"handle": u64}`.
  */
 struct GrinFfiResult grin_wallet_create(const char *config_json,
                                         const char *mnemonic,
-                                        const char *password);
+                                        const char *password,
+                                        bool is_new_wallet);
 
 /*
  Opens an existing wallet. Returns `{"handle": u64}`.
@@ -157,11 +161,14 @@ struct GrinFfiResult grin_wallet_get_mnemonic(uint64_t handle, const char *passw
 /*
  Points the wallet at another node (and optional SOCKS proxy) without
  reopening the database. `api_secret` and `socks_proxy` may be NULL.
+ `network_enabled` false turns the network off: every call that would
+ contact the node or send over HTTP then fails with Node at once.
  */
 struct GrinFfiResult grin_wallet_update_network(uint64_t handle,
                                                 const char *node_url,
                                                 const char *api_secret,
-                                                const char *socks_proxy);
+                                                const char *socks_proxy,
+                                                bool network_enabled);
 
 /*
  Returns `{"mnemonic": "<words>"}` with 12, 15, 18, 21 or 24 new words.
@@ -204,6 +211,13 @@ struct GrinFfiResult grin_wallet_scan(uint64_t handle,
                                       bool delete_unconfirmed);
 
 /*
+ Returns `{"height": u64}`, the height of the last block the wallet saved
+ as scanned (by `grin_wallet_scan` or a refresh from the node), or 0 when
+ it has never scanned. Reads the wallet database and contacts no node.
+ */
+struct GrinFfiResult grin_wallet_get_last_scanned_height(uint64_t handle);
+
+/*
  Reads the scan progress atomics. Takes no wallet lock.
  */
 struct GrinFfiResult grin_wallet_scan_progress(uint64_t handle);
@@ -230,14 +244,17 @@ struct GrinFfiResult grin_slatepack_decode(uint64_t handle,
 /*
  Creates (or opens, if `wallet.seed` exists) a wallet in
  `<wallet_dir>/wallet_data` connected to the in-process chain in
- `chain_dir` as `client_id`. Returns `{"handle": u64}`.
+ `chain_dir` as `client_id`. `is_new_wallet` works as in
+ `grin_wallet_create` and is ignored when the wallet is opened. Returns
+ `{"handle": u64}`.
  */
 struct GrinFfiResult grin_test_create_wallet(const char *chain_dir,
                                              const char *wallet_dir,
                                              const char *client_id,
                                              uint8_t network,
                                              const char *mnemonic,
-                                             const char *password);
+                                             const char *password,
+                                             bool is_new_wallet);
 #endif
 
 #if defined(GRIN_FFI_TEST_UTILS)

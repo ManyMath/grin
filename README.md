@@ -9,7 +9,7 @@ A Rust crate and two pure Dart packages, one repository:
 
 | Layer | Where | What |
 |---|---|---|
-| `grin-ffi` (Rust) | `packages/grin_native/rust` | a C ABI over a thin fork of `grin-wallet` 5.5.1: 35 functions, the 32 fallible ones return `GrinFfiResult {code, data, error}` and run inside a panic guard (the three free and finalizer functions return void and catch panics); wallets are u64 handles |
+| `grin-ffi` (Rust) | `packages/grin_native/rust` | a C ABI over a thin fork of `grin-wallet` 5.5.1: 36 functions, the 33 fallible ones return `GrinFfiResult {code, data, error}` and run inside a panic guard (the three free and finalizer functions return void and catch panics); wallets are u64 handles |
 | `grin` (pure Dart) | `packages/grin` | the backend-neutral contract: typed models (`BigInt` nanogrin), a sealed `GrinException` hierarchy, units, events and the `GrinWalletApi` and `GrinWalletBackend` interfaces. No native code, no runtime dependencies; it compiles to JavaScript |
 | `grin_native` (pure Dart) | `packages/grin_native` | the native backend: ffigen bindings, `GrinWalletClient` (implements `GrinWalletApi`), `GrinNativeBackend` and the single native-assets build hook; re-exports all of `grin`, so an app depends on `grin_native` alone |
 
@@ -59,7 +59,7 @@ dart run tool/ci.dart                               # everything
 library with the host toolchain through the hook. The workspace pubspec
 turns on `test_utils`, which exports the three `grin_test_*` functions the
 Dart tests drive an in-process chain with. `tool/ci.dart` checks with
-`llvm-nm` that release builds made without it export exactly the 35 standard
+`llvm-nm` that release builds made without it export exactly the 36 standard
 functions and none of the test ones.
 
 The Rust toolchain is pinned by `packages/grin_native/rust/rust-toolchain.toml`

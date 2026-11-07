@@ -11,7 +11,7 @@
 //   rust-clippy      clippy with and without test-utils, -D warnings
 //   rust-test        cargo test --features test-utils (includes the C11/C++11
 //                    header test and the end-to-end chain tests)
-//   rust-release     host release build; nm: 35 grin_ symbols, 0 grin_test_
+//   rust-release     host release build; nm: 36 grin_ symbols, 0 grin_test_
 //   android          release builds for aarch64, armv7 and x86_64 Android with
 //                    NDK 28.2 through cargo-ndk; nm on each
 //   bindings         tool/regen_bindings.dart --check (header and ffigen output
@@ -39,7 +39,7 @@ import 'dart:io';
 
 const _ndkVersion = '28.2.13676358';
 const _ndkHome = '/home/user/Android/Sdk/ndk/$_ndkVersion';
-const _standardSymbolCount = 35;
+const _standardSymbolCount = 36;
 
 const _androidTargets = {
   'aarch64-linux-android': 'arm64-v8a',

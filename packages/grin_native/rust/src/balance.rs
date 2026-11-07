@@ -48,6 +48,7 @@ fn node_error(e: impl std::fmt::Display) -> GrinError {
 pub extern "C" fn grin_wallet_get_chain_height(handle: u64) -> GrinFfiResult {
     ffi_guard! {
         let session = get_session(handle)?;
+        session.require_network()?;
         let client = session.node_client()?;
         let (height, hash) = client.get_chain_tip().map_err(node_error)?;
         to_json(&TipOut { height, hash })
@@ -63,6 +64,9 @@ pub extern "C" fn grin_wallet_get_balance(
 ) -> GrinFfiResult {
     ffi_guard! {
         let session = get_session(handle)?;
+        if refresh_from_node {
+            session.require_network()?;
+        }
         let mask = session.mask();
         let (refreshed, info) = owner::retrieve_summary_info(
             session.wallet.clone(),
@@ -106,6 +110,7 @@ pub unsafe extern "C" fn grin_node_test_connection(
             secret,
             proxy,
             Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS),
+            true,
         )?;
         let mut client = settings.http_client()?;
         let version = client.get_version_info().ok_or_else(|| {

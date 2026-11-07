@@ -97,6 +97,7 @@ fn test_wallet(chain: &Path, dir: &Path, client_id: &str) -> u64 {
         AUTOMATED,
         ptr::null(),
         cs(PASSWORD).as_ptr(),
+        false,
     ))
     .unwrap();
     v["handle"].as_u64().unwrap()
@@ -517,12 +518,44 @@ fn invoice_i1_i2_i3_locks_payer_inputs() {
 
     let spendable = u(&balance(alice, true)["amount_currently_spendable"]);
     assert_eq!(spendable, 3 * REWARD);
+    let alice_txs = txs(alice, false)["txs"].as_array().unwrap().len();
+
+    // An invoice for another amount than the payer agreed to is refused
+    // before anything is recorded or locked.
+    let e = call!(grin_tx_process_invoice(
+        alice,
+        cs(&armored(&i1)).as_ptr(),
+        cs(
+            &json!({"min_confirms": 1, "selection_strategy_is_all": true,
+            "expected_amount": amount - 1})
+            .to_string()
+        )
+        .as_ptr(),
+    ))
+    .unwrap_err();
+    assert_eq!(e.0, TRANSACTION, "{}", e.1);
+    assert_eq!(u(&e.1["details"]["invoice_amount"]), amount);
+    assert_eq!(u(&e.1["details"]["expected_amount"]), amount - 1);
+    let b = balance(alice, false);
+    assert_eq!(u(&b["amount_currently_spendable"]), spendable, "{b}");
+    assert_eq!(u(&b["amount_locked"]), 0, "{b}");
+    let after = txs(alice, false);
+    assert_eq!(after["txs"].as_array().unwrap().len(), alice_txs, "{after}");
+    assert!(after["txs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|t| t["slate_id"] != slate_id.as_str()));
 
     let i2 = call!(grin_tx_process_invoice(
         alice,
         cs(&armored(&i1)).as_ptr(),
-        cs(r#"{"min_confirms": 1, "selection_strategy_is_all": true, "ttl_blocks": null}"#)
-            .as_ptr(),
+        cs(
+            &json!({"min_confirms": 1, "selection_strategy_is_all": true,
+            "ttl_blocks": null, "expected_amount": amount})
+            .to_string()
+        )
+        .as_ptr(),
     ))
     .unwrap();
     assert_eq!(i2["state"], "I2");

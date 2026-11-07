@@ -49,6 +49,9 @@ abstract interface class GrinWalletBackend {
 
   /// Asks a node for its version and chain tip without a wallet.
   ///
+  /// It is stateless, so no wallet's [GrinWalletConfig.networkEnabled]
+  /// applies to it.
+  ///
   /// Throws [GrinNodeException] when it cannot be reached and
   /// [GrinInvalidArgumentException] for a bad URL or proxy.
   Future<GrinNodeInfo> testNodeConnection({
@@ -60,8 +63,16 @@ abstract interface class GrinWalletBackend {
   /// Creates a wallet in `<config.walletDir>/wallet_data` and opens it.
   ///
   /// With a null [mnemonic] a new 24-word seed is generated; otherwise the
-  /// 12 to 24 word phrase is restored, and the wallet needs a [GrinWalletApi.scan] to find
-  /// its outputs. Nothing contacts the node.
+  /// 12 to 24 word phrase is used. Nothing contacts the node.
+  ///
+  /// [isNewWallet] says whether that phrase was just generated (by
+  /// [generateMnemonic], for example) and so has no history on the chain.
+  /// When true, the wallet is stored as needing no scan, as one created
+  /// without a mnemonic is: its first refresh from the node looks only at
+  /// the last 2880 blocks below the tip instead of the whole chain. Leave it
+  /// false to restore a phrase that may have been used before; the first
+  /// refresh then scans from the first block, or call [GrinWalletApi.scan]
+  /// with a start height. Without a mnemonic it changes nothing.
   ///
   /// Throws [GrinWalletExistsException] if the directory already holds a
   /// wallet, [GrinInvalidMnemonicException] for a bad phrase and
@@ -75,6 +86,7 @@ abstract interface class GrinWalletBackend {
     required GrinWalletConfig config,
     String? mnemonic,
     required String password,
+    bool isNewWallet = false,
   });
 
   /// Opens the wallet in `<config.walletDir>/wallet_data`. Nothing contacts

@@ -1,5 +1,5 @@
 # Release build of grin-ffi for x86_64-pc-windows-msvc with the host
-# toolchain (rustup with the MSVC linker), and the export gate: 35 grin_
+# toolchain (rustup with the MSVC linker), and the export gate: 36 grin_
 # functions and no grin_test_ ones. This is what the build hook does on a
 # Windows host. Run in PowerShell:
 #
@@ -38,7 +38,7 @@ else {
     $std = @($exports | Where-Object { $_ -notlike 'grin_test_*' }).Count
     $test = @($exports | Where-Object { $_ -like 'grin_test_*' }).Count
     Write-Output "exports grin_ffi.dll: $std standard, $test test symbols"
-    if ($std -ne 35 -or $test -ne 0) { Write-Output 'EXPORT_FAIL'; $fail = $true }
+    if ($std -ne 36 -or $test -ne 0) { Write-Output 'EXPORT_FAIL'; $fail = $true }
   }
 }
 

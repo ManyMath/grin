@@ -63,7 +63,27 @@ void main() {
         'node_api_secret': null,
         'socks_proxy': '127.0.0.1:9050',
         'request_timeout_secs': 2,
+        'network_enabled': true,
       });
+    });
+
+    test('GrinWalletConfig.networkEnabled', () {
+      const off = GrinWalletConfig(
+        walletDir: '/w',
+        network: GrinNetwork.mainnet,
+        nodeUrl: 'http://n',
+        networkEnabled: false,
+      );
+      const on = GrinWalletConfig(
+        walletDir: '/w',
+        network: GrinNetwork.mainnet,
+        nodeUrl: 'http://n',
+      );
+      expect(off.toJson()['network_enabled'], false);
+      expect(on.networkEnabled, isTrue);
+      expect(off, isNot(on));
+      expect(off.hashCode, isNot(on.hashCode));
+      expect(off.toString(), contains('networkEnabled: false'));
     });
 
     test('GrinWalletConfig.toString hides the secret', () {

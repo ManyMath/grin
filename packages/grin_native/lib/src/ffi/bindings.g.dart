@@ -96,7 +96,9 @@ external void grin_string_free(ffi.Pointer<ffi.Char> ptr);
 
 /// Creates (or opens, if `wallet.seed` exists) a wallet in
 /// `<wallet_dir>/wallet_data` connected to the in-process chain in
-/// `chain_dir` as `client_id`. Returns `{"handle": u64}`.
+/// `chain_dir` as `client_id`. `is_new_wallet` works as in
+/// `grin_wallet_create` and is ignored when the wallet is opened. Returns
+/// `{"handle": u64}`.
 @ffi.Native<
   GrinFfiResult Function(
     ffi.Pointer<ffi.Char>,
@@ -105,6 +107,7 @@ external void grin_string_free(ffi.Pointer<ffi.Char> ptr);
     ffi.Uint8,
     ffi.Pointer<ffi.Char>,
     ffi.Pointer<ffi.Char>,
+    ffi.Bool,
   )
 >()
 external GrinFfiResult grin_test_create_wallet(
@@ -114,6 +117,7 @@ external GrinFfiResult grin_test_create_wallet(
   int network,
   ffi.Pointer<ffi.Char> mnemonic,
   ffi.Pointer<ffi.Char> password,
+  bool is_new_wallet,
 );
 
 /// Mines `count` blocks whose coinbase goes to `handle`'s wallet. Returns
@@ -259,18 +263,23 @@ external GrinFfiResult grin_wallet_close(int handle);
 external void grin_wallet_close_finalizer(ffi.Pointer<ffi.Void> token);
 
 /// Creates a wallet in `<wallet_dir>/wallet_data` and opens it. `mnemonic`
-/// may be NULL to generate a new 24-word seed. Returns `{"handle": u64}`.
+/// may be NULL to generate a new 24-word seed. With a mnemonic,
+/// `is_new_wallet` true marks the wallet as needing no scan, so its first
+/// refresh starts near the chain tip; false restores it and the first
+/// refresh scans from the first block. Returns `{"handle": u64}`.
 @ffi.Native<
   GrinFfiResult Function(
     ffi.Pointer<ffi.Char>,
     ffi.Pointer<ffi.Char>,
     ffi.Pointer<ffi.Char>,
+    ffi.Bool,
   )
 >()
 external GrinFfiResult grin_wallet_create(
   ffi.Pointer<ffi.Char> config_json,
   ffi.Pointer<ffi.Char> mnemonic,
   ffi.Pointer<ffi.Char> password,
+  bool is_new_wallet,
 );
 
 /// Deletes `<wallet_dir>/wallet_data`. A non-zero `handle` for this
@@ -302,6 +311,12 @@ external GrinFfiResult grin_wallet_get_balance(
 /// Returns `{"height": u64, "hash": String}` from the wallet's node.
 @ffi.Native<GrinFfiResult Function(ffi.Uint64)>()
 external GrinFfiResult grin_wallet_get_chain_height(int handle);
+
+/// Returns `{"height": u64}`, the height of the last block the wallet saved
+/// as scanned (by `grin_wallet_scan` or a refresh from the node), or 0 when
+/// it has never scanned. Reads the wallet database and contacts no node.
+@ffi.Native<GrinFfiResult Function(ffi.Uint64)>()
+external GrinFfiResult grin_wallet_get_last_scanned_height(int handle);
 
 /// Returns `{"mnemonic": "<words>"}` after checking the password.
 @ffi.Native<GrinFfiResult Function(ffi.Uint64, ffi.Pointer<ffi.Char>)>()
@@ -345,12 +360,15 @@ external GrinFfiResult grin_wallet_scan_progress(int handle);
 
 /// Points the wallet at another node (and optional SOCKS proxy) without
 /// reopening the database. `api_secret` and `socks_proxy` may be NULL.
+/// `network_enabled` false turns the network off: every call that would
+/// contact the node or send over HTTP then fails with Node at once.
 @ffi.Native<
   GrinFfiResult Function(
     ffi.Uint64,
     ffi.Pointer<ffi.Char>,
     ffi.Pointer<ffi.Char>,
     ffi.Pointer<ffi.Char>,
+    ffi.Bool,
   )
 >()
 external GrinFfiResult grin_wallet_update_network(
@@ -358,6 +376,7 @@ external GrinFfiResult grin_wallet_update_network(
   ffi.Pointer<ffi.Char> node_url,
   ffi.Pointer<ffi.Char> api_secret,
   ffi.Pointer<ffi.Char> socks_proxy,
+  bool network_enabled,
 );
 
 const addresses = _SymbolAddresses();

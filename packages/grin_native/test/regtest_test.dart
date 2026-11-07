@@ -144,6 +144,7 @@ void main() {
           nodeUrl: nodeUrl,
           apiSecret: null,
           socksProxy: socks,
+          networkEnabled: true,
         );
         final proxied = await wallet.sendHttp(
           GrinHttpSendArgs(
@@ -157,6 +158,7 @@ void main() {
           nodeUrl: nodeUrl,
           apiSecret: null,
           socksProxy: null,
+          networkEnabled: true,
         );
       }
 

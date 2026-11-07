@@ -96,8 +96,8 @@ fn header_exports_expected_functions() {
         })
         .count();
     assert_eq!(
-        count, 38,
-        "35 standard functions plus 3 test-utils functions"
+        count, 39,
+        "36 standard functions plus 3 test-utils functions"
     );
     assert_eq!(
         header.matches("#if defined(GRIN_FFI_TEST_UTILS)").count(),

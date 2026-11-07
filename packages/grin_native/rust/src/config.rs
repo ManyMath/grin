@@ -50,6 +50,10 @@ pub struct WalletConfigJson {
     pub socks_proxy: Option<String>,
     #[serde(default)]
     pub request_timeout_secs: Option<u64>,
+    /// False keeps the wallet off the network: no node call and no HTTP
+    /// send is made. Missing or null means true.
+    #[serde(default)]
+    pub network_enabled: Option<bool>,
 }
 
 /// Shown in place of the node API secret by the `Debug` impls.
@@ -68,6 +72,7 @@ impl fmt::Debug for WalletConfigJson {
             )
             .field("socks_proxy", &self.socks_proxy)
             .field("request_timeout_secs", &self.request_timeout_secs)
+            .field("network_enabled", &self.network_enabled)
             .finish()
     }
 }
@@ -101,6 +106,7 @@ impl WalletConfig {
             raw.node_api_secret.as_deref(),
             raw.socks_proxy.as_deref(),
             Duration::from_secs(timeout),
+            raw.network_enabled.unwrap_or(true),
         )?;
         Ok(WalletConfig {
             wallet_dir: raw.wallet_dir,
@@ -117,6 +123,8 @@ pub struct NodeSettings {
     pub api_secret: Option<String>,
     pub socks_proxy: Option<SocketAddr>,
     pub timeout: Duration,
+    /// False when the wallet must not contact the node or send over HTTP.
+    pub enabled: bool,
 }
 
 impl fmt::Debug for NodeSettings {
@@ -127,18 +135,21 @@ impl fmt::Debug for NodeSettings {
             .field("api_secret", &self.api_secret.as_ref().map(|_| REDACTED))
             .field("socks_proxy", &self.socks_proxy)
             .field("timeout", &self.timeout)
+            .field("enabled", &self.enabled)
             .finish()
     }
 }
 
 impl NodeSettings {
     /// Validates the URL and proxy. Empty strings count as absent for the
-    /// secret and the proxy.
+    /// secret and the proxy. The URL is checked even when `enabled` is
+    /// false.
     pub fn new(
         url: &str,
         api_secret: Option<&str>,
         socks_proxy: Option<&str>,
         timeout: Duration,
+        enabled: bool,
     ) -> Result<Self, GrinError> {
         let url = validate_node_url(url)?;
         let api_secret = api_secret.filter(|s| !s.is_empty()).map(str::to_owned);
@@ -151,7 +162,30 @@ impl NodeSettings {
             api_secret,
             socks_proxy,
             timeout,
+            enabled,
         })
+    }
+
+    /// The node client for a wallet with these settings: HTTP, or one that
+    /// refuses every call when the network is turned off.
+    pub fn node_client(&self) -> Result<FfiNodeClient, GrinError> {
+        if self.enabled {
+            Ok(FfiNodeClient::Http(self.http_client()?))
+        } else {
+            Ok(FfiNodeClient::Disabled(DisabledNodeClient {
+                url: self.url.clone(),
+                api_secret: self.api_secret.clone(),
+            }))
+        }
+    }
+
+    /// Fails with a Node error when the network is turned off.
+    pub fn require_enabled(&self) -> Result<(), GrinError> {
+        if self.enabled {
+            Ok(())
+        } else {
+            Err(network_disabled())
+        }
     }
 
     /// Builds an HTTP node client, routed through the SOCKS proxy if set.
@@ -220,6 +254,102 @@ pub fn parse_socks_proxy(input: &str) -> Result<SocketAddr, GrinError> {
     Ok(addr)
 }
 
+/// Message of the Node error returned while the network is turned off.
+pub const NETWORK_DISABLED: &str = "network access is turned off for this wallet";
+
+/// The Node error for a call that needs the network while it is turned off.
+/// `details.reason` lets a caller tell it from an unreachable node.
+pub fn network_disabled() -> GrinError {
+    GrinError::new(GrinErrorCode::Node, NETWORK_DISABLED)
+        .with_details(serde_json::json!({ "reason": "network_disabled" }))
+}
+
+/// Node client of a wallet whose network is turned off. It keeps the URL
+/// and secret so `NodeClient` can report them, and fails every request
+/// without opening a connection.
+#[derive(Clone)]
+pub struct DisabledNodeClient {
+    url: String,
+    api_secret: Option<String>,
+}
+
+impl DisabledNodeClient {
+    fn refused<T>() -> Result<T, LibwalletError> {
+        Err(LibwalletError::ClientCallback(NETWORK_DISABLED.to_owned()))
+    }
+}
+
+impl NodeClient for DisabledNodeClient {
+    fn node_url(&self) -> &str {
+        &self.url
+    }
+
+    fn set_node_url(&mut self, node_url: &str) {
+        self.url = node_url.to_owned();
+    }
+
+    fn node_api_secret(&self) -> Option<String> {
+        self.api_secret.clone()
+    }
+
+    fn set_node_api_secret(&mut self, node_api_secret: Option<String>) {
+        self.api_secret = node_api_secret;
+    }
+
+    fn post_tx(&self, _tx: &Transaction, _fluff: bool) -> Result<(), LibwalletError> {
+        Self::refused()
+    }
+
+    fn get_version_info(&mut self) -> Option<NodeVersionInfo> {
+        None
+    }
+
+    fn get_chain_tip(&self) -> Result<(u64, String), LibwalletError> {
+        Self::refused()
+    }
+
+    fn get_kernel(
+        &mut self,
+        _excess: &pedersen::Commitment,
+        _min_height: Option<u64>,
+        _max_height: Option<u64>,
+    ) -> Result<Option<(TxKernel, u64, u64)>, LibwalletError> {
+        Self::refused()
+    }
+
+    fn get_outputs_from_node(
+        &self,
+        _wallet_outputs: Vec<pedersen::Commitment>,
+    ) -> Result<HashMap<pedersen::Commitment, (String, u64, u64)>, LibwalletError> {
+        Self::refused()
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn get_outputs_by_pmmr_index(
+        &self,
+        _start_height: u64,
+        _end_height: Option<u64>,
+        _max_outputs: u64,
+    ) -> Result<
+        (
+            u64,
+            u64,
+            Vec<(pedersen::Commitment, pedersen::RangeProof, bool, u64, u64)>,
+        ),
+        LibwalletError,
+    > {
+        Self::refused()
+    }
+
+    fn height_range_to_pmmr_indices(
+        &self,
+        _start_height: u64,
+        _end_height: Option<u64>,
+    ) -> Result<(u64, u64), LibwalletError> {
+        Self::refused()
+    }
+}
+
 /// The node client inside every wallet. Production wallets talk HTTP; with
 /// the `test-utils` feature, test wallets talk to the in-process chain. One
 /// enum keeps a single concrete wallet type, so test wallets run through the
@@ -227,6 +357,7 @@ pub fn parse_socks_proxy(input: &str) -> Result<SocketAddr, GrinError> {
 #[derive(Clone)]
 pub enum FfiNodeClient {
     Http(HTTPNodeClient),
+    Disabled(DisabledNodeClient),
     #[cfg(feature = "test-utils")]
     Local(crate::test_support::TestNodeClient),
 }
@@ -235,6 +366,7 @@ macro_rules! delegate {
     ($self:ident, $c:ident => $e:expr) => {
         match $self {
             FfiNodeClient::Http($c) => $e,
+            FfiNodeClient::Disabled($c) => $e,
             #[cfg(feature = "test-utils")]
             FfiNodeClient::Local($c) => $e,
         }
@@ -351,6 +483,37 @@ mod tests {
         assert_eq!(c.node.url, "https://n.example");
         assert!(c.node.socks_proxy.is_none());
         assert_eq!(c.node.timeout, Duration::from_secs(30));
+        assert!(c.node.enabled);
+        assert!(matches!(
+            c.node.node_client().unwrap(),
+            FfiNodeClient::Http(_)
+        ));
+
+        for (value, enabled) in [("true", true), ("null", true), ("false", false)] {
+            let c = WalletConfig::parse(&format!(
+                r#"{{"wallet_dir":"/w","network":0,"node_url":"http://a","network_enabled":{value}}}"#
+            ))
+            .unwrap();
+            assert_eq!(c.node.enabled, enabled, "{value}");
+        }
+        let off = WalletConfig::parse(
+            r#"{"wallet_dir":"/w","network":0,"node_url":"http://a/","network_enabled":false}"#,
+        )
+        .unwrap();
+        let e = off.node.require_enabled().unwrap_err();
+        assert_eq!(e.code, GrinErrorCode::Node);
+        assert_eq!(e.details.unwrap()["reason"], "network_disabled");
+        // The disabled client answers without a connection and keeps the URL.
+        let client = off.node.node_client().unwrap();
+        assert!(matches!(client, FfiNodeClient::Disabled(_)));
+        assert_eq!(client.node_url(), "http://a");
+        let e: GrinError = client.get_chain_tip().unwrap_err().into();
+        assert_eq!(e.code, GrinErrorCode::Node);
+        let e = WalletConfig::parse(
+            r#"{"wallet_dir":"/w","network":0,"node_url":"ftp://a","network_enabled":false}"#,
+        )
+        .unwrap_err();
+        assert_eq!(e.code, GrinErrorCode::InvalidArgument);
 
         let e = WalletConfig::parse("{").unwrap_err();
         assert_eq!(e.code, GrinErrorCode::Json);
@@ -385,7 +548,7 @@ mod tests {
             assert_eq!(e.code, GrinErrorCode::InvalidArgument, "{url}");
             // grin_node_test_connection and grin_wallet_update_network go
             // through NodeSettings::new as well.
-            let e = NodeSettings::new(url, None, None, Duration::from_secs(1)).unwrap_err();
+            let e = NodeSettings::new(url, None, None, Duration::from_secs(1), true).unwrap_err();
             assert_eq!(e.code, GrinErrorCode::InvalidArgument, "{url}");
         }
         // An @ in the path is not userinfo.

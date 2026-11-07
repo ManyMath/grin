@@ -24,6 +24,9 @@ abstract final class GrinTestChain {
   /// chain is always automated testing, so use
   /// [GrinNetwork.automatedTesting] for flows that need funds.
   ///
+  /// [isNewWallet] works as in `GrinWalletClient.create` and is ignored when
+  /// the wallet is opened.
+  ///
   /// Like `GrinWalletClient.open`, this throws [GrinWalletBusyException] when
   /// the directory is held by another wallet in the process.
   static Future<GrinWalletClient> createWallet({
@@ -33,6 +36,7 @@ abstract final class GrinTestChain {
     GrinNetwork network = GrinNetwork.automatedTesting,
     String? mnemonic,
     required String password,
+    bool isNewWallet = false,
   }) async {
     final networkValue = network.value;
     final int handle;
@@ -48,6 +52,7 @@ abstract final class GrinTestChain {
                 networkValue,
                 toCStringSecretOrNull(mnemonic, arena),
                 toCStringSecret(password, arena),
+                isNewWallet,
               ),
             ),
           );

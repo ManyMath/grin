@@ -16,6 +16,7 @@ final class GrinWalletConfig {
     this.nodeApiSecret,
     this.socksProxy,
     this.requestTimeout,
+    this.networkEnabled = true,
   });
 
   /// The directory that holds the wallet. The files live in its `wallet_data`
@@ -39,6 +40,13 @@ final class GrinWalletConfig {
   /// The timeout of each node request, or null for the native default.
   final Duration? requestTimeout;
 
+  /// Whether the wallet may use the network. When false, every operation
+  /// that would contact the node or send over HTTP fails at once with a
+  /// `GrinNodeException` whose `details['reason']` is `network_disabled`,
+  /// and no connection is opened. [nodeUrl] must still be a valid URL.
+  /// Change it later with `GrinWalletApi.updateNetwork`.
+  final bool networkEnabled;
+
   /// The `config_json` document of the native library.
   Map<String, Object?> toJson() {
     final timeout = requestTimeout;
@@ -52,6 +60,7 @@ final class GrinWalletConfig {
           ? null
           : (timeout.inMicroseconds + Duration.microsecondsPerSecond - 1) ~/
                 Duration.microsecondsPerSecond,
+      'network_enabled': networkEnabled,
     };
   }
 
@@ -63,7 +72,8 @@ final class GrinWalletConfig {
       other.nodeUrl == nodeUrl &&
       other.nodeApiSecret == nodeApiSecret &&
       other.socksProxy == socksProxy &&
-      other.requestTimeout == requestTimeout;
+      other.requestTimeout == requestTimeout &&
+      other.networkEnabled == networkEnabled;
 
   @override
   int get hashCode => Object.hash(
@@ -73,6 +83,7 @@ final class GrinWalletConfig {
     nodeApiSecret,
     socksProxy,
     requestTimeout,
+    networkEnabled,
   );
 
   /// Leaves out the API secret, which must not end up in logs.
@@ -81,5 +92,6 @@ final class GrinWalletConfig {
       'GrinWalletConfig(walletDir: $walletDir, network: ${network.name}, '
       'nodeUrl: $nodeUrl, '
       'nodeApiSecret: ${nodeApiSecret == null ? 'none' : 'set'}, '
-      'socksProxy: $socksProxy, requestTimeout: $requestTimeout)';
+      'socksProxy: $socksProxy, requestTimeout: $requestTimeout, '
+      'networkEnabled: $networkEnabled)';
 }

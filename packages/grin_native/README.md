@@ -253,7 +253,7 @@ exports the `grin_test_*` functions that `GrinTestChain` needs. This
 repository's workspace `pubspec.yaml` sets it so that `dart test` works, which
 also applies to the example app; those builds are not release artifacts.
 `tool/ci.dart` checks with `llvm-nm` that release builds made without it
-export the 35 standard functions and none of the test ones.
+export the 36 standard functions and none of the test ones.
 
 There are no prebuilt or reproducible builds yet. Release artifacts are a
 later step, planned on [dnix](https://github.com/cypherstack/dnix); see

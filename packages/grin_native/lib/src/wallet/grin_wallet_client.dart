@@ -184,6 +184,9 @@ class GrinWalletClient implements GrinWalletApi, Finalizable {
 
   /// Asks a node for its version and chain tip without a wallet.
   ///
+  /// It is stateless, so no wallet's [GrinWalletConfig.networkEnabled]
+  /// applies to it.
+  ///
   /// Throws [GrinNodeException] when it cannot be reached and
   /// [GrinInvalidArgumentException] for a bad URL or proxy.
   static Future<GrinNodeInfo> testNodeConnection({
@@ -208,8 +211,15 @@ class GrinWalletClient implements GrinWalletApi, Finalizable {
   /// Creates a wallet in `<config.walletDir>/wallet_data` and opens it.
   ///
   /// With a null [mnemonic] a new 24-word seed is generated; otherwise the
-  /// 12 to 24 word phrase is restored, and the wallet needs a [scan] to find
-  /// its outputs. Nothing contacts the node.
+  /// 12 to 24 word phrase is used. Nothing contacts the node.
+  ///
+  /// [isNewWallet] says whether that phrase was just generated and so has
+  /// no history on the chain. When true, the wallet is stored as needing no
+  /// scan, as one created without a mnemonic is: its first refresh from the
+  /// node looks only at the last 2880 blocks below the tip. Leave it false
+  /// to restore a phrase that may have been used before; the first refresh
+  /// then scans from the first block, or call [scan] with a start height.
+  /// Without a mnemonic it changes nothing.
   ///
   /// Throws [GrinWalletExistsException] if the directory already holds a
   /// wallet, [GrinInvalidMnemonicException] for a bad phrase and
@@ -223,6 +233,7 @@ class GrinWalletClient implements GrinWalletApi, Finalizable {
     required GrinWalletConfig config,
     String? mnemonic,
     required String password,
+    bool isNewWallet = false,
   }) async {
     final configJson = jsonEncode(config.toJson());
     final handle = await Isolate.run(() {
@@ -233,6 +244,7 @@ class GrinWalletClient implements GrinWalletApi, Finalizable {
               toCStringSecret(configJson, arena),
               toCStringSecretOrNull(mnemonic, arena),
               toCStringSecret(password, arena),
+              isNewWallet,
             ),
           ),
         );
@@ -432,6 +444,13 @@ class GrinWalletClient implements GrinWalletApi, Finalizable {
   }
 
   @override
+  Future<int> lastScannedHeight() {
+    _ensureOpen();
+    final handle = _handle;
+    return _enqueue(() => _lastScannedHeight(handle));
+  }
+
+  @override
   GrinScanProgress scanProgress() {
     _ensureOpen();
     return GrinScanProgress.fromJson(
@@ -466,11 +485,18 @@ class GrinWalletClient implements GrinWalletApi, Finalizable {
     required String nodeUrl,
     required String? apiSecret,
     required String? socksProxy,
+    required bool networkEnabled,
   }) {
     _ensureOpen();
     final handle = _handle;
     return _enqueue(
-      () => _updateNetwork(handle, nodeUrl, apiSecret, socksProxy),
+      () => _updateNetwork(
+        handle,
+        nodeUrl,
+        apiSecret,
+        socksProxy,
+        networkEnabled,
+      ),
     );
   }
 
@@ -719,6 +745,13 @@ class GrinWalletClient implements GrinWalletApi, Finalizable {
     return GrinScanResult.fromJson(json);
   });
 
+  static Future<int> _lastScannedHeight(int handle) => Isolate.run(() {
+    final json = decodeJsonObject(
+      unwrapFfiResult(bindings.grin_wallet_get_last_scanned_height(handle)),
+    );
+    return readInt(json['height'], 'height');
+  });
+
   static Future<void> _changePassword(
     int handle,
     String oldPassword,
@@ -755,6 +788,7 @@ class GrinWalletClient implements GrinWalletApi, Finalizable {
     String nodeUrl,
     String? apiSecret,
     String? socksProxy,
+    bool networkEnabled,
   ) => Isolate.run(() {
     usingSecretArena((arena) {
       unwrapFfiResult(
@@ -763,6 +797,7 @@ class GrinWalletClient implements GrinWalletApi, Finalizable {
           toCString(nodeUrl, arena),
           toCStringSecretOrNull(apiSecret, arena),
           toCStringOrNull(socksProxy, arena),
+          networkEnabled,
         ),
       );
     });

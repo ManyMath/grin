@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Release builds of grin-ffi for the Apple targets with the host toolchain
-# (rustup and Xcode), and the symbol gate on each: 35 exported grin_
+# (rustup and Xcode), and the symbol gate on each: 36 exported grin_
 # functions and no grin_test_ ones. This is what the build hook does on a
 # Mac. Run on macOS:
 #
@@ -31,7 +31,7 @@ for t in aarch64-apple-darwin x86_64-apple-darwin aarch64-apple-ios aarch64-appl
   std=$(nm -gU "$lib" | awk '{print $3}' | grep -c '^_grin_' || true)
   test=$(nm -gU "$lib" | awk '{print $3}' | grep -c '^_grin_test_' || true)
   echo "nm $t: $std standard, $test test symbols"
-  if [ "$std" != 35 ] || [ "$test" != 0 ]; then echo "NM_FAIL $t"; fail=1; fi
+  if [ "$std" != 36 ] || [ "$test" != 0 ]; then echo "NM_FAIL $t"; fail=1; fi
 done
 
 if [ "${FLUTTER:-0}" = 1 ] && command -v flutter >/dev/null; then

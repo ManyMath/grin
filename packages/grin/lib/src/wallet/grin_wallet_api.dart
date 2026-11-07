@@ -48,6 +48,17 @@ import 'grin_wallet_event.dart';
 ///   [FormatException], also through the returned future. It means a
 ///   mismatch between the backend and its library, not a wallet problem.
 ///
+/// While the network is turned off (`GrinWalletConfig.networkEnabled`, or
+/// [updateNetwork] with `networkEnabled: false`), every operation that
+/// would contact the node or send over HTTP fails at once with a
+/// [GrinNodeException] whose `details['reason']` is `network_disabled`, and
+/// no connection is opened. That covers [getChainHeight], [scan],
+/// [estimateFee], [initSend], [sendHttp], [receiveSlatepack],
+/// [issueInvoice], [processInvoice], [repost], [cancelTransaction] and
+/// [verifyPaymentProof]; [getBalance] and [getTransactions] with
+/// `refreshFromNode`; and [finalizeSlatepack] and [finalizeInvoice] with
+/// `broadcast`. The rest work from the wallet's own data.
+///
 /// Call [close] when you are done.
 abstract interface class GrinWalletApi {
   /// The directory the wallet was opened from, as it was given.
@@ -82,7 +93,8 @@ abstract interface class GrinWalletApi {
   ///
   /// With [refreshFromNode] the wallet first updates its outputs and
   /// transactions from the node. If the node cannot be reached, the stored
-  /// state comes back with `refreshedFromNode` false. [minimumConfirmations]
+  /// state comes back with `refreshedFromNode` false. While the network is
+  /// turned off, [refreshFromNode] throws [GrinNodeException] instead. [minimumConfirmations]
   /// is the depth an output needs to count as spendable, and must not be
   /// negative ([ArgumentError]).
   Future<GrinBalance> getBalance({
@@ -106,6 +118,15 @@ abstract interface class GrinWalletApi {
     int startHeight = 0,
     bool deleteUnconfirmed = false,
   });
+
+  /// The height of the last block the wallet recorded as scanned, by [scan]
+  /// or by a refresh from the node, or 0 if it has never scanned.
+  ///
+  /// After a cancelled or failed [scan], one above this is where the next
+  /// scan can start. Reads the wallet's own data and contacts no node. It
+  /// runs in the queue like other operations, so during a scan it answers
+  /// after the scan; use [scanProgress] for live progress.
+  Future<int> lastScannedHeight();
 
   /// The progress of the current or most recent scan.
   ///
@@ -137,10 +158,12 @@ abstract interface class GrinWalletApi {
   /// Points the wallet at another node without reopening the database.
   /// Nothing contacts the node.
   ///
-  /// This replaces the whole transport: [apiSecret] and [socksProxy] are
-  /// required so that a caller changing only the node has to restate them.
-  /// Passing null for [socksProxy] connects directly, without a proxy, and
-  /// passing null for [apiSecret] sends no node API secret.
+  /// This replaces the whole transport: [apiSecret], [socksProxy] and
+  /// [networkEnabled] are required so that a caller changing only the node
+  /// has to restate them. Passing null for [socksProxy] connects directly,
+  /// without a proxy, and passing null for [apiSecret] sends no node API
+  /// secret. With [networkEnabled] false the network is turned off as the
+  /// class documentation describes; [nodeUrl] is still checked.
   ///
   /// Like every operation it runs in the queue, so it starts only after the
   /// operations before it. To apply it during a long scan, call [cancelScan]
@@ -150,6 +173,7 @@ abstract interface class GrinWalletApi {
     required String nodeUrl,
     required String? apiSecret,
     required String? socksProxy,
+    required bool networkEnabled,
   });
 
   /// Computes the fee and the inputs a send of [amount] would use, without
@@ -180,7 +204,9 @@ abstract interface class GrinWalletApi {
   ///
   /// With [refreshFromNode] the outputs and transaction states are updated
   /// from the node first. If the node cannot be reached, the stored history
-  /// comes back with `refreshedFromNode` false. Entries are in log order.
+  /// comes back with `refreshedFromNode` false; while the network is turned
+  /// off, [refreshFromNode] throws [GrinNodeException] instead. Entries are
+  /// in log order.
   Future<GrinTxList> getTransactions({bool refreshFromNode = true});
 
   /// Reads a Slatepack with this wallet's keys, without changing anything.
@@ -284,9 +310,14 @@ abstract interface class GrinWalletApi {
   /// transaction is cancelled with [cancelTransaction]. The I2 is encrypted
   /// to the payee when the I1 named one.
   ///
+  /// Set [GrinProcessInvoiceArgs.expectedAmount] to the amount the user
+  /// confirmed: an invoice for any other amount is then refused with
+  /// [GrinTransactionException] before anything is recorded or locked.
+  ///
   /// Throws [GrinSlateException] when the text is not an I1,
   /// [GrinInsufficientFundsException], and [GrinTransactionException] when
-  /// the invoice was already paid or cancelled, or has expired.
+  /// the invoice was already paid or cancelled, has expired, or does not
+  /// match the expected amount.
   Future<GrinSlatepack> processInvoice(
     String armoredI1,
     GrinProcessInvoiceArgs args,

@@ -46,10 +46,12 @@ final class GrinNativeBackend implements GrinWalletBackend {
     required GrinWalletConfig config,
     String? mnemonic,
     required String password,
+    bool isNewWallet = false,
   }) => GrinWalletClient.create(
     config: config,
     mnemonic: mnemonic,
     password: password,
+    isNewWallet: isNewWallet,
   );
 
   @override
