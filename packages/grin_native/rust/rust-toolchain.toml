@@ -1,10 +1,10 @@
 [toolchain]
-channel = "1.94.0"
+channel = "1.99.1"
 profile = "minimal"
 components = ["rustfmt", "clippy"]
 
-# Every target the cargo build mode may be asked for. build-config.json
-# names the same Rust version; the flake fails evaluation if they differ.
+# Every target the build hook may be asked for. Rust 1.98 and later is
+# needed for Apple binaries that the iOS 27 and macOS 27 dyld accepts.
 targets = [
   "armv7-linux-androideabi",
   "aarch64-linux-android",

@@ -63,7 +63,7 @@ Dart tests drive an in-process chain with. `tool/ci.dart` checks with
 functions and none of the test ones.
 
 The Rust toolchain is pinned by `packages/grin_native/rust/rust-toolchain.toml`
-(1.94.0). The Android stage needs NDK 28.2.13676358 and `cargo-ndk`.
+(1.99.1). The Android stage needs NDK 28.2.13676358 and `cargo-ndk`.
 
 ## The grin-wallet fork
 

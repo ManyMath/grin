@@ -70,7 +70,7 @@ impl ScanProgressState {
     pub fn begin_scan(&self) -> ScanStart {
         let r = self
             .flags
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |f| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |f| {
                 if f & (SCANNING | CLOSED) == 0 {
                     Some(SCANNING)
                 } else {
@@ -93,7 +93,7 @@ impl ScanProgressState {
     /// nothing (and returns false) when no scan is running.
     pub fn request_cancel(&self) -> bool {
         self.flags
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |f| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |f| {
                 if f & SCANNING != 0 {
                     Some(f | CANCEL)
                 } else {
