@@ -159,8 +159,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // A leftover temporary file with open permissions must not keep them.
         fs::write(dir.path().join(SIDECAR_TMP), b"{}").unwrap();
-        fs::set_permissions(dir.path().join(SIDECAR_TMP), fs::Permissions::from_mode(0o644))
-            .unwrap();
+        fs::set_permissions(
+            dir.path().join(SIDECAR_TMP),
+            fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
         Sidecar::upsert(
             dir.path(),
             Uuid::new_v4(),
@@ -170,7 +173,10 @@ mod tests {
             },
         )
         .unwrap();
-        let mode = fs::metadata(path_of(dir.path())).unwrap().permissions().mode();
+        let mode = fs::metadata(path_of(dir.path()))
+            .unwrap()
+            .permissions()
+            .mode();
         assert_eq!(mode & 0o777, 0o600);
     }
 
