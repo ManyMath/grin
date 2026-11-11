@@ -42,6 +42,10 @@ abstract interface class GrinWalletBackend {
   /// validator such as Stack Wallet's
   /// `CryptoCurrency.validateAddress`. Same results and exceptions as
   /// [validateAddress].
+  ///
+  /// A backend that cannot answer without waiting (one that asks a remote
+  /// service, say) throws [GrinNotSupportedException] here and leaves the
+  /// work to [validateAddress].
   GrinAddressValidation validateAddressSync(
     String address,
     GrinNetwork network,

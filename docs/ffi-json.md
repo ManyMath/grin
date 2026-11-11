@@ -61,6 +61,12 @@ All amounts are `u64` nanogrin (1 grin = 1,000,000,000 nanogrin) written as
 JSON integers. Heights are `u64` integers. Nothing is a float or a decimal
 string.
 
+Every integer in a result or in error `details` is at most 2^63 - 1, so a
+reader with signed 64-bit integers can take it as it is. An amount or a TTL
+argument above that is `InvalidArgument`, a slate from another wallet that
+carries one is `Slate`, and a larger value libwallet reports (a sum in an
+`InsufficientFunds` error, for example) is written as 2^63 - 1.
+
 ## 2. Errors
 
 ### 2.1 Error JSON
@@ -90,10 +96,10 @@ Values are append-only; Dart maps them by number.
 | 6 | `WalletExists` | `grin_wallet_create` on a directory that already has `wallet.seed`, or that has leftover wallet data (`db/` or an LMDB file) without one. | `{"wallet_dir": string}` (as given); for leftover data also `"reason": "leftover_wallet_data"` and `"path"` (what was found, relative to `wallet_data`) |
 | 7 | `InvalidHandle` | Handle is 0, unknown, or already closed. | null |
 | 8 | `Lifecycle` | Other wallet open/close/seed failures from the lifecycle provider, including a damaged `wallet.seed` and a password change that failed after the old password was verified. | null; for a failed password change `{"seed_present": bool, "backup_file": string or null}` |
-| 9 | `Node` | The node could not be reached or gave an unusable answer, including a failed broadcast and a cancel that could not refresh first; or the wallet's network is turned off (section 3.1). | null, or `{"slate_id"}` (section 9.1); `{"reason": "network_disabled"}` while the network is off |
-| 10 | `InsufficientFunds` | Not enough spendable funds. | `{"required": u64, "available": u64}` |
-| 11 | `Slate` | Slate or Slatepack could not be parsed, encrypted, decrypted or is in the wrong state. | null, or `{"slate_id"}` (section 9.1) |
-| 12 | `Transaction` | Transaction building or bookkeeping failed, a payment proof does not verify, or an invoice does not ask for the expected amount. | null, or `{"slate_id"}` (section 9.1); `{"invoice_amount": u64, "expected_amount": u64}` for an amount mismatch |
+| 9 | `Node` | The node could not be reached or gave an unusable answer, including a failed broadcast and a cancel that could not refresh first; or the wallet's network is turned off (section 3.1). | null, or `{"slate_id"}` (section 9.1), with `"finalized": true` when a broadcast failed; `{"reason": "network_disabled"}` while the network is off |
+| 10 | `InsufficientFunds` | Not enough spendable funds. | `{"required": u64, "available": u64}`, each at most 2^63 - 1 (section 1.4) |
+| 11 | `Slate` | Slate or Slatepack could not be parsed, encrypted, decrypted or is in the wrong state; its slate id belongs to another kind of transaction in this wallet; or it carries an amount or TTL above 2^63 - 1. | null, or `{"slate_id"}` (section 9.1) |
+| 12 | `Transaction` | Transaction building or bookkeeping failed, a payment proof does not verify, an invoice does not ask for the expected amount, or the slate id is already used by another transaction in this wallet. | null, or `{"slate_id"}` (section 9.1), with `"released": true` when `grin_tx_send_http` unlocked the inputs again; `{"invoice_amount": u64, "expected_amount": u64}` for an amount mismatch |
 | 13 | `NotFound` | Transaction, stored finalized transaction or payment proof does not exist. | null, or `{"slate_id"}` (section 9.1) |
 | 14 | `Cancelled` | A running scan was stopped between batches by `grin_wallet_scan_cancel` or by closing the wallet. | `{"scanned_height": u64, "tip_height": u64}`, or null when the handle was closed before the scan started |
 | 15 | `Io` | File system error. | null |
@@ -256,7 +262,11 @@ See 1.1.
   `wallet.seed` and the database, then opens the wallet.
 - Returns `{"handle": u64}`.
 - If creation fails after this call made `wallet_data`, the directory is
-  removed again. Nothing is written for a config or mnemonic error.
+  removed again. In a `wallet_data` that was already there (and held no
+  seed and no database), the seed file and the database of the failed
+  create are removed and everything else in it is left alone. Either way
+  the next create starts clean. Nothing is written for a config or mnemonic
+  error.
 - A `wallet_data` without `wallet.seed` that still holds a database (`db/`
   or any `*.mdb` file, for example after a delete that stopped half way) is
   `WalletExists` with `"reason": "leftover_wallet_data"`: a new seed must not
@@ -524,6 +534,22 @@ create, open and delete); links higher up the path are fine.
   `grin_tx_process_invoice` adds it to failures after
   `process_invoice_tx` saved the transaction (locking the inputs and
   later).
+- Two more keys can come with the slate id. `"finalized": true` (code
+  `Node`) means the transaction is complete and stored and only the
+  broadcast failed: do not cancel it, broadcast it with `grin_tx_repost`.
+  `"released": true` (from `grin_tx_send_http`) means the send was
+  cancelled inside the call and its inputs are spendable again; there is
+  nothing left to cancel. A slate id with neither key names a transaction
+  that is still open and may hold locked inputs.
+- A slate id names one kind of transaction per wallet. An S2 is finalized
+  only for a send this wallet started and an I2 only for an invoice it
+  issued; an invoice is paid only under an id the wallet does not use yet
+  (its own unpaid invoice excepted, so a wallet can pay itself). Anything
+  else is refused before libwallet looks up the stored context: `Slate`
+  from the finalize calls, `Transaction` from `grin_tx_process_invoice`.
+- A slate from another wallet (an S1 to receive, an S2 or I2 to finalize,
+  an I1 to pay) whose amount or TTL cutoff height is above 2^63 - 1 is
+  refused with `Slate` before anything is recorded.
 - Arguments JSON: unknown keys are ignored. A missing required key or a
   wrong type is `Json`; a bad value is `InvalidArgument`. Optional keys may
   be absent or `null`.
@@ -591,8 +617,8 @@ Returned by `grin_tx_finalize_slatepack` (S3) and `grin_tx_finalize_invoice`
 | `armored_slatepack` | string | The finalized slate as an unencrypted Slatepack without sender, for reference. It is also stored in the sidecar. |
 
 If the broadcast fails, the call fails with `Node` and `details`
-`{"slate_id"}`. The transaction is finalized and stored by then; broadcast
-it with `grin_tx_repost`.
+`{"slate_id", "finalized": true}`. The transaction is finalized and stored
+by then; broadcast it with `grin_tx_repost`.
 
 ### `grin_tx_estimate_fee(handle, amount, min_confirms, selection_strategy_is_all, amount_includes_fee)`
 
@@ -768,15 +794,26 @@ it with `grin_tx_repost`.
 - Order: build the S1 (nothing locked yet), `check_version` and
   `receive_tx` on the other wallet with the wallet mutex released, lock the
   inputs, finalize, broadcast when `post`. A failed exchange leaves nothing
-  locked and nothing in the history.
+  locked, nothing in the history and no stored context.
+- The wallet is free during the round trip, so the inputs the S1 selected
+  are looked at again before they are locked. If another call took one in
+  the meantime the send fails with `Transaction` and nothing is locked.
+- If finalizing fails after the inputs were locked, the send is cancelled
+  inside the call (from stored state, without a node refresh): the inputs
+  are spendable again, the entry is `TxSentCancelled` and the error carries
+  `{"slate_id", "released": true}`. The other wallet's answer cannot be
+  asked for again, so there is nothing to retry with. Should that cancel
+  fail too, the error carries the slate id alone and the inputs stay locked
+  until `grin_tx_cancel`.
 - Returns
   `{"slate_id", "state": "S3", "amount": u64, "fee": u64, "kernel_excess": string, "posted": bool}`.
   The sidecar records the target as `counterparty_address`; there is no
   Slatepack.
 - Errors: `InvalidArgument`, `Json`, `InvalidAddress`, `InsufficientFunds`,
   `Http` (the other wallet could not be reached, refused the slate or
-  answered with something else), `Transaction`, `Node` with `{"slate_id"}`
-  (finalized but not broadcast).
+  answered with something else), `Slate`, `Transaction` (with
+  `{"slate_id", "released": true}` once inputs had been locked), `Node`
+  with `{"slate_id", "finalized": true}` (finalized but not broadcast).
 
 ### `grin_tx_receive_slatepack(handle, armored_s1, message)`
 
@@ -785,9 +822,9 @@ it with `grin_tx_repost`.
 - Adds this wallet's output and signature and returns a `GrinSlatepack`
   with state `S2`. When the S1 named a sender, the S2 is encrypted to it.
   The sidecar gets the S2 and the sender's address.
-- Errors: `Slate` (not a Slatepack, cannot be decrypted, or not an S1; the
-  message names the expected state), `Transaction` (already received,
-  expired), `InvalidUtf8`.
+- Errors: `Slate` (not a Slatepack, cannot be decrypted, not an S1 (the
+  message names the expected state), or an amount or TTL above 2^63 - 1),
+  `Transaction` (already received, expired), `InvalidUtf8`.
 
 ### `grin_tx_finalize_slatepack(handle, armored_s2, broadcast, fluff)`
 
@@ -798,11 +835,17 @@ it with `grin_tx_repost`.
   0 and no arguments) and the TTL cutoff height this wallet set on the S1
   (read from its TxSent entry; not checked for a late-locked send, which has
   no entry yet). Otherwise `Slate`, and nothing is signed.
-- Errors: `Slate` (not an S2, or a changed kernel or TTL), `NotFound` (this
-  wallet has no open transaction for the slate: unknown, or already
-  finalized), `Transaction` (bad signature, payment proof mismatch,
-  expired), `Node`. Every failure after the S2 is decoded carries
-  `{"slate_id"}`.
+- The slate id must belong to a send this wallet started: a `TxSent`
+  entry that is not an invoice payment, or (late-locked) no entry and a
+  context that still holds the send arguments. An S2 under the id of an
+  invoice this wallet issued or paid is `Slate`, and nothing is signed. An
+  id the wallet does not know at all is `NotFound`.
+- Errors: `Slate` (not an S2, a changed kernel or TTL, an id that belongs
+  to another kind of transaction, an amount or TTL above 2^63 - 1),
+  `NotFound` (this wallet has no open transaction for the slate: unknown,
+  or already finalized), `Transaction` (bad signature, payment proof
+  mismatch, expired), `Node` with `"finalized": true` (9.3). Every failure
+  after the S2 is decoded carries `{"slate_id"}`.
 
 ## 10. Invoices, repost, cancel and proofs
 
@@ -846,12 +889,19 @@ it with `grin_tx_repost`.
   Returns a `GrinSlatepack` with state `I2`, encrypted to the invoicer when
   the I1 named one.
 - An I1 whose amount is above 2^63 - 1 is `InvalidArgument`, before
-  anything is selected or locked.
-- Errors: `Slate` (not an I1), `InsufficientFunds`, `Transaction`
-  (already paid or cancelled, expired, not the expected amount), `Json`,
-  `InvalidArgument`. A
-  failure after libwallet saved the payment (locking the inputs, armoring
-  the I2) carries `{"slate_id"}`.
+  anything is selected or locked. An I1 with a TTL cutoff height above
+  2^63 - 1, or with a kernel that is not plain (`kernel_features` other
+  than 0, or any arguments), is `Slate`: a height-locked kernel would hold
+  the payment back until a height the invoicer picked.
+- The slate id must be new to this wallet, or be its own unpaid invoice
+  (a wallet paying itself). An id it already uses for a send, a receipt, a
+  paid invoice or a stored context is `Transaction`, and nothing is
+  selected or locked.
+- Errors: `Slate` (not an I1, a kernel that is not plain, a TTL out of
+  range), `InsufficientFunds`, `Transaction` (already paid or cancelled,
+  expired, not the expected amount, slate id already in use), `Json`,
+  `InvalidArgument`. A failure after libwallet saved the payment (locking
+  the inputs, armoring the I2) carries `{"slate_id"}`.
 
 ### `grin_tx_finalize_invoice(handle, armored_i2, broadcast, fluff)`
 
@@ -859,8 +909,13 @@ it with `grin_tx_repost`.
 - Returns a `GrinFinalized` with state `I3`.
 - The I2 must still carry a plain kernel, else `Slate`. The TTL is not
   compared: the payer sets it when paying.
+- The slate id must belong to an invoice this wallet issued (a
+  `TxReceived` entry in an invoice state). An I2 under the id of a send is
+  `Slate`: this path finalizes without a payment proof check, so a send's
+  context must never reach it. An id the wallet does not know at all is
+  `NotFound`.
 - Errors: as `grin_tx_finalize_slatepack`, with `Slate` for anything that
-  is not an I2.
+  is not an I2 or not this wallet's invoice.
 
 ### `grin_tx_repost(handle, tx_id, slate_id, fluff)`
 
@@ -880,6 +935,10 @@ it with `grin_tx_repost`.
   locked inputs become spendable again and its new outputs are dropped. The
   entry becomes `TxSentCancelled` or `TxReceivedCancelled`. libwallet first
   refreshes from the node and refuses to cancel without it.
+- A late-locked send (`late_lock` true) has no entry until it is
+  finalized, only a stored context. Cancel it by `slate_id` alone
+  (`tx_id` negative): the context and the sidecar entry are deleted, with
+  no node refresh, and its S2 can no longer be finalized (`NotFound`).
 - Returns `{"cancelled": true}`.
 - Errors: `InvalidArgument`, `NotFound`, `Transaction` (confirmed, a
   coinbase, or already cancelled), `Node`.

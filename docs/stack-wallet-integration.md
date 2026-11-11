@@ -149,6 +149,8 @@ Phase S is implemented on git.cypherstack.com, sneurlax/stack_wallet, as stacked
 
 Still open: S6 theme assets and CI, G8 device runs (Android, iOS, sandboxed macOS, Windows), and the Epic/MWC manual retests listed in #6 and #7.
 
+Update, 2026-11-11: G7 is settled by Stack Wallet itself, which takes `grin_native` and `grin` by git and builds from a clean pub cache. This repository and the fork were reviewed again; the changes are in `docs/architecture.md` D15, and the fork pin is now `ee6bc01`. Stack Wallet reads the new `finalized` and `released` error details.
+
 ## 4. Phase S: Stack Wallet work
 
 Each S phase is one branch cut from `github-cs/staging`, pushed to cypherstack and manymath only. Opening the GitHub PRs is up to you.

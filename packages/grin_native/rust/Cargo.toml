@@ -3,7 +3,7 @@ name = "grin-ffi"
 version = "0.1.0"
 edition = "2021"
 publish = false
-description = "C ABI over grin-wallet for package:grin"
+description = "C ABI over grin-wallet for package:grin_native"
 license = "Apache-2.0"
 # include/grin_ffi.h is the committed C header. build.rs regenerates it only
 # when GRIN_FFI_WRITE_HEADER=1 is set; tests/header_test.rs checks it.
@@ -47,7 +47,7 @@ tempfile = "3"
 cbindgen = "0.29"
 
 # A single-crate workspace: keeps cargo from looking for a parent workspace
-# above packages/grin/rust.
+# above packages/grin_native/rust.
 [workspace]
 
 [profile.release]

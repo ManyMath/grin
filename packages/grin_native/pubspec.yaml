@@ -1,7 +1,7 @@
 name: grin_native
 description: The native Grin wallet backend. Builds the grin-ffi Rust library with a build hook and implements package:grin's wallet interfaces over it; re-exports package:grin.
 version: 0.1.0
-repository: https://git.cypherstack.com/sneurlax/grin
+repository: https://git.cypherstack.com/sneurlax/grin_native
 # Not published. The maintainers decide when and where once the plugin has
 # been reviewed; never publish from a working tree.
 publish_to: none

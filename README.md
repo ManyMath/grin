@@ -70,9 +70,15 @@ The Rust toolchain is pinned by `packages/grin_native/rust/rust-toolchain.toml`
 `packages/grin_native/rust/Cargo.toml` depends on a fork of grin-wallet at
 `ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git`, branch
 `hardening`, pinned to commit
-`bf0e4db12f36e45fe3461b3bee43c6589dcdb0b9`. `hardening` is
-`optional-tor-rustls` (b5d756b) plus storage, seed-file, HTTP and refresh
-fixes; it is only on git.cypherstack.com for now. Cargo fetches
+`ee6bc01333d822352a2ebabd07e11690a02e945f`. `hardening` is
+`optional-tor-rustls` (b5d756b) plus fourteen commits: versioned storage
+and seed-file formats, 0600 transaction files, a seed that is zeroized and
+kept out of debug output, HTTP limits (response size, no redirects, a
+direct connection when no proxy is configured), and transaction
+bookkeeping fixes (contexts deleted on cancel, a cancel that works from
+stored state, cancelled inputs still refreshed, a late-locked send's
+payment proof checked before locking). It is only on git.cypherstack.com
+for now. Cargo fetches
 it with the git command line, so a machine that has not fetched it yet needs
 ssh read access to that host. See "Fetching the fork" in
 `packages/grin_native/README.md` for what that means inside the build hook.

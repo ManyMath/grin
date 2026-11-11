@@ -14,9 +14,12 @@ Map<String, Object?> decodeJsonObject(String? text) {
 
 /// Reads an unsigned integer amount (nanogrin) as a [BigInt].
 ///
-/// Accepts a JSON integer, or a decimal string for values the JSON decoder
-/// could not hold in a 64-bit integer. A negative value is a
-/// [FormatException].
+/// Accepts a JSON integer or a decimal string. grin_native writes every
+/// amount as a JSON integer of at most 2^63 - 1 (docs/ffi-json.md 1.4), so
+/// the VM's decoder always yields an [int]; the one string amount is in
+/// libwallet's payment proof format. A backend whose JSON decoder cannot
+/// hold 64-bit integers exactly (JavaScript holds 2^53) must write amounts
+/// as decimal strings. A negative value is a [FormatException].
 BigInt readBigInt(Object? value, String key) {
   final BigInt? parsed = switch (value) {
     int() => BigInt.from(value),

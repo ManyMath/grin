@@ -21,6 +21,11 @@ final class GrinWalletConfig {
 
   /// The directory that holds the wallet. The files live in its `wallet_data`
   /// subdirectory and nothing else in it is touched. It must not be empty.
+  ///
+  /// That is grin_native's layout. A backend without a file system takes
+  /// this as the name of the wallet's storage, whatever form that has; it
+  /// still must not be empty, and the same string names the same wallet in
+  /// `open` and `delete`.
   final String walletDir;
 
   /// The chain the wallet is on.

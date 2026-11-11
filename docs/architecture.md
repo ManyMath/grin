@@ -85,14 +85,14 @@ This document defines the clean-room architecture and implementation plan (**Pha
         │   ├── testing.dart            # GrinTestChain
         │   └── src/{ffi,wallet,testing}/
         ├── test/                       # mnemonic_address, bounds_and_panic, wallet_lifecycle, test_chain,
-        │                               # slatepack_e2e, memory, arguments, live_node, regtest
+        │                               # slatepack_e2e, memory, arguments, native_backend, live_node, regtest
         ├── example/                    # Flutter app (grin_native_example) + integration_test/app_test.dart
         │   └── lib/src/{wallet_paths,lifecycle_observer}.dart  # example code to copy
         ├── test_consumer/              # pure Dart app shape (grin_native_test_consumer): depends on grin_native alone
         └── README.md
 ```
 
-The `cypherstack/grin-wallet` fork (`v5.5.1` + submodule `grin` `v5.5.2`) is not part of this tree. It lives in its own repository (`ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git`, branch `hardening`, commit `bf0e4db1`, which is `optional-tor-rustls` at `b5d756bd` plus seven fix commits, with the `grin` submodule on `sneurlax/grin` branch `hardening`; checked out locally at `/home/user/src/grin-wallet`) and is pulled in by `packages/grin_native/rust/Cargo.toml` as a `rev`-pinned git dependency (see 4.1).
+The `cypherstack/grin-wallet` fork (`v5.5.1` + submodule `grin` `v5.5.2`) is not part of this tree. It lives in its own repository (`ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git`, branch `hardening`, commit `ee6bc013`, which is `optional-tor-rustls` at `b5d756bd` plus fourteen fix commits, with the `grin` submodule on `sneurlax/grin` branch `hardening`; checked out locally at `/home/user/src/grin-wallet`) and is pulled in by `packages/grin_native/rust/Cargo.toml` as a `rev`-pinned git dependency (see 4.1).
 
 ### 3.1 Why `packages/grin_native` Owns `hook/build.dart`
 
@@ -158,8 +158,8 @@ We fork `mimblewimble/grin-wallet` (`v5.5.1`, commit `f097811ee953fc81be4e70435d
 4. **Direct Dependencies in `packages/grin_native/rust/Cargo.toml` (No `grin_wallet_controller` Dev-Dependency)**:
    - Because `use grin_core as core;` etc. in [`impls/src/lib.rs`](file:///home/user/src/grin-wallet/impls/src/lib.rs#L27-L31) are private aliases rather than `pub use` re-exports, `packages/grin_native/rust/Cargo.toml` depends directly on `grin_wallet_impls` (`default-features = false, features = ["rustls"]`), `grin_wallet_libwallet`, `grin_wallet_config`, `grin_wallet_util`, `grin_core`, `grin_keychain`, `grin_chain`, `grin_store`, and `grin_util` from the exact same fork via one git source pinned by `rev` (Cargo fetches the fork's `grin` submodule for the `grin_*` node crates):
      ```toml
-     grin_wallet_impls = { git = "ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git", rev = "b5d756bdae51c71b1b2ec06dbf0695b37d50a850", default-features = false, features = ["rustls"] }
-     grin_wallet_libwallet = { git = "ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git", rev = "b5d756bdae51c71b1b2ec06dbf0695b37d50a850" }
+     grin_wallet_impls = { git = "ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git", rev = "ee6bc01333d822352a2ebabd07e11690a02e945f", default-features = false, features = ["rustls"] }
+     grin_wallet_libwallet = { git = "ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git", rev = "ee6bc01333d822352a2ebabd07e11690a02e945f" }
      # ... same git + rev for grin_wallet_config, grin_wallet_util, grin_core, grin_keychain, grin_chain, grin_store, grin_util
      ```
    - No `path` dependencies on the fork are committed, and no local wiring is needed: the fork is pushed to that URL and `Cargo.lock` records the pinned `rev` (D2 records the wiring used before the push). Cargo fetches it with the git command line (`rust/.cargo/config.toml`, and `CARGO_NET_GIT_FETCH_WITH_CLI` from the hook), so a machine whose cargo git database does not hold the rev yet needs ssh read access to git.cypherstack.com.
@@ -263,7 +263,7 @@ Every FFI function (except the `void` destructors `grin_ffi_result_free`, `grin_
 | 18 | **Sync, Scan & Balances** | `grin_wallet_get_balance(handle: u64, refresh_from_node: bool, min_confirms: u64) -> GrinFfiResult` | Calls `owner::retrieve_summary_info`, returns the `WalletInfo` fields as exact `u64` nanogrin under libwallet's own names (`total`, `amount_currently_spendable`, `amount_awaiting_confirmation`, `amount_awaiting_finalization`, `amount_immature`, `amount_locked`, `amount_reverted`, `last_confirmed_height`, `minimum_confirmations`) plus `refreshed_from_node` (docs/ffi-json.md section 8). |
 | 19 | | `grin_wallet_scan(handle: u64, start_height: u64, delete_unconfirmed: bool) -> GrinFfiResult` | Runs chunked UTXO scan (`internal::scan::scan`) updating `ScanProgressState` atomics and checking `cancel_requested` between batches. Non-destructive to `TxLogEntry` history! |
 | 20 | | `grin_wallet_scan_progress(handle: u64) -> GrinFfiResult` | **Lock-free**: reads `ScanProgressState` atomics (`is_scanning`, `scanned_height`, `tip_height`, `progress_pct`). |
-| 21 | | `grin_wallet_scan_cancel(handle: u64) -> GrinFfiResult` | **Lock-free**: sets `scan_state.cancel_requested = true`. |
+| 21 | | `grin_wallet_scan_cancel(handle: u64) -> GrinFfiResult` | **Lock-free**: sets `scan_state.cancel_requested = true` while a scan is running; with no scan running it does nothing, and a scan's start clears an earlier request. |
 | 22 | **Transactions & Slatepacks** | `grin_tx_estimate_fee(handle: u64, amount: u64, min_confirms: u64, selection_strategy_is_all: bool, amount_includes_fee: bool) -> GrinFfiResult` | Returns `{"fee": u64, "net_amount": u64, "inputs_count": u32}` or `GrinErrorCode::InsufficientFunds` with structured `{"required": u64, "available": u64}`. |
 | 23 | | `grin_txs_get(handle: u64, refresh_from_node: bool) -> GrinFfiResult` | Calls `owner::retrieve_txs` + joins sidecar `armored_slatepack` and fallback `counterparty_address`, and `confirmed_height` from the wallet's own outputs (`owner::retrieve_outputs`, max output height per `tx_log_entry`). |
 | 24 | | `grin_slatepack_decode(handle: u64, network: u8, armored_slatepack: *const c_char, secret_index: u32) -> GrinFfiResult` | Decodes unencrypted or `age`-encrypted Slatepack, parses `Slate` V4 (`id`, `state`, `amount`, `fee` from `fee_fields`, `kernel_excess` computed with `Slate::calc_excess` (`slate.rs` L631) when the slate carries a kernel, else null, `sender`, `recipient`, `ttl_cutoff_height`). `SlateState` also has an `Unknown` variant for pre-V4 slates (`slate.rs` L138-152), which is reported as `"Unknown"`. Uses `network` when `handle == 0`. |
@@ -280,7 +280,7 @@ Every FFI function (except the `void` destructors `grin_ffi_result_free`, `grin_
 | 35 | | `grin_payment_proof_verify(handle: u64, proof_json: *const c_char) -> GrinFfiResult` | Calls `owner::verify_payment_proof` and returns `{"is_sender": bool, "is_recipient": bool}`. |
 | 36 | **Sync, Scan & Balances** (added in D14) | `grin_wallet_get_last_scanned_height(handle: u64) -> GrinFfiResult` | Returns `{"height": u64}` from the wallet's `last_scanned_block` record, 0 if it never scanned. |
 
-*(Total standard exported C ABI functions: **36**. When compiled with `--features test-utils`, 3 additional test-only functions are exported: `grin_test_panic` (intentionally panics inside `ffi_guard!` so `dart test` can check `GrinErrorCode::InternalPanic`), `grin_test_create_wallet`, and `grin_test_mine_blocks`. They are exported for `dart test`, and the release pipeline verifies via `nm` that the Nix-built artifacts listed in the prebuilt manifest export zero `grin_test_*` symbols (7.2).)*
+*(Total standard exported C ABI functions: **36**. When compiled with `--features test-utils`, 3 additional test-only functions are exported: `grin_test_panic` (intentionally panics inside `ffi_guard!` so `dart test` can check `GrinErrorCode::InternalPanic`), `grin_test_create_wallet`, and `grin_test_mine_blocks`. They are exported for `dart test`, and `tool/ci.dart`, `tool/verify-apple.sh` and `tool/verify-windows.ps1` check with `nm` that cargo release builds export zero `grin_test_*` symbols (7.2; Nix and the prebuilt manifest were removed in D11).)*
 
 ---
 
@@ -381,7 +381,7 @@ A wallet with 0 balance cannot initiate an `S1` send (`init_send_tx` fails with 
 
 ### 7.3 Test Suites (Rust & Dart)
 1. **C/C++ Header Verification (`packages/grin_native/rust/tests/header_test.rs`)**:
-   - Compiles `target/include/grin_ffi.h` under both C11 and C++11 (`-Wall -Wextra -pedantic`).
+   - Compiles the committed `packages/grin_native/rust/include/grin_ffi.h` under both C11 and C++11 (`-Wall -Wextra -pedantic`) and compares it with what cbindgen generates.
 2. **Funded `S1 -> S2 -> S3` & `I1 -> I2 -> I3` E2E Tests (`ffi_e2e_test.rs` & `slatepack_e2e_test.dart`)**:
    - Creates Alice and Bob via `grin_test_create_wallet`, mines 5 blocks to Alice via `grin_test_mine_blocks` (maturing coinbase outputs since `AUTOMATED_TESTING_COINBASE_MATURITY = 3`), and runs:
      - Encrypted Slatepack send (`S1 -> S2 -> S3`), broadcast (`post_tx` mines a block in `WalletProxy`), and scan confirmation.
@@ -417,10 +417,10 @@ flowchart LR
    - Split ungated `HttpSlateSender` (`impls/src/adapters/http.rs`) from `#[cfg(feature = "tor")]` `TorSlateSender`.
    - Gate `tor/` and all 20 `tor`-only crates under the `tor` feature.
    - Add `rustls` (`reqwest/rustls-no-provider` + `ring` + `webpki-roots` via `tls_backend_preconfigured`) and propagate thread-local `CHAIN_TYPE` into `client_utils/client.rs` and `node_clients/http.rs` spawned threads.
-2. Initialize `/home/user/src/grin` Cargo workspace (`Cargo.toml`, `rust-toolchain.toml`, `crates/grin-ffi/Cargo.toml`) depending directly on `grin_wallet_impls` (`default-features = false, features = ["rustls"]`), `grin_wallet_libwallet`, `grin_wallet_config`, `grin_wallet_util`, `grin_core`, `grin_keychain`, `grin_chain`, `grin_store`, and `grin_util`, all as git dependencies on `ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git` pinned to `rev = "b5d756bdae51c71b1b2ec06dbf0695b37d50a850"`.
+2. Initialize `/home/user/src/grin` Cargo workspace (first `crates/grin-ffi`, now `packages/grin_native/rust`, D6: `Cargo.toml`, `rust-toolchain.toml`) depending directly on `grin_wallet_impls` (`default-features = false, features = ["rustls"]`), `grin_wallet_libwallet`, `grin_wallet_config`, `grin_wallet_util`, `grin_core`, `grin_keychain`, `grin_chain`, `grin_store`, and `grin_util`, all as git dependencies on `ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git` pinned by `rev` (first `b5d756bd`, now `ee6bc013`).
 3. Implement `error.rs` (`GrinErrorCode` including the appended `WalletBusy` discriminant, `GrinFfiResult`, `ffi_guard!`), `handle.rs` (`SESSION_REGISTRY`, `OPEN_DIRS` + `DirLease` keyed by the canonical data directory, `WalletSession` with `Drop` closing `WalletBackend` and then releasing its lease, per-thread `set_local_chain_type`, lock-free `ScanProgressState`), `logging.rs`, and `sidecar.rs`.
 4. Implement all **35** standard C ABI functions (plus the 3 `#[cfg(feature = "test-utils")]` exports, including `grin_test_panic`, in `test_support.rs` using `grin_wallet_impls::test_framework`).
-5. Configure `build.rs` + `cbindgen.toml` to generate `target/include/grin_ffi.h`.
+5. Configure `build.rs` + `cbindgen.toml` to generate the header (`$OUT_DIR/grin_ffi.h`, committed as `include/grin_ffi.h`).
 
 ### Phase 2: Pure Dart Package & Build Hook (`packages/grin_native`; the contract in `packages/grin`)
 Phase 2 was first built as one package named `grin`. D12 (2026-11-03) split it, and the steps below use the names as they stand now.
@@ -434,7 +434,7 @@ Phase 2 was first built as one package named `grin`. D12 (2026-11-03) split it, 
 2. `packages/grin_native/example` (`name: grin_native_example`) is a Flutter app exercising mnemonic generation, wallet creation, address display, and Slatepack encoding/decoding. It depends on `grin_native` only and carries the two helpers as example code (`lib/src/wallet_paths.dart`, `lib/src/lifecycle_observer.dart`).
 
 ### Phase 4: End-to-End Verification (Rust & Dart)
-1. Implement `crates/grin-ffi/tests/header_test.rs` and `crates/grin-ffi/tests/ffi_e2e_test.rs` (testing `S1->S3`, `I1->I3` with invoice input-locking verification, Mainnet + Testnet concurrent execution, and the `WalletBusy` double-open guard with a retained session `Arc`).
+1. Implement `packages/grin_native/rust/tests/header_test.rs` and `packages/grin_native/rust/tests/ffi_e2e_test.rs` (testing `S1->S3`, `I1->I3` with invoice input-locking verification, Mainnet + Testnet concurrent execution, and the `WalletBusy` double-open guard with a retained session `Arc`).
 2. Implement `packages/grin_native/test/` suites (`mnemonic_address_test.dart`, `bounds_and_panic_test.dart`, `wallet_lifecycle_test.dart` including close-while-in-flight then immediate reopen, and `slatepack_e2e_test.dart` using `grin_test_create_wallet` & `grin_test_mine_blocks`) and the contract tests in `packages/grin/test/`.
 3. Run `cargo tree -d`, `cargo test`, `(cd packages/grin && dart test)`, `(cd packages/grin_native && dart test)`, `(cd packages/grin_native/example && flutter test)`, `dart analyze`, `flutter analyze`, the `web-smoke` and `consumer` stages, and the `tool/ci.dart` `nm` check on `hook/build.dart` output built without `test-utils`.
 4. Release artifacts, and the `nm` gate on the exact files a release publishes, are deferred to the dnix pipeline (D11).
@@ -768,7 +768,7 @@ Every repository, ref and checkout this plan and its implementation rely on, as 
 | tor plugin as shipped | /home/user/src/stack_wallet/tor (checkout at `e36c899`) | Stack Wallet pins `e30ed0d386a40ee4a999aeaf57aafd32921d601e`; `rust/Cargo.toml` L18 there: `arti-client 0.47.0`, features `static` and `onion-service-client` | the v1 transport decision (section 1 item 4) |
 | native_toolchain_rust | ~/.pub-cache/hosted/pub.dev/native_toolchain_rust-1.0.6 | 1.0.6 (1.0.7 moves to code_assets ^2; pinned together with code_assets ^1.2.1) | `RustBuilder` in `hook/build.dart` |
 | reqwest | ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/reqwest-0.13.4 | 0.13.4 | the TLS feature analysis in section 1 item 2 and 4.1 |
-| Toolchains on the build machine | | Rust 1.94.0 (rustup; `rust-toolchain.toml`), cargo-ndk 4.1.2, cbindgen 0.29.2, Dart 3.13.2, Flutter 3.47.2, Android NDK 28.2.13676358 (also 26.3, 27.0, 28.0, 28.1, 29.0 installed), llvm-nm, gcc and clang, xvfb-run | gates in sections 7 and 8 |
+| Toolchains on the build machine | | Rust 1.99.1 (rustup; `rust-toolchain.toml`; 1.94.0 until 2026-11-07, D3), cargo-ndk 4.1.2, cbindgen 0.29.2, Dart 3.13.2, Flutter 3.47.2, Android NDK 28.2.13676358 (also 26.3, 27.0, 28.0, 28.1, 29.0 installed), llvm-nm, gcc and clang, xvfb-run | gates in sections 7 and 8 |
 
 ### 11.3 Stack Wallet refs read for section 9
 
@@ -1159,3 +1159,22 @@ Decided on 2026-11-07, as Phase G of `docs/stack-wallet-integration.md` (G2 to G
 - Docs (G11): the hooks runner keeps neither `CARGO_*` nor `RUSTUP_*` nor `SSH_AUTH_SOCK` (hooks_runner 1.5.0), so `packages/grin_native/README.md` now says so and has a "Private access" section on prefetching the fork. The consumer url is `ssh://git@git.cypherstack.com:222/sneurlax/grin_native.git`, the repository the `cypherstack` remote points at, for both pub entries (the plan's section 0); the earlier note in section 13 that consumers use `grin.git` no longer holds.
 - Tests: Rust `new_wallet_flag_skips_the_full_scan` (stored status for each combination, kept across a reopen, completed by the first refresh) and `network_disabled_opens_no_connection` (every gated entry point against a counting TCP listener; zero connections until the network is turned on), the invoice test refuses a wrong `expected_amount` and checks nothing is locked or logged, and a config unit test. The libwallet reorg window is 2880 blocks, longer than any test chain the default suite mines, so the scan-from-tip behaviour itself is checked by `new_wallet_refresh_scans_only_the_reorg_window`, which is `#[ignore]` and runs with `cargo test --release --features test-utils --test ffi_e2e_test -- --ignored`. Dart tests mirror these through `GrinWalletClient` and `GrinTestChain`.
 - To reverse: revert the commits named in `docs/stack-wallet-integration.md` section 3.
+
+### D15. Review of 2026-11-11: transaction roles, value bounds, a send that releases its own lock, scan cancel in the client
+
+Decided on 2026-11-11, after a read-through of the Rust crate, the two Dart packages and the fork at `377141e`. The C ABI is unchanged (36 standard exports, the same signatures); what changed is which inputs are refused and what an error says. `docs/ffi-json.md` has the contract; this is the reasoning.
+
+- A slate id names one kind of transaction per wallet (ffi-json 9.1). libwallet finds a transaction's stored context by slate id alone, and its invoice path finalizes without a payment proof check. `grin_tx_finalize_slatepack` therefore takes an S2 only for a send this wallet started, `grin_tx_finalize_invoice` an I2 only for an invoice it issued, and `grin_tx_process_invoice` only an id the wallet does not use yet (its own unpaid invoice excepted). The checks read the transaction log and the context before libwallet is called.
+- An invoice with a kernel that is not plain is not paid: the payer would otherwise sign a transaction the invoicer can hold back until a height of its choosing.
+- Values from another wallet are bounded like the wallet's own arguments. An amount or TTL cutoff height above 2^63 - 1 in a slate is refused before anything is recorded, a node height above it is a `Node` error, and what the library reports is capped at that value (`json_u64`). The reason is the reader: Dart's JSON decoder turns a larger integer into a double, and one such value in the history made every later `getTransactions()` throw. Writing amounts as strings was the alternative; it would have changed every model for a range nothing legitimate uses.
+- `grin_tx_send_http` cleans up after itself. A failed exchange deletes the stored context; the selected inputs are checked again before locking, since the wallet is free during the round trip; and a send that locked its inputs and then could not be finalized is cancelled inside the call, from stored state (the fork's `cancel_tx_stored`), because the other wallet's answer cannot be asked for again. The error then says `"released": true`.
+- A failed broadcast says `"finalized": true`, here and in both finalize calls. Before, the caller had to infer from "code 9 with a slate id" that the transaction was complete and must be reposted, not cancelled. Dart has `GrinException.finalized` and `.released`.
+- `grin_tx_cancel` by slate id cancels a late-locked send, which has a context and no log entry. Without it such a send could not be withdrawn.
+- The fork gained four commits (pin `ee6bc013`): a direct connection when no proxy is configured (reqwest otherwise picks up the system or environment proxy), a self-send's context kept when its receive half is cancelled, the stored-state cancel, and a late-locked send's payment proof checked against the address the send asked for, before locking.
+- A create that fails in a directory that was already there removes the seed and database it wrote (ffi-json section 6), so the next create does not answer `WalletExists`.
+- `GrinWalletClient.cancelScan()` covers every scan that was called and has not completed. The library drops a cancel that arrives before the scan's isolate has entered it, and a queued scan could not be cancelled at all, so the client keeps one record per scan call: a queued scan never starts and completes with `GrinCancelledException` (null details, no events), and for a scan that left the queue the cancel is repeated every 50 ms until the scan completes. This stays in the client: the library cannot know about Dart's queue, and an FFI "cancel the next scan" flag would need its own reset rules.
+- `close()` treats `InvalidHandle` from the library as closed, and after any other failure keeps its finalizers and can be called again.
+- The build hook sets `GIT_TERMINAL_PROMPT=0`, `SSH_ASKPASS_REQUIRE=force` and `SSH_ASKPASS=false` for cargo, so a fetch of the fork that would prompt fails with cargo's error. `GIT_SSH_COMMAND` is not set: it would replace a host's own `core.sshCommand`.
+- `GrinPaymentProof` equality compares the six parsed fields, so key order and unknown keys do not matter.
+- Tests: Rust `tests/ffi_tx_test.rs` (roles, bounds, the released send, the failed broadcast, the late-locked cancel) and the create cleanup in `ffi_e2e_test.rs`; Dart `wallet_lifecycle_test.dart` (a cancel for a queued scan and for one that is only just starting, close during a scan, close after the library dropped the handle), `tx_models_test.dart` and `bounds_and_panic_test.dart`. The retry path of a failed `close()` has no test: the only failure the library returns is `InvalidHandle`, and an `Isolate.run` failure cannot be injected.
+- Left as it is: `validateAddressSync` and `walletDir` stay on the contract and are now documented for backends without native code or a file system; `tool/ci.dart` still passes `web-smoke` with "compiled only" when node is missing.
