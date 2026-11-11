@@ -88,8 +88,11 @@ pub fn parse_address(input: &str) -> Result<ParsedAddress, GrinError> {
 
     if lower.starts_with("http://") || lower.starts_with("https://") {
         let parsed = url::Url::parse(s).map_err(|e| invalid_address(format!("bad URL: {e}")))?;
+        // A fully qualified name may end in a dot. Without it an onion host
+        // written that way would be taken for a plain HTTP one.
         let host = parsed
             .host_str()
+            .map(|h| h.trim_end_matches('.'))
             .filter(|h| !h.is_empty())
             .ok_or_else(|| invalid_address("URL has no host"))?;
         if parsed.query().is_some() || parsed.fragment().is_some() {
@@ -119,7 +122,7 @@ pub fn parse_address(input: &str) -> Result<ParsedAddress, GrinError> {
         });
     }
 
-    let bare = trim_base(&lower);
+    let bare = trim_base(&lower).trim_end_matches('.');
     if let Some(label) = bare.strip_suffix(".onion") {
         return parse_onion(label, "http");
     }
@@ -197,6 +200,17 @@ mod tests {
             parse_address(&format!("{ov3}/v2/foreign/")).unwrap().url,
             ov3
         );
+        // A trailing dot on the host does not turn it into a plain URL.
+        for dotted in [
+            format!("{ov3}."),
+            format!("{ov3}./v2/foreign"),
+            format!("{label}."),
+        ] {
+            let p = parse_address(&dotted).unwrap();
+            assert_eq!(p.kind, "onion", "{dotted}");
+            assert_eq!(p.url, ov3);
+            assert_eq!(p.slatepack_address.as_deref(), Some(TGRIN));
+        }
 
         global::set_local_chain_type(ChainTypes::Mainnet);
         let e = parse_address(TGRIN).unwrap_err();
@@ -216,5 +230,11 @@ mod tests {
         assert!(parse_address("ftp://example.com").is_err());
         assert!(parse_address("hello").is_err());
         assert!(parse_address("http://abc.onion").is_err());
+        assert!(parse_address("http://abc.onion.").is_err());
+        assert_eq!(
+            parse_address("http://example.com./").unwrap().url,
+            "http://example.com"
+        );
+        assert!(parse_address("http://./").is_err());
     }
 }
