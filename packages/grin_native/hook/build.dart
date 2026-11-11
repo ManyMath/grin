@@ -34,6 +34,16 @@ Future<void> main(List<String> args) => build(args, (input, output) async {
     // is reachable from here: the git database must already hold the fork's
     // rev, or the fork must be fetchable with a default ssh key.
     'CARGO_NET_GIT_FETCH_WITH_CLI': 'true',
+    // A build has nobody to answer a prompt, and the hook's output is
+    // captured, so a question from git or ssh (a username, a key
+    // passphrase, an unknown host key) would look like a build that hangs.
+    // Make both fail instead. ssh asks through an askpass program when it
+    // is forced to, and this one answers nothing; ssh older than 8.4
+    // ignores the variable and behaves as before. The user's own ssh
+    // command and configuration are left alone.
+    'GIT_TERMINAL_PROMPT': '0',
+    'SSH_ASKPASS_REQUIRE': 'force',
+    'SSH_ASKPASS': 'false',
     // Inside an Xcode build, PATH starts with Xcode's SwiftBuild and Metal
     // toolchain directories. Under that PATH, with the crate's
     // `strip = "debuginfo"`, the host proc-macro dylibs rustc strips no
