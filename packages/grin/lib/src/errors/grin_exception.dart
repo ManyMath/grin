@@ -84,6 +84,23 @@ sealed class GrinException implements Exception {
     return value is String ? value : null;
   }
 
+  /// True when the call failed after the transaction was finalized: the
+  /// wallet holds a complete transaction that did not reach the node.
+  ///
+  /// The inputs stay locked. Pass [slateId] to `repost` to broadcast it
+  /// again, or to `cancelTransaction` to give it up. A counterparty who
+  /// holds the finalized transaction could still post it after a cancel.
+  bool get finalized => details?['finalized'] == true;
+
+  /// True when a synchronous send locked its inputs, could not be
+  /// finalized, and was cancelled again by the library before the call
+  /// returned: nothing is locked and nothing was sent.
+  ///
+  /// The recipient may still hold its half of the exchange, which is
+  /// useless without the sender's signature. [slateId] names the cancelled
+  /// transaction in the history.
+  bool get released => details?['released'] == true;
+
   @override
   String toString() => '$runtimeType($code): $message';
 }
@@ -165,6 +182,9 @@ final class GrinInsufficientFundsException extends GrinException {
   /// The amount the transaction needs, in nanogrin, or null if the native
   /// library did not say or the value is not a non-negative integer (or
   /// integer string). Never throws.
+  ///
+  /// grin_native reports at most 2^63 - 1 here: a larger sum (an amount at
+  /// the cap plus its fee) is given as that value.
   BigInt? get required => _amount('required');
 
   /// The amount that can be spent now, in nanogrin, or null if the native
@@ -199,8 +219,10 @@ final class GrinNotFoundException extends GrinException {
   const GrinNotFoundException._(super.code, super.message, super.details);
 }
 
-/// Code 14: a scan was cancelled between batches; `details` carry the last
-/// saved `scanned_height` and the `tip_height`.
+/// Code 14: a scan was cancelled. For a scan stopped between batches,
+/// `details` carry the last saved `scanned_height` and the `tip_height`. For
+/// a scan that was cancelled before it started (still queued, or the wallet
+/// was closed first), `details` are null.
 final class GrinCancelledException extends GrinException {
   const GrinCancelledException._(super.code, super.message, super.details);
 }

@@ -154,6 +154,40 @@ void main() {
       expect(e.available, BigInt.from(3));
     });
 
+    test('finalized and released are read from the details', () {
+      final refused = GrinException.fromJson(
+        9,
+        '{"code":9,"message":"m","details":'
+        '{"slate_id":"2b1c7f2e-9d4a-4b8e-a3c5-0f6d1e2a3b4c","finalized":true}}',
+      );
+      expect(refused.finalized, isTrue);
+      expect(refused.released, isFalse);
+      expect(refused.slateId, '2b1c7f2e-9d4a-4b8e-a3c5-0f6d1e2a3b4c');
+
+      final undone = GrinException.fromJson(
+        11,
+        '{"code":11,"message":"m","details":'
+        '{"slate_id":"2b1c7f2e-9d4a-4b8e-a3c5-0f6d1e2a3b4c","released":true}}',
+      );
+      expect(undone.released, isTrue);
+      expect(undone.finalized, isFalse);
+
+      // Anything but the JSON value true is false.
+      for (final details in [
+        'null',
+        '{}',
+        '{"finalized":"true"}',
+        '{"finalized":1,"released":"yes"}',
+      ]) {
+        final e = GrinException.fromJson(
+          9,
+          '{"code":9,"message":"m","details":$details}',
+        );
+        expect(e.finalized, isFalse, reason: details);
+        expect(e.released, isFalse, reason: details);
+      }
+    });
+
     test('WalletBusy exposes the directory', () {
       final e = GrinException.fromJson(
         18,

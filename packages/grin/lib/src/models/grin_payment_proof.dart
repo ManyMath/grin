@@ -74,12 +74,28 @@ final class GrinPaymentProof {
   /// A copy of the proof object. Changing it does not change this proof.
   Map<String, Object?> toJson() => jsonDecode(_json) as Map<String, Object?>;
 
+  /// Two proofs are equal when their six fields are. The order of the keys
+  /// in the JSON they were read from does not matter, and neither does a
+  /// key this class does not know.
   @override
   bool operator ==(Object other) =>
-      other is GrinPaymentProof && other._json == _json;
+      other is GrinPaymentProof &&
+      other.amount == amount &&
+      other.excess == excess &&
+      other.recipientAddress == recipientAddress &&
+      other.senderAddress == senderAddress &&
+      other.recipientSignature == recipientSignature &&
+      other.senderSignature == senderSignature;
 
   @override
-  int get hashCode => _json.hashCode;
+  int get hashCode => Object.hash(
+    amount,
+    excess,
+    recipientAddress,
+    senderAddress,
+    recipientSignature,
+    senderSignature,
+  );
 
   @override
   String toString() =>

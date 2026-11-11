@@ -134,6 +134,22 @@ void main() {
   });
 
   group('GrinSlateInfo', () {
+    test('reads the largest values the library writes', () {
+      // The library caps what it reports at 2^63 - 1, the largest integer
+      // a Dart VM reads from JSON without losing digits.
+      const cap = '9223372036854775807';
+      final Object? decoded = jsonDecode(
+        '{"slate_id":"$_slateId","state":"S1","amount":$cap,"fee":$cap,'
+        '"kernel_excess":null,"sender":null,"recipients":[],'
+        '"ttl_cutoff_height":$cap,"num_participants":2,'
+        '"is_encrypted":false,"slate_json":"{}"}',
+      );
+      final info = GrinSlateInfo.fromJson(decoded! as Map<String, Object?>);
+      expect(info.amount, BigInt.parse(cap));
+      expect(info.fee, BigInt.parse(cap));
+      expect(info.ttlCutoffHeight, 9223372036854775807);
+    });
+
     test('fromJson reads an S3 with null fields', () {
       final info = GrinSlateInfo.fromJson({
         'slate_id': _slateId,
@@ -514,6 +530,18 @@ void main() {
       });
       expect(tampered, isNot(proof));
       expect(tampered.amount, BigInt.from(20));
+    });
+
+    test('equality ignores key order and unknown keys', () {
+      final proof = GrinPaymentProof.fromJson(_proofJson());
+      final reordered = GrinPaymentProof.fromJson({
+        for (final entry in _proofJson().entries.toList().reversed)
+          entry.key: entry.value,
+        'note': 'not part of the proof',
+      });
+      expect(reordered.toJsonString(), isNot(proof.toJsonString()));
+      expect(reordered, proof);
+      expect(reordered.hashCode, proof.hashCode);
     });
 
     test('a missing field is a FormatException', () {

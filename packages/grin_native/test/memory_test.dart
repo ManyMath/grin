@@ -44,13 +44,16 @@ void main() {
       ),
       'abc',
     );
+    var released = false;
     expect(
       () => usingSecretArena<void>((arena) {
         toCStringSecret('abc', arena);
+        arena.onReleaseAll(() => released = true);
         throw StateError('boom');
       }),
       throwsStateError,
     );
+    expect(released, isTrue, reason: 'the arena was not released');
   });
 
   test('toCStringSecret copies multi-byte text with a terminator', () {
