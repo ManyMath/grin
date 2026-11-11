@@ -115,6 +115,12 @@ abstract interface class GrinWalletApi {
   /// [GrinScanFinished], except for a scan that [cancelScan] stopped while
   /// it was still waiting in the queue: that one never starts and emits
   /// nothing. Throws [ArgumentError] for a negative [startHeight].
+  ///
+  /// The scan saves its work in batches. When it is cancelled, or fails
+  /// part way (a [GrinNodeException], say), the exception's `scannedHeight`
+  /// is the last height saved and the next scan can start one above it.
+  /// `scannedHeight` is null when the scan did not get as far as reading
+  /// the chain tip; start again from [startHeight] then.
   Future<GrinScanResult> scan({
     int startHeight = 0,
     bool deleteUnconfirmed = false,
@@ -123,8 +129,8 @@ abstract interface class GrinWalletApi {
   /// The height of the last block the wallet recorded as scanned, by [scan]
   /// or by a refresh from the node, or 0 if it has never scanned.
   ///
-  /// After a cancelled or failed [scan], one above this is where the next
-  /// scan can start. Reads the wallet's own data and contacts no node. It
+  /// A refresh moves it too, so it does not say where a cancelled or failed
+  /// [scan] stopped; the exception's `scannedHeight` does. Reads the wallet's own data and contacts no node. It
   /// runs in the queue like other operations, so during a scan it answers
   /// after the scan; use [scanProgress] for live progress.
   Future<int> lastScannedHeight();

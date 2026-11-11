@@ -191,6 +191,19 @@ fn scan_batches(
     Ok(BatchesEnd::Done)
 }
 
+/// Adds `scanned_height` and `tip_height` to the details of an error that
+/// ended a scan after the tip was read.
+fn with_scan_heights(mut e: GrinError, scanned: u64, tip: u64) -> GrinError {
+    let mut details = match e.details.take() {
+        Some(serde_json::Value::Object(map)) => map,
+        _ => serde_json::Map::new(),
+    };
+    details.insert("scanned_height".to_owned(), serde_json::json!(scanned));
+    details.insert("tip_height".to_owned(), serde_json::json!(tip));
+    e.details = Some(serde_json::Value::Object(details));
+    e
+}
+
 /// Scans the chain from `start_height` (0 means from the first block) and
 /// repairs wallet outputs. Runs on the calling thread in batches of 10,001
 /// heights and returns `{"scanned_height", "tip_height"}`.
@@ -265,6 +278,9 @@ pub extern "C" fn grin_wallet_scan(
         // The drain thread has stopped, so this replaces its estimate with
         // the height that is actually saved.
         state.scanned_height.store(scanned, Ordering::Release);
+        // A scan that fails part way has still saved every batch before
+        // the failure, so the error says how far it got.
+        let result = result.map_err(|e| with_scan_heights(e, scanned, tip));
         match result? {
             BatchesEnd::Done => to_json(&ScanOut {
                 scanned_height: scanned,

@@ -154,6 +154,29 @@ void main() {
       expect(e.available, BigInt.from(3));
     });
 
+    test('scannedHeight is read from the details of any scan error', () {
+      final cancelled = GrinException.fromJson(
+        14,
+        '{"code":14,"message":"m","details":'
+        '{"scanned_height":4,"tip_height":12}}',
+      );
+      expect(cancelled.scannedHeight, 4);
+      final failed = GrinException.fromJson(
+        9,
+        '{"code":9,"message":"m","details":'
+        '{"scanned_height":0,"tip_height":12}}',
+      );
+      expect(failed, isA<GrinNodeException>());
+      expect(failed.scannedHeight, 0);
+      for (final details in ['null', '{}', '{"scanned_height":"4"}']) {
+        final e = GrinException.fromJson(
+          14,
+          '{"code":14,"message":"m","details":$details}',
+        );
+        expect(e.scannedHeight, isNull, reason: details);
+      }
+    });
+
     test('finalized and released are read from the details', () {
       final refused = GrinException.fromJson(
         9,

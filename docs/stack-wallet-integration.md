@@ -466,8 +466,8 @@ Conventions for every row:
 2. Every second, read `scanProgress()` (synchronous and lock-free) and fire `RefreshPercentChangedEvent` and `BlocksRemainingEvent`.
 3. Await `scan(startHeight: pendingScanFrom)`.
    - Success: clear `pendingScanFrom`, then `refresh()`.
-   - `GrinCancelledException`: set `pendingScanFrom = scanned_height + 1`, no error event. After G5, `lastScannedHeight + 1` replaces this.
-   - Node error: keep the value and fire `unableToSync`.
+   - `GrinCancelledException`: set `pendingScanFrom = scanned_height + 1` when the details carry it and keep the value otherwise (a scan cancelled before it started scanned nothing), no error event.
+   - Any other error: the same rule for `pendingScanFrom` (a scan that failed part way reports `scanned_height` too), then fire `unableToSync`. `lastScannedHeight` is not a resume point: a refresh moves it, and a rescan of a synced wallet would skip to the tip.
 
 Scans start only from `recover()` and from `refresh()` when one is pending. While a scan runs:
 - Sends are refused.

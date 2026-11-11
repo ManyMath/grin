@@ -123,6 +123,7 @@ pub struct TestNodeClient {
     inner: LocalWalletClient,
     last_failure: LastProxyFailure,
     refuse_next_post: Arc<AtomicBool>,
+    refuse_next_range: Arc<AtomicBool>,
 }
 
 impl TestNodeClient {
@@ -238,6 +239,11 @@ impl NodeClient for TestNodeClient {
         start_height: u64,
         end_height: Option<u64>,
     ) -> Result<(u64, u64), LibwalletError> {
+        if self.refuse_next_range.swap(false, Ordering::SeqCst) {
+            return Err(LibwalletError::ClientCallback(
+                "the test node refused the height range".to_owned(),
+            ));
+        }
         self.bounded("height_range_to_pmmr_indices", move |c| {
             c.height_range_to_pmmr_indices(start_height, end_height)
         })
@@ -273,6 +279,8 @@ pub struct TestChain {
     last_failure: LastProxyFailure,
     /// Makes the next broadcast on this chain fail without reaching it.
     refuse_next_post: Arc<AtomicBool>,
+    /// Makes the next height range request on this chain fail.
+    refuse_next_range: Arc<AtomicBool>,
     /// Serializes block production so two callers never build on the same tip.
     mine_lock: Mutex<()>,
 }
@@ -283,6 +291,7 @@ impl TestChain {
             inner: (self.make_client)(client_id),
             last_failure: self.last_failure.clone(),
             refuse_next_post: self.refuse_next_post.clone(),
+            refuse_next_range: self.refuse_next_range.clone(),
         }
     }
 
@@ -433,6 +442,7 @@ fn chain_for(chain_dir: &str) -> Result<Arc<TestChain>, GrinError> {
         running,
         last_failure,
         refuse_next_post: Arc::new(AtomicBool::new(false)),
+        refuse_next_range: Arc::new(AtomicBool::new(false)),
         mine_lock: Mutex::new(()),
     });
     chains.insert(key, test_chain.clone());
@@ -592,6 +602,18 @@ pub fn refuse_next_post(handle: u64) -> bool {
         return false;
     };
     chain.refuse_next_post.store(true, Ordering::SeqCst);
+    true
+}
+
+/// Makes the next height range request on `handle`'s test chain fail with a
+/// node error. A scan asks for one range per batch, so this fails the next
+/// batch. Returns false when `handle` is not a test wallet. Plain Rust, not
+/// exported.
+pub fn refuse_next_range(handle: u64) -> bool {
+    let Some(chain) = lookup_session(handle).and_then(|s| s.test_chain.clone()) else {
+        return false;
+    };
+    chain.refuse_next_range.store(true, Ordering::SeqCst);
     true
 }
 

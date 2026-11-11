@@ -96,7 +96,7 @@ Values are append-only; Dart maps them by number.
 | 6 | `WalletExists` | `grin_wallet_create` on a directory that already has `wallet.seed`, or that has leftover wallet data (`db/` or an LMDB file) without one. | `{"wallet_dir": string}` (as given); for leftover data also `"reason": "leftover_wallet_data"` and `"path"` (what was found, relative to `wallet_data`) |
 | 7 | `InvalidHandle` | Handle is 0, unknown, or already closed. | null |
 | 8 | `Lifecycle` | Other wallet open/close/seed failures from the lifecycle provider, including a damaged `wallet.seed` and a password change that failed after the old password was verified. | null; for a failed password change `{"seed_present": bool, "backup_file": string or null}` |
-| 9 | `Node` | The node could not be reached or gave an unusable answer, including a failed broadcast and a cancel that could not refresh first; or the wallet's network is turned off (section 3.1). | null, or `{"slate_id"}` (section 9.1), with `"finalized": true` when a broadcast failed; `{"reason": "network_disabled"}` while the network is off |
+| 9 | `Node` | The node could not be reached or gave an unusable answer, including a failed broadcast and a cancel that could not refresh first; or the wallet's network is turned off (section 3.1). | null, or `{"slate_id"}` (section 9.1), with `"finalized": true` when a broadcast failed; `{"reason": "network_disabled"}` while the network is off; `{"scanned_height", "tip_height"}` when a scan failed part way |
 | 10 | `InsufficientFunds` | Not enough spendable funds. | `{"required": u64, "available": u64}`, each at most 2^63 - 1 (section 1.4) |
 | 11 | `Slate` | Slate or Slatepack could not be parsed, encrypted, decrypted or is in the wrong state; its slate id belongs to another kind of transaction in this wallet; or it carries an amount or TTL above 2^63 - 1. | null, or `{"slate_id"}` (section 9.1) |
 | 12 | `Transaction` | Transaction building or bookkeeping failed, a payment proof does not verify, an invoice does not ask for the expected amount, or the slate id is already used by another transaction in this wallet. | null, or `{"slate_id"}` (section 9.1), with `"released": true` when `grin_tx_send_http` unlocked the inputs again; `{"invoice_amount": u64, "expected_amount": u64}` for an amount mismatch |
@@ -436,6 +436,13 @@ create, open and delete); links higher up the path are fine.
   the tip.
 - Errors: `InvalidHandle`, `Node`, `Cancelled`, `WalletBusy` (a scan is
   already running on this wallet), `Lifecycle`, `Io`.
+- A scan that fails after it read the tip, for example because the node
+  stopped answering part way, adds `scanned_height` and `tip_height` to the
+  error's `details` with the same meaning as for `Cancelled` below: every
+  batch up to `scanned_height` is saved and a later scan can start from
+  `scanned_height + 1`. An error raised before the tip was read (no node
+  set, a scan already running, the first node request failing) carries
+  neither, and the caller should start again from the height it asked for.
 - Cancellation: before each batch the scan checks whether
   `grin_wallet_scan_cancel` was called or the handle was closed. If so it
   stops and returns `Cancelled` with
@@ -460,9 +467,9 @@ create, open and delete); links higher up the path are fine.
   `grin_wallet_scan` after each batch and by every refresh from the node.
   0 when the wallet has never scanned, including a new `InitNoScanning`
   wallet before its first refresh.
-- After a cancelled or failed scan, `height + 1` is where the next scan can
-  start, so a caller that lost the `Cancelled` details does not have to
-  reconstruct it.
+- A refresh moves this record to the node's tip, so it does not say where
+  a cancelled or failed scan stopped once anything has refreshed since.
+  Use the `scanned_height` in that scan's error to resume.
 - Reads the database under the wallet lock and contacts no node, so it
   works with the network off. The Dart client queues it like other wallet
   operations, so during a scan it answers after the scan.

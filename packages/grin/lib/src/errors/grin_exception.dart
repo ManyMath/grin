@@ -101,6 +101,19 @@ sealed class GrinException implements Exception {
   /// transaction in the history.
   bool get released => details?['released'] == true;
 
+  /// The last height a scan saved before it stopped, when the error says so.
+  ///
+  /// A cancelled scan reports it, and so does a scan that failed part way,
+  /// for example on a node error: every block up to this height is saved
+  /// and the next scan can start one above it. It can be one below the
+  /// height the scan was asked to start from, when nothing was saved. Null
+  /// when the scan never started or failed before it read the chain tip;
+  /// start again from the same height then.
+  int? get scannedHeight {
+    final Object? value = details?['scanned_height'];
+    return value is int ? value : null;
+  }
+
   @override
   String toString() => '$runtimeType($code): $message';
 }

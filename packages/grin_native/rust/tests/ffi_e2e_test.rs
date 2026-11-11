@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use grin_ffi::test_support::{retain_session, set_scan_test_hooks};
+use grin_ffi::test_support::{refuse_next_range, retain_session, set_scan_test_hooks};
 use grin_ffi::*;
 use grin_wallet_libwallet::{ScannedBlockInfo, WalletInitStatus};
 use serde_json::{json, Value};
@@ -646,6 +646,45 @@ fn network_settings() {
     .unwrap_err();
     assert_eq!(e.0, INVALID_ARGUMENT, "{}", e.1);
     assert!(!e.1.to_string().contains("hunter2"), "{}", e.1);
+}
+
+#[test]
+fn failed_scan_reports_the_saved_height() {
+    let tmp = tempfile::tempdir().unwrap();
+    let chain = tmp.path().join("chain");
+    let dir = tmp.path().join("w");
+    let w = test_wallet(&chain, &dir, "w");
+    call!(grin_test_mine_blocks(w, 10)).unwrap();
+
+    // Two heights per batch. The node refuses the request that starts the
+    // batch after the one ending at 4, so heights 1 to 4 are saved.
+    let hooked = set_scan_test_hooks(
+        w,
+        2,
+        Some(Box::new(move |height| {
+            if height == 4 {
+                assert!(refuse_next_range(w));
+            }
+        })),
+    );
+    assert!(hooked);
+    let e = call!(grin_wallet_scan(w, 0, false)).unwrap_err();
+    assert_ne!(e.0, CANCELLED, "{}", e.1);
+    assert_eq!(e.1["details"]["scanned_height"], 4, "{}", e.1);
+    assert_eq!(e.1["details"]["tip_height"], 10, "{}", e.1);
+    let p = progress(w);
+    assert_eq!(p["is_scanning"], false);
+    assert_eq!(p["scanned_height"], 4);
+    assert_eq!(last_scanned_block(w).height, 4);
+
+    // A scan from the height after the reported one finishes the job.
+    set_scan_test_hooks(w, 0, None);
+    let v = call!(grin_wallet_scan(w, 5, false)).unwrap();
+    assert_eq!(v, json!({"scanned_height": 10, "tip_height": 10}));
+    assert_eq!(last_scanned_block(w).height, 10);
+    let b = call!(grin_wallet_get_balance(w, false, 1)).unwrap();
+    assert!(b["amount_currently_spendable"].as_u64().unwrap() > 0);
+    close(w);
 }
 
 #[test]
