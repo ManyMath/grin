@@ -112,8 +112,9 @@ abstract interface class GrinWalletApi {
   /// It can take long. Poll [scanProgress] meanwhile. [cancelScan] stops it
   /// at the end of the batch being scanned, and this call then throws
   /// [GrinCancelledException]. Emits [GrinScanStarted] and
-  /// [GrinScanFinished]. Throws [ArgumentError] for a negative
-  /// [startHeight].
+  /// [GrinScanFinished], except for a scan that [cancelScan] stopped while
+  /// it was still waiting in the queue: that one never starts and emits
+  /// nothing. Throws [ArgumentError] for a negative [startHeight].
   Future<GrinScanResult> scan({
     int startHeight = 0,
     bool deleteUnconfirmed = false,
@@ -134,13 +135,24 @@ abstract interface class GrinWalletApi {
   /// answers while a scan runs.
   GrinScanProgress scanProgress();
 
-  /// Asks a running scan to stop. A direct call that is not queued.
+  /// Stops every [scan] that has been called and has not completed yet. A
+  /// direct call that is not queued.
   ///
   /// The native scan checks for a cancel between its batches of 10,001
   /// blocks, so a running [scan] stops at the next batch boundary and its
   /// future completes with [GrinCancelledException], whose `details` carry
-  /// the last saved `scanned_height`. With no scan running this does
-  /// nothing; the next scan runs normally.
+  /// the last saved `scanned_height`. A scan that has only just left the
+  /// queue is caught as well: the cancel is repeated until that scan
+  /// completes.
+  ///
+  /// A scan still waiting in the queue never starts. Its future completes
+  /// with a [GrinCancelledException] whose `details` are null, since it
+  /// scanned nothing, and it emits no events.
+  ///
+  /// A scan can still complete normally, or with another error such as
+  /// [GrinNodeException], when it was past its last cancel check or failed
+  /// before reaching one. With no scan called this does nothing, and a
+  /// [scan] called afterwards runs normally.
   void cancelScan();
 
   /// Re-encrypts the wallet seed with [newPassword].
@@ -407,8 +419,13 @@ abstract interface class GrinWalletApi {
   /// 5. closes the wallet, emits [GrinWalletClosed] if that worked, and
   ///    then closes the [events] stream.
   ///
-  /// If closing the wallet fails, the [events] stream is still closed, without
-  /// [GrinWalletClosed], and the returned future completes with the error.
+  /// A wallet the backend no longer knows (it was closed some other way)
+  /// counts as closed, and step 5 completes as usual.
+  ///
+  /// If closing the wallet fails for another reason, the returned future
+  /// completes with the error, nothing is emitted and the [events] stream
+  /// stays open. The wallet still refuses new calls, and calling [close]
+  /// again tries step 5 again.
   ///
   /// Step 3 can still take up to one scan batch (10,001 blocks and their
   /// node requests). See section 8 of docs/ffi-json.md.

@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:grin_native/grin_native.dart';
+import 'package:grin_native/src/ffi/bindings.g.dart' as bindings;
+import 'package:grin_native/src/ffi/memory.dart';
 import 'package:path/path.dart' as p;
 import 'package:test/test.dart';
 
@@ -357,6 +359,180 @@ void main() {
       throwsA(isNot(isA<GrinCancelledException>())),
     );
     expect(wallet.scanProgress().cancelRequested, isFalse);
+  });
+
+  test('a cancel stops a scan that is still queued', () async {
+    final dir = await makeTempDir();
+    final wallet = await createTestWallet(dir);
+    final events = <GrinWalletEvent>[];
+    wallet.events.listen(events.add);
+    final gate = Completer<void>();
+    final blocker = wallet.runQueued(() => gate.future);
+    final first = wallet.scan();
+    final second = wallet.scan(startHeight: 5);
+    final firstCheck = expectLater(
+      first,
+      throwsA(
+        isA<GrinCancelledException>().having((e) => e.details, 'details', null),
+      ),
+    );
+    final secondCheck = expectLater(
+      second,
+      throwsA(isA<GrinCancelledException>()),
+    );
+    wallet.cancelScan();
+    gate.complete();
+    await blocker;
+    await firstCheck;
+    await secondCheck;
+    // Neither scan started, so neither is announced.
+    await Future<void>.delayed(Duration.zero);
+    expect(events, isEmpty);
+    expect(wallet.scanProgress().isScanning, isFalse);
+
+    // The cancel is used up: a scan asked for afterwards runs (and fails
+    // on the unreachable node rather than as cancelled).
+    await expectLater(
+      wallet.scan(),
+      throwsA(isNot(isA<GrinCancelledException>())),
+    );
+    expect(events.whereType<GrinScanStarted>(), hasLength(1));
+  });
+
+  test('a cancel reaches a scan that is only just starting', () async {
+    // The node accepts the connection and never answers, so a scan stays in
+    // its first node request until the timeout.
+    final node = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+    final held = <Socket>[];
+    node.listen(held.add);
+    addTearDown(() async {
+      for (final socket in held) {
+        socket.destroy();
+      }
+      await node.close();
+    });
+    final dir = await makeTempDir();
+    final wallet = await GrinWalletClient.create(
+      config: GrinWalletConfig(
+        walletDir: dir.path,
+        network: GrinNetwork.automatedTesting,
+        nodeUrl: 'http://127.0.0.1:${node.port}',
+        requestTimeout: const Duration(seconds: 1),
+      ),
+      password: 'pw',
+    );
+    addTearDown(wallet.close);
+    final events = <GrinWalletEvent>[];
+    wallet.events.listen(events.add);
+    // Run both direct calls once, so that neither is compiled for the
+    // first time while a scan's isolate starts.
+    wallet.cancelScan();
+    wallet.scanProgress();
+
+    // The cancel has to arrive after the scan has left the queue and before
+    // its isolate has begun the scan in the library, which then drops it.
+    // That window is a race the test cannot force, so it tries until one
+    // cancel lands in it.
+    var attempts = 0;
+    var cancelWasDropped = false;
+    while (!cancelWasDropped && attempts < 10) {
+      attempts++;
+      final scan = wallet.scan();
+      final scanCheck = expectLater(scan, throwsA(isA<GrinException>()));
+      // The queue starts the scan in a microtask that is already scheduled,
+      // and this one runs right behind it. If the library still reports no
+      // scan after the cancel, the cancel came before the scan began there.
+      var scanningAfterCancel = true;
+      scheduleMicrotask(() {
+        wallet.cancelScan();
+        scanningAfterCancel = wallet.scanProgress().isScanning;
+      });
+
+      var seen = false;
+      final deadline = DateTime.now().add(const Duration(milliseconds: 800));
+      while (DateTime.now().isBefore(deadline)) {
+        final progress = wallet.scanProgress();
+        if (progress.isScanning && progress.cancelRequested) {
+          seen = true;
+          break;
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      }
+      expect(seen, isTrue, reason: 'the cancel never reached the scan');
+      cancelWasDropped = !scanningAfterCancel;
+      await scanCheck;
+      expect(wallet.scanProgress().cancelRequested, isFalse);
+    }
+    expect(
+      cancelWasDropped,
+      isTrue,
+      reason: 'no cancel in $attempts scans came before the scan began',
+    );
+    // Each scan had started on the Dart side, so each was announced.
+    expect(events.whereType<GrinScanStarted>(), hasLength(attempts));
+  });
+
+  test('close during a scan ends the scan and frees the directory', () async {
+    // The node accepts the connection and never answers, so the scan is
+    // still in the library when close() is called.
+    final node = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+    final held = <Socket>[];
+    node.listen(held.add);
+    addTearDown(() async {
+      for (final socket in held) {
+        socket.destroy();
+      }
+      await node.close();
+    });
+    final dir = await makeTempDir();
+    final config = GrinWalletConfig(
+      walletDir: dir.path,
+      network: GrinNetwork.automatedTesting,
+      nodeUrl: 'http://127.0.0.1:${node.port}',
+      requestTimeout: const Duration(seconds: 1),
+    );
+    final wallet = await GrinWalletClient.create(
+      config: config,
+      password: 'pw',
+    );
+    final events = <GrinWalletEvent>[];
+    final eventsDone = wallet.events.listen(events.add).asFuture<void>();
+
+    final scan = wallet.scan();
+    final scanCheck = expectLater(scan, throwsA(isA<GrinException>()));
+    final queued = wallet.scan();
+    final queuedCheck = expectLater(queued, throwsStateError);
+    while (!wallet.scanProgress().isScanning) {
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+    }
+
+    await wallet.close();
+    await scanCheck;
+    await queuedCheck;
+    await eventsDone;
+    expect(events.whereType<GrinScanStarted>(), hasLength(1));
+    expect(events.last, isA<GrinWalletClosed>());
+
+    final again = await GrinWalletClient.open(config: config, password: 'pw');
+    await again.close();
+  });
+
+  test('close succeeds when the library has dropped the handle', () async {
+    final dir = await makeTempDir();
+    final wallet = await createTestWallet(dir);
+    final events = <GrinWalletEvent>[];
+    final done = Completer<void>();
+    wallet.events.listen(events.add, onDone: done.complete);
+    unwrapFfiResult(bindings.grin_wallet_close(wallet.nativeHandle));
+    await wallet.close();
+    await done.future;
+    expect(events.last, isA<GrinWalletClosed>());
+    // The directory is free.
+    final reopened = await GrinWalletClient.open(
+      config: testConfig(dir),
+      password: 'pw',
+    );
+    await reopened.close();
   });
 
   test('a scan queued before close does not start', () async {

@@ -323,6 +323,10 @@ class GrinWalletClient implements GrinWalletApi, Finalizable {
   bool _closed = false;
   Future<void>? _closing;
 
+  /// The scans that were requested and have not settled, oldest first. The
+  /// first one may be running; the rest wait in the queue.
+  final List<_ScanRequest> _scans = [];
+
   /// The end of the operation queue. It never completes with an error: each
   /// caller gets its own result, and the queue only needs to know when the
   /// operation has settled.
@@ -421,24 +425,43 @@ class GrinWalletClient implements GrinWalletApi, Finalizable {
     _ensureOpen();
     final nativeStartHeight = requireU64(startHeight, 'startHeight');
     final handle = _handle;
+    final request = _ScanRequest();
+    _scans.add(request);
     return _enqueue(() async {
-      // A cancel only reaches a scan that is running, so a scan that was
-      // still queued when close() ran must not start now.
-      if (_closed) {
-        throw StateError('GrinWalletClient was closed before the scan ran');
-      }
-      _emit(GrinScanStarted(startHeight: nativeStartHeight));
       try {
-        final result = await _scan(
-          handle,
-          nativeStartHeight,
-          deleteUnconfirmed,
-        );
-        _emit(GrinScanFinished(result: result));
-        return result;
-      } catch (error, stackTrace) {
-        _emit(GrinScanFinished(error: error, stackTrace: stackTrace));
-        rethrow;
+        // The native cancel only reaches a scan that is running, so a scan
+        // that was still queued when close() or cancelScan() ran must not
+        // start now.
+        if (_closed) {
+          throw StateError('GrinWalletClient was closed before the scan ran');
+        }
+        if (request.cancelled) {
+          throw GrinException.fromJson(
+            14,
+            jsonEncode({
+              'code': 14,
+              'message': 'scan cancelled before it started',
+              'details': null,
+            }),
+          );
+        }
+        request.running = true;
+        _emit(GrinScanStarted(startHeight: nativeStartHeight));
+        try {
+          final result = await _scan(
+            handle,
+            nativeStartHeight,
+            deleteUnconfirmed,
+          );
+          _emit(GrinScanFinished(result: result));
+          return result;
+        } catch (error, stackTrace) {
+          _emit(GrinScanFinished(error: error, stackTrace: stackTrace));
+          rethrow;
+        }
+      } finally {
+        request.repeat?.cancel();
+        _scans.remove(request);
       }
     });
   }
@@ -463,7 +486,27 @@ class GrinWalletClient implements GrinWalletApi, Finalizable {
   @override
   void cancelScan() {
     _ensureOpen();
-    unwrapFfiResult(bindings.grin_wallet_scan_cancel(_handle));
+    final handle = _handle;
+    unwrapFfiResult(bindings.grin_wallet_scan_cancel(handle));
+    for (final request in _scans) {
+      request.cancelled = true;
+      // The native library drops a cancel that arrives before the scan has
+      // started there, and a scan that has left the queue may still be on
+      // its way into the library. Repeat the cancel until that scan has
+      // settled. The call is cheap and takes no wallet lock, and no other
+      // scan can start on this wallet before this one has returned.
+      if (request.running) {
+        request.repeat ??= Timer.periodic(const Duration(milliseconds: 50), (
+          _,
+        ) {
+          try {
+            unwrapFfiResult(bindings.grin_wallet_scan_cancel(handle));
+          } on GrinException {
+            // The scan's own future reports what happened to it.
+          }
+        });
+      }
+    }
   }
 
   @override
@@ -682,19 +725,25 @@ class GrinWalletClient implements GrinWalletApi, Finalizable {
       ]);
       if (done) break;
     }
-    _finalizer.detach(this);
-    _eventsFinalizer.detach(this);
     try {
       await _closeHandle(handle);
-      // Only a close that worked is reported as one.
-      _emit(const GrinWalletClosed());
-    } finally {
-      // Runs on failure too, before the error goes on to the caller. Not
-      // awaited: a broadcast controller finishes closing only when every
-      // subscription has received the done event, and a paused one (an
-      // `await for` body that calls close(), a StreamQueue) never does.
-      unawaited(_events.close());
+    } on GrinInvalidHandleException {
+      // The library no longer knows the handle, so the wallet is closed
+      // already and there is nothing left to release.
+    } catch (_) {
+      // The handle may still be open. Both finalizers stay attached, so a
+      // client that is dropped now is still cleaned up, and the next
+      // close() tries again instead of returning this failure for ever.
+      _closing = null;
+      rethrow;
     }
+    _finalizer.detach(this);
+    _eventsFinalizer.detach(this);
+    _emit(const GrinWalletClosed());
+    // Not awaited: a broadcast controller finishes closing only when every
+    // subscription has received the done event, and a paused one (an
+    // `await for` body that calls close(), a StreamQueue) never does.
+    unawaited(_events.close());
   }
 
   // Isolate helpers ---------------------------------------------------------
@@ -1042,4 +1091,16 @@ class GrinWalletClient implements GrinWalletApi, Finalizable {
   static Future<void> _closeHandle(int handle) => Isolate.run(() {
     unwrapFfiResult(bindings.grin_wallet_close(handle));
   });
+}
+
+/// One call of [GrinWalletClient.scan] that has not settled.
+class _ScanRequest {
+  /// Set by `cancelScan`. A request that is still queued then never starts.
+  bool cancelled = false;
+
+  /// True once the request has left the queue and its scan was started.
+  bool running = false;
+
+  /// Repeats the native cancel while a cancelled scan is still running.
+  Timer? repeat;
 }
