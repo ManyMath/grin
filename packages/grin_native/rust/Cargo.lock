@@ -1286,7 +1286,7 @@ dependencies = [
 [[package]]
 name = "grin_api"
 version = "5.5.2"
-source = "git+ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git?rev=377141e0261819394d00885d6d2af64e90f4a452#377141e0261819394d00885d6d2af64e90f4a452"
+source = "git+ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git?rev=ee6bc01333d822352a2ebabd07e11690a02e945f#ee6bc01333d822352a2ebabd07e11690a02e945f"
 dependencies = [
  "bytes 1.12.1",
  "easy-jsonrpc-mw",
@@ -1319,7 +1319,7 @@ dependencies = [
 [[package]]
 name = "grin_chain"
 version = "5.5.2"
-source = "git+ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git?rev=377141e0261819394d00885d6d2af64e90f4a452#377141e0261819394d00885d6d2af64e90f4a452"
+source = "git+ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git?rev=ee6bc01333d822352a2ebabd07e11690a02e945f#ee6bc01333d822352a2ebabd07e11690a02e945f"
 dependencies = [
  "bit-vec",
  "bitflags 1.3.2",
@@ -1342,7 +1342,7 @@ dependencies = [
 [[package]]
 name = "grin_core"
 version = "5.5.2"
-source = "git+ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git?rev=377141e0261819394d00885d6d2af64e90f4a452#377141e0261819394d00885d6d2af64e90f4a452"
+source = "git+ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git?rev=ee6bc01333d822352a2ebabd07e11690a02e945f#ee6bc01333d822352a2ebabd07e11690a02e945f"
 dependencies = [
  "blake2-rfc",
  "byteorder",
@@ -1368,7 +1368,7 @@ dependencies = [
 [[package]]
 name = "grin_keychain"
 version = "5.5.2"
-source = "git+ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git?rev=377141e0261819394d00885d6d2af64e90f4a452#377141e0261819394d00885d6d2af64e90f4a452"
+source = "git+ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git?rev=ee6bc01333d822352a2ebabd07e11690a02e945f#ee6bc01333d822352a2ebabd07e11690a02e945f"
 dependencies = [
  "blake2-rfc",
  "byteorder",
@@ -1390,7 +1390,7 @@ dependencies = [
 [[package]]
 name = "grin_p2p"
 version = "5.5.2"
-source = "git+ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git?rev=377141e0261819394d00885d6d2af64e90f4a452#377141e0261819394d00885d6d2af64e90f4a452"
+source = "git+ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git?rev=ee6bc01333d822352a2ebabd07e11690a02e945f#ee6bc01333d822352a2ebabd07e11690a02e945f"
 dependencies = [
  "bitflags 1.3.2",
  "built",
@@ -1413,7 +1413,7 @@ dependencies = [
 [[package]]
 name = "grin_pool"
 version = "5.5.2"
-source = "git+ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git?rev=377141e0261819394d00885d6d2af64e90f4a452#377141e0261819394d00885d6d2af64e90f4a452"
+source = "git+ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git?rev=ee6bc01333d822352a2ebabd07e11690a02e945f#ee6bc01333d822352a2ebabd07e11690a02e945f"
 dependencies = [
  "blake2-rfc",
  "chrono",
@@ -1445,7 +1445,7 @@ dependencies = [
 [[package]]
 name = "grin_store"
 version = "5.5.2"
-source = "git+ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git?rev=377141e0261819394d00885d6d2af64e90f4a452#377141e0261819394d00885d6d2af64e90f4a452"
+source = "git+ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git?rev=ee6bc01333d822352a2ebabd07e11690a02e945f#ee6bc01333d822352a2ebabd07e11690a02e945f"
 dependencies = [
  "byteorder",
  "croaring",
@@ -1464,7 +1464,7 @@ dependencies = [
 [[package]]
 name = "grin_util"
 version = "5.5.2"
-source = "git+ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git?rev=377141e0261819394d00885d6d2af64e90f4a452#377141e0261819394d00885d6d2af64e90f4a452"
+source = "git+ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git?rev=ee6bc01333d822352a2ebabd07e11690a02e945f#ee6bc01333d822352a2ebabd07e11690a02e945f"
 dependencies = [
  "anyhow",
  "backtrace",
@@ -1485,7 +1485,7 @@ dependencies = [
 [[package]]
 name = "grin_wallet_config"
 version = "5.5.1"
-source = "git+ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git?rev=377141e0261819394d00885d6d2af64e90f4a452#377141e0261819394d00885d6d2af64e90f4a452"
+source = "git+ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git?rev=ee6bc01333d822352a2ebabd07e11690a02e945f#ee6bc01333d822352a2ebabd07e11690a02e945f"
 dependencies = [
  "dirs",
  "grin_core",
@@ -1501,7 +1501,7 @@ dependencies = [
 [[package]]
 name = "grin_wallet_impls"
 version = "5.5.1"
-source = "git+ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git?rev=377141e0261819394d00885d6d2af64e90f4a452#377141e0261819394d00885d6d2af64e90f4a452"
+source = "git+ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git?rev=ee6bc01333d822352a2ebabd07e11690a02e945f#ee6bc01333d822352a2ebabd07e11690a02e945f"
 dependencies = [
  "blake2-rfc",
  "chrono",
@@ -1532,7 +1532,7 @@ dependencies = [
 [[package]]
 name = "grin_wallet_libwallet"
 version = "5.5.1"
-source = "git+ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git?rev=377141e0261819394d00885d6d2af64e90f4a452#377141e0261819394d00885d6d2af64e90f4a452"
+source = "git+ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git?rev=ee6bc01333d822352a2ebabd07e11690a02e945f#ee6bc01333d822352a2ebabd07e11690a02e945f"
 dependencies = [
  "age",
  "base64 0.9.3",
@@ -1571,7 +1571,7 @@ dependencies = [
 [[package]]
 name = "grin_wallet_util"
 version = "5.5.1"
-source = "git+ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git?rev=377141e0261819394d00885d6d2af64e90f4a452#377141e0261819394d00885d6d2af64e90f4a452"
+source = "git+ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git?rev=ee6bc01333d822352a2ebabd07e11690a02e945f#ee6bc01333d822352a2ebabd07e11690a02e945f"
 dependencies = [
  "data-encoding",
  "ed25519-dalek",
