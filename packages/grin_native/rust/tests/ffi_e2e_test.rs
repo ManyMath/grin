@@ -940,6 +940,38 @@ fn create_refuses_leftover_wallet_data() {
     close(create(&dir, AUTOMATED, Some(MNEMONIC)).unwrap());
 }
 
+/// A create that fails after it wrote the seed takes the seed and the
+/// database away again, also in a directory that existed before. The next
+/// create then fails for the same reason, not with WalletExists, and
+/// succeeds once the cause is gone.
+#[test]
+fn failed_create_leaves_no_wallet_behind() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = path_str(&tmp.path().join("w"));
+    let data = tmp.path().join("w").join("wallet_data");
+    std::fs::create_dir_all(&data).unwrap();
+    // The backend makes this directory after the seed file is written.
+    let blocker = data.join("saved_txs");
+    std::fs::write(&blocker, b"in the way").unwrap();
+    let note = data.join("note.txt");
+    std::fs::write(&note, b"not the wallet's").unwrap();
+
+    for _ in 0..2 {
+        let e = create(&dir, AUTOMATED, Some(MNEMONIC)).unwrap_err();
+        assert_ne!(e.0, WALLET_EXISTS, "{}", e.1);
+        assert!(!data.join("wallet.seed").exists());
+        assert!(!data.join("db").exists());
+        assert!(blocker.is_file() && note.is_file(), "other files stay");
+        assert_eq!(code_of(open(&dir, AUTOMATED)), WALLET_NOT_FOUND);
+    }
+
+    std::fs::remove_file(&blocker).unwrap();
+    let h = create(&dir, AUTOMATED, Some(MNEMONIC)).unwrap();
+    assert!(data.join("wallet.seed").is_file());
+    assert!(note.is_file());
+    close(h);
+}
+
 /// Removing files LMDB has open only works on unix.
 #[cfg(unix)]
 #[test]

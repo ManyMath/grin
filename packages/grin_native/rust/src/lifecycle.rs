@@ -295,6 +295,23 @@ fn leftover_wallet_data(data_dir: &Path) -> Option<String> {
     })
 }
 
+/// Removes the seed file and the database a failed create left in a
+/// directory that held neither when the create started.
+fn remove_failed_create(data_dir: &Path) {
+    let seed = data_dir.join(SEED_FILE);
+    if std::fs::symlink_metadata(&seed).is_ok() {
+        if let Err(e) = std::fs::remove_file(&seed) {
+            log::warn!("could not remove the seed of a failed wallet create: {e}");
+        }
+    }
+    let db = data_dir.join(DB_DIR);
+    if std::fs::symlink_metadata(&db).is_ok() {
+        if let Err(e) = std::fs::remove_dir_all(&db) {
+            log::warn!("could not remove the database of a failed wallet create: {e}");
+        }
+    }
+}
+
 /// `wallet.seed` is missing but a backup of it is not: a password change or
 /// a recovery was interrupted after moving the seed aside. Reported in place
 /// of "no wallet" or "leftover data" so that a caller does not treat the
@@ -360,6 +377,9 @@ pub unsafe extern "C" fn grin_wallet_create(
         let lease = DirLease::acquire(&data_dir)?;
 
         let leftover = if existed { leftover_wallet_data(&data_dir) } else { None };
+        // Set once the create itself starts, with no seed and no database
+        // in the directory: whatever it leaves on failure is this call's.
+        let mut started = false;
         let opened = if let Some(e) = seed_backup_only(&data_dir, &config.wallet_dir) {
             Err(e)
         } else if data_dir.join(SEED_FILE).exists() {
@@ -385,6 +405,7 @@ pub unsafe extern "C" fn grin_wallet_create(
             })))
         } else {
             config.node.node_client().and_then(|c| {
+                started = true;
                 open_backend(
                     c,
                     &data_dir,
@@ -404,6 +425,11 @@ pub unsafe extern "C" fn grin_wallet_create(
                     if let Err(rm) = std::fs::remove_dir_all(&data_dir) {
                         log::warn!("could not clean up a failed wallet create: {rm}");
                     }
+                } else if existed && started {
+                    // The directory was there before, so it stays, but a
+                    // half-made wallet in it would make the next create
+                    // answer WalletExists.
+                    remove_failed_create(&data_dir);
                 }
                 return Err(e);
             }
