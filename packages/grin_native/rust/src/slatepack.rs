@@ -15,7 +15,7 @@ use grin_wallet_libwallet::{
 use serde::Serialize;
 
 use crate::config::chain_type_from_u8;
-use crate::error::{read_str, to_json, GrinError, GrinErrorCode, GrinFfiResult};
+use crate::error::{json_u64, read_str, to_json, GrinError, GrinErrorCode, GrinFfiResult};
 use crate::handle::{get_session, WalletSession};
 
 /// Slatepack delivery mode for an age-encrypted payload.
@@ -210,8 +210,8 @@ pub unsafe extern "C" fn grin_slatepack_decode(
         to_json(&DecodeOut {
             slate_id: slate.id.to_string(),
             state: state_name(&slate.state),
-            amount: slate.amount,
-            fee: slate_fee(slate),
+            amount: json_u64(slate.amount),
+            fee: json_u64(slate_fee(slate)),
             kernel_excess: kernel_excess_hex(slate),
             sender: decoded.sender.as_ref().map(address_string).transpose()?,
             recipients: decoded
@@ -221,7 +221,7 @@ pub unsafe extern "C" fn grin_slatepack_decode(
                 .collect::<Result<_, _>>()?,
             ttl_cutoff_height: match slate.ttl_cutoff_height {
                 0 => None,
-                h => Some(h),
+                h => Some(json_u64(h)),
             },
             num_participants: slate.num_participants(),
             is_encrypted: decoded.is_encrypted,

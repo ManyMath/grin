@@ -7,8 +7,10 @@ use grin_wallet_libwallet::api_impl::owner;
 use grin_wallet_libwallet::NodeClient;
 use serde::Serialize;
 
-use crate::config::{NodeSettings, DEFAULT_REQUEST_TIMEOUT_SECS};
-use crate::error::{read_opt_nonempty, read_str, to_json, GrinError, GrinErrorCode, GrinFfiResult};
+use crate::config::{check_tip_height, NodeSettings, DEFAULT_REQUEST_TIMEOUT_SECS};
+use crate::error::{
+    json_u64, read_opt_nonempty, read_str, to_json, GrinError, GrinErrorCode, GrinFfiResult,
+};
 use crate::handle::get_session;
 
 #[derive(Serialize)]
@@ -76,15 +78,15 @@ pub extern "C" fn grin_wallet_get_balance(
             min_confirms,
         )?;
         to_json(&BalanceOut {
-            last_confirmed_height: info.last_confirmed_height,
-            minimum_confirmations: info.minimum_confirmations,
-            total: info.total,
-            amount_awaiting_finalization: info.amount_awaiting_finalization,
-            amount_awaiting_confirmation: info.amount_awaiting_confirmation,
-            amount_immature: info.amount_immature,
-            amount_currently_spendable: info.amount_currently_spendable,
-            amount_locked: info.amount_locked,
-            amount_reverted: info.amount_reverted,
+            last_confirmed_height: json_u64(info.last_confirmed_height),
+            minimum_confirmations: json_u64(info.minimum_confirmations),
+            total: json_u64(info.total),
+            amount_awaiting_finalization: json_u64(info.amount_awaiting_finalization),
+            amount_awaiting_confirmation: json_u64(info.amount_awaiting_confirmation),
+            amount_immature: json_u64(info.amount_immature),
+            amount_currently_spendable: json_u64(info.amount_currently_spendable),
+            amount_locked: json_u64(info.amount_locked),
+            amount_reverted: json_u64(info.amount_reverted),
             refreshed_from_node: refreshed,
         })
     }
@@ -117,6 +119,7 @@ pub unsafe extern "C" fn grin_node_test_connection(
             node_error("the node did not answer get_version (offline, wrong URL or wrong API secret)")
         })?;
         let (height, hash) = client.get_chain_tip().map_err(node_error)?;
+        check_tip_height(height).map_err(node_error)?;
         to_json(&NodeTestOut {
             node_version: version.node_version,
             block_header_version: version.block_header_version,

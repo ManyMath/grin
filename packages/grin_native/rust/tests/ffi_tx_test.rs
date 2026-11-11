@@ -15,12 +15,14 @@ use std::net::{TcpListener, TcpStream};
 use std::os::raw::c_char;
 use std::path::Path;
 use std::ptr;
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 use grin_core::global::{self, ChainTypes};
+use grin_ffi::test_support::refuse_next_post;
 use grin_ffi::*;
 use grin_wallet_libwallet::{
-    Slate, SlateVersion, SlatepackAddress, Slatepacker, SlatepackerArgs, VersionedSlate,
+    Slate, SlateState, SlateVersion, SlatepackAddress, Slatepacker, SlatepackerArgs, VersionedSlate,
 };
 use serde_json::{json, Value};
 
@@ -32,6 +34,7 @@ const INSUFFICIENT_FUNDS: i32 = GrinErrorCode::InsufficientFunds as i32;
 const SLATE: i32 = GrinErrorCode::Slate as i32;
 const TRANSACTION: i32 = GrinErrorCode::Transaction as i32;
 const NOT_FOUND: i32 = GrinErrorCode::NotFound as i32;
+const NODE: i32 = GrinErrorCode::Node as i32;
 const HTTP: i32 = GrinErrorCode::Http as i32;
 const INVALID_ADDRESS: i32 = GrinErrorCode::InvalidAddress as i32;
 
@@ -933,6 +936,16 @@ fn hostile_foreign_api(
     receiver: u64,
     edit: impl Fn(&mut Slate) + Send + 'static,
 ) -> (String, thread::JoinHandle<()>) {
+    hostile_foreign_api_with(receiver, edit, |_| {})
+}
+
+/// As `hostile_foreign_api`, and `edit_answer` changes the S2 (its v4 JSON)
+/// on the way back.
+fn hostile_foreign_api_with(
+    receiver: u64,
+    edit: impl Fn(&mut Slate) + Send + 'static,
+    edit_answer: impl Fn(&mut Value) + Send + 'static,
+) -> (String, thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let server = thread::spawn(move || {
@@ -950,7 +963,9 @@ fn hostile_foreign_api(
                     edit(&mut s1);
                     let s2 = receive(receiver, &armor_slate(&s1)).unwrap();
                     let d = decode(receiver, &armored(&s2)).unwrap();
-                    serde_json::from_str::<Value>(s(&d["slate_json"])).unwrap()
+                    let mut answer = serde_json::from_str::<Value>(s(&d["slate_json"])).unwrap();
+                    edit_answer(&mut answer);
+                    answer
                 }
                 other => panic!("unexpected method {other}"),
             };
@@ -1456,6 +1471,505 @@ fn confirmed_height_of_a_send_without_change() {
     let b = entry(&txs(bob, true), &slate_id);
     assert_eq!(b["confirmed"], true, "{b}");
     assert_eq!(u(&b["confirmed_height"]), mined_at, "{b}");
+    close(alice);
+    close(bob);
+}
+
+/// The slate JSON inside an armored Slatepack `handle` can read.
+fn slate_json(handle: u64, armored: &str) -> Value {
+    let d = decode(handle, armored).unwrap();
+    serde_json::from_str(s(&d["slate_json"])).unwrap()
+}
+
+/// Armors edited slate JSON plain, as a hostile party would.
+fn armor_json(j: &Value) -> String {
+    armor_slate(&Slate::deserialize_upgrade(&j.to_string()).unwrap())
+}
+
+fn entries(handle: u64, slate_id: &str) -> Vec<Value> {
+    txs(handle, false)["txs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|t| t["slate_id"] == slate_id)
+        .cloned()
+        .collect()
+}
+
+fn issue_invoice(handle: u64, amount: u64) -> Value {
+    call!(grin_tx_issue_invoice(
+        handle,
+        cs(&json!({"amount": amount}).to_string()).as_ptr(),
+    ))
+    .unwrap()
+}
+
+fn process_invoice(handle: u64, armored: &str) -> Result<Value, (i32, Value)> {
+    call!(grin_tx_process_invoice(
+        handle,
+        cs(armored).as_ptr(),
+        cs(&json!({"min_confirms": 1}).to_string()).as_ptr(),
+    ))
+}
+
+fn finalize_invoice(handle: u64, armored: &str, broadcast: bool) -> Result<Value, (i32, Value)> {
+    call!(grin_tx_finalize_invoice(
+        handle,
+        cs(armored).as_ptr(),
+        broadcast,
+        false,
+    ))
+}
+
+fn cancel(handle: u64, slate_id: &str) -> Result<Value, (i32, Value)> {
+    call!(grin_tx_cancel(handle, -1, cs(slate_id).as_ptr()))
+}
+
+/// A late-locked send has no log entry to compare the answer's payment
+/// proof with. An S2 whose proof names another key is refused before the
+/// inputs are selected, and the honest S2 still finalizes afterwards.
+#[test]
+fn late_locked_send_checks_the_payment_proof() {
+    let tmp = tempfile::tempdir().unwrap();
+    let chain = tmp.path().join("chain");
+    let alice = test_wallet(&chain, &tmp.path().join("alice"), "alice");
+    let bob = test_wallet(&chain, &tmp.path().join("bob"), "bob");
+    let carol = test_wallet(&chain, &tmp.path().join("carol"), "carol");
+    mine(alice, 5);
+    let bob_addr = address(bob);
+    let carol_key = SlatepackAddress::try_from(address(carol).as_str())
+        .unwrap()
+        .pub_key;
+    let spendable = u(&balance(alice, true)["amount_currently_spendable"]);
+
+    let s1 = init_send(
+        alice,
+        json!({
+            "amount": 10 * GRIN,
+            "min_confirms": 1,
+            "recipient_address": bob_addr,
+            "late_lock": true,
+        }),
+    )
+    .unwrap();
+    let slate_id = s(&s1["slate_id"]).to_owned();
+
+    // Carol answers in Bob's place, with her own key in the proof.
+    let mut swapped =
+        Slate::deserialize_upgrade(&slate_json(bob, &armored(&s1)).to_string()).unwrap();
+    swapped.payment_proof.as_mut().unwrap().receiver_address = carol_key;
+    let s2 = receive(carol, &armor_slate(&swapped)).unwrap();
+    let e = finalize(alice, &armored(&s2), true).unwrap_err();
+    assert_eq!(e.0, TRANSACTION, "{}", e.1);
+    assert_eq!(e.1["details"]["slate_id"], slate_id.as_str());
+    let b = balance(alice, false);
+    assert_eq!(u(&b["amount_locked"]), 0, "{b}");
+    assert_eq!(u(&b["amount_currently_spendable"]), spendable, "{b}");
+    assert!(entries(alice, &slate_id).is_empty());
+
+    let s2 = receive(bob, &armored(&s1)).unwrap();
+    let s3 = finalize(alice, &armored(&s2), false).unwrap();
+    assert_eq!(s3["state"], "S3");
+    let a = entry(&txs(alice, false), &slate_id);
+    assert_eq!(a["payment_proof"]["receiver_address"], bob_addr.as_str());
+    close(alice);
+    close(bob);
+    close(carol);
+}
+
+/// A slate id names one kind of transaction in a wallet. An answer in the
+/// other flow's state is refused by both finalize calls, and the real
+/// answer still goes through.
+#[test]
+fn finalize_refuses_a_slate_of_the_other_kind() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (alice, bob) = alice_and_bob(tmp.path(), 6);
+    let amount = 10 * GRIN;
+    let retyped = |holder: u64, pack: &str, state: SlateState| {
+        let mut slate = Slate::deserialize_upgrade(&slate_json(holder, pack).to_string()).unwrap();
+        slate.state = state;
+        armor_slate(&slate)
+    };
+
+    // A send Alice started, answered as if it were an invoice she issued.
+    let s1 = init_send(alice, json!({"amount": amount, "min_confirms": 1})).unwrap();
+    let send_id = s(&s1["slate_id"]).to_owned();
+    let s2 = armored(&receive(bob, &armored(&s1)).unwrap());
+    let e = finalize_invoice(alice, &retyped(alice, &s2, SlateState::Invoice2), false).unwrap_err();
+    assert_eq!(e.0, SLATE, "{}", e.1);
+    assert!(s(&e.1["message"]).contains("not an invoice"), "{}", e.1);
+    assert_eq!(e.1["details"]["slate_id"], send_id.as_str());
+    assert_eq!(entry(&txs(alice, false), &send_id)["slate_state"], "S1");
+    assert_eq!(finalize(alice, &s2, false).unwrap()["state"], "S3");
+
+    // The same for a late-locked send, which has a context and no entry.
+    let s1 = init_send(
+        alice,
+        json!({"amount": amount, "min_confirms": 1, "late_lock": true}),
+    )
+    .unwrap();
+    let late_id = s(&s1["slate_id"]).to_owned();
+    let s2 = armored(&receive(bob, &armored(&s1)).unwrap());
+    let e = finalize_invoice(alice, &retyped(alice, &s2, SlateState::Invoice2), false).unwrap_err();
+    assert_eq!(e.0, SLATE, "{}", e.1);
+    assert!(entries(alice, &late_id).is_empty());
+    assert_eq!(finalize(alice, &s2, false).unwrap()["state"], "S3");
+
+    // An invoice Bob issued, answered as if it were a send he started; and
+    // the payer handed its own payment back as the answer to a send.
+    let i1 = issue_invoice(bob, amount);
+    let invoice_id = s(&i1["slate_id"]).to_owned();
+    let i2 = armored(&process_invoice(alice, &armored(&i1)).unwrap());
+    let as_s2 = retyped(bob, &i2, SlateState::Standard2);
+    for wallet in [bob, alice] {
+        let e = finalize(wallet, &as_s2, false).unwrap_err();
+        assert_eq!(e.0, SLATE, "{}", e.1);
+        assert!(s(&e.1["message"]).contains("no send waiting"), "{}", e.1);
+        assert_eq!(e.1["details"]["slate_id"], invoice_id.as_str());
+    }
+    assert_eq!(entry(&txs(bob, false), &invoice_id)["slate_state"], "I1");
+    assert_eq!(finalize_invoice(bob, &i2, false).unwrap()["state"], "I3");
+
+    // An id neither wallet knows is still reported as not found.
+    let mut unknown = slate_json(bob, &i2);
+    unknown["id"] = json!("6f1c3e1a-0d4b-4c39-9b6e-6c1f6f0d2a11");
+    assert_eq!(
+        code_of(finalize_invoice(bob, &armor_json(&unknown), false)),
+        NOT_FOUND
+    );
+    close(alice);
+    close(bob);
+}
+
+/// The synchronous send leaves the wallet free while the recipient answers.
+/// If another call takes the selected inputs in that time, the send stops
+/// without locking or recording anything.
+#[test]
+fn synchronous_http_send_refuses_inputs_taken_during_the_round_trip() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (alice, bob) = alice_and_bob(tmp.path(), 5);
+    let before = balance(alice, true);
+    let spendable = u(&before["amount_currently_spendable"]);
+    let txs_before = txs(alice, false)["txs"].as_array().unwrap().len();
+
+    let competing = Arc::new(Mutex::new(None));
+    let seen = competing.clone();
+    let (url, server) = hostile_foreign_api(bob, move |_| {
+        // Runs while Alice waits for the answer: another send takes all of
+        // her outputs.
+        let all = init_send(
+            alice,
+            json!({
+                "amount": spendable,
+                "min_confirms": 1,
+                "amount_includes_fee": true,
+                "selection_strategy_is_all": true,
+            }),
+        )
+        .unwrap();
+        *seen.lock().unwrap() = Some(s(&all["slate_id"]).to_owned());
+    });
+    let e = send_http(
+        alice,
+        json!({
+            "amount": 10 * GRIN,
+            "min_confirms": 1,
+            "recipient_url_or_address": format!("{url}/v2/foreign"),
+        }),
+    )
+    .unwrap_err();
+    server.join().unwrap();
+    assert_eq!(e.0, TRANSACTION, "{}", e.1);
+    assert!(s(&e.1["message"]).contains("outputs changed"), "{}", e.1);
+    assert!(e.1["details"]["slate_id"].is_null(), "{}", e.1);
+
+    // Only the competing send is in the log, and cancelling it frees
+    // everything: the refused send holds nothing.
+    let competing = competing.lock().unwrap().clone().unwrap();
+    assert_eq!(
+        txs(alice, false)["txs"].as_array().unwrap().len(),
+        txs_before + 1
+    );
+    assert_eq!(entry(&txs(alice, false), &competing)["type"], "TxSent");
+    cancel(alice, &competing).unwrap();
+    let b = balance(alice, false);
+    assert_eq!(u(&b["amount_locked"]), 0, "{b}");
+    assert_eq!(u(&b["amount_currently_spendable"]), spendable, "{b}");
+    close(alice);
+    close(bob);
+}
+
+/// An answer that passes the checks but cannot be finalized (here a
+/// partial signature that does not verify) leaves nothing locked: the send
+/// is cancelled and the error says so.
+#[test]
+fn synchronous_http_send_releases_a_send_it_cannot_finalize() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (alice, bob) = alice_and_bob(tmp.path(), 5);
+    let spendable = u(&balance(alice, true)["amount_currently_spendable"]);
+    let break_signature = |j: &mut Value| {
+        for sig in j["sigs"].as_array_mut().unwrap() {
+            sig["nonce"] = sig["xs"].clone();
+        }
+    };
+    let attempt = |late_lock: bool| {
+        let (url, server) = hostile_foreign_api_with(bob, |_| {}, break_signature);
+        let e = send_http(
+            alice,
+            json!({
+                "amount": 10 * GRIN,
+                "min_confirms": 1,
+                "late_lock": late_lock,
+                "recipient_url_or_address": format!("{url}/v2/foreign"),
+            }),
+        )
+        .unwrap_err();
+        server.join().unwrap();
+        let b = balance(alice, false);
+        assert_eq!(u(&b["amount_locked"]), 0, "{b}");
+        assert_eq!(u(&b["amount_currently_spendable"]), spendable, "{b}");
+        e
+    };
+
+    let e = attempt(false);
+    assert_eq!(e.1["details"]["released"], true, "{}", e.1);
+    assert!(e.1["details"]["finalized"].is_null(), "{}", e.1);
+    let slate_id = s(&e.1["details"]["slate_id"]).to_owned();
+    let a = entry(&txs(alice, false), &slate_id);
+    assert_eq!(a["type"], "TxSentCancelled");
+    assert_eq!(a["has_stored_tx"], false);
+    // Nothing is left to cancel or repost.
+    assert_eq!(code_of(cancel(alice, &slate_id)), TRANSACTION);
+
+    // Late-locked, the failure comes after the inputs were locked too.
+    let e = attempt(true);
+    if let Some(id) = e.1["details"]["slate_id"].as_str() {
+        assert_eq!(e.1["details"]["released"], true, "{}", e.1);
+        assert_eq!(entry(&txs(alice, false), id)["type"], "TxSentCancelled");
+    }
+
+    // The wallet still sends afterwards.
+    let (url, server) = hostile_foreign_api(bob, |_| {});
+    let v = send_http(
+        alice,
+        json!({
+            "amount": 10 * GRIN,
+            "min_confirms": 1,
+            "recipient_url_or_address": format!("{url}/v2/foreign"),
+        }),
+    )
+    .unwrap();
+    server.join().unwrap();
+    assert_eq!(v["posted"], true);
+    close(alice);
+    close(bob);
+}
+
+/// A broadcast that fails after finalization reports a node error marked
+/// `finalized`: the transaction is stored and can be reposted.
+#[test]
+fn a_failed_broadcast_is_marked_finalized() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (alice, bob) = alice_and_bob(tmp.path(), 5);
+    let amount = 10 * GRIN;
+    let check = |e: (i32, Value)| {
+        assert_eq!(e.0, NODE, "{}", e.1);
+        assert_eq!(e.1["details"]["finalized"], true, "{}", e.1);
+        assert!(e.1["details"]["released"].is_null(), "{}", e.1);
+        assert!(
+            s(&e.1["message"]).contains("could not be broadcast"),
+            "{}",
+            e.1
+        );
+        let slate_id = s(&e.1["details"]["slate_id"]).to_owned();
+        let a = entry(&txs(alice, false), &slate_id);
+        assert_eq!(a["type"], "TxSent");
+        assert_eq!(a["has_stored_tx"], true);
+        assert_eq!(a["confirmed"], false);
+        slate_id
+    };
+
+    // Slatepack finalize.
+    let s1 = init_send(alice, json!({"amount": amount, "min_confirms": 1})).unwrap();
+    let s2 = receive(bob, &armored(&s1)).unwrap();
+    assert!(refuse_next_post(alice));
+    let slate_id = check(finalize(alice, &armored(&s2), true).unwrap_err());
+    assert_eq!(slate_id, s(&s1["slate_id"]));
+    let v = call!(grin_tx_repost(alice, -1, cs(&slate_id).as_ptr(), false)).unwrap();
+    assert_eq!(v, json!({"posted": true}));
+    assert_eq!(mine(alice, 1), 7);
+    assert_eq!(entry(&txs(alice, true), &slate_id)["confirmed"], true);
+
+    // Synchronous send.
+    let (url, server) = hostile_foreign_api(bob, |_| {});
+    assert!(refuse_next_post(alice));
+    let e = send_http(
+        alice,
+        json!({
+            "amount": amount,
+            "min_confirms": 1,
+            "recipient_url_or_address": format!("{url}/v2/foreign"),
+        }),
+    )
+    .unwrap_err();
+    server.join().unwrap();
+    let slate_id = check(e);
+    call!(grin_tx_repost(alice, -1, cs(&slate_id).as_ptr(), false)).unwrap();
+    assert_eq!(mine(alice, 1), 9);
+    assert_eq!(entry(&txs(alice, true), &slate_id)["confirmed"], true);
+    assert_eq!(
+        u(&balance(bob, true)["amount_currently_spendable"]),
+        2 * amount
+    );
+    close(alice);
+    close(bob);
+}
+
+/// An invoice is paid only when its slate id is new to the wallet (or is
+/// the wallet's own unpaid invoice), its kernel is plain and its values are
+/// in range. A refusal leaves the transaction that owns the id untouched.
+#[test]
+fn process_invoice_refuses_a_known_id_and_odd_invoices() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (alice, bob) = alice_and_bob(tmp.path(), 6);
+    let amount = 10 * GRIN;
+    let invoice_like = |edit: &dyn Fn(&mut Value)| {
+        let i1 = issue_invoice(bob, amount);
+        let mut j = slate_json(bob, &armored(&i1));
+        edit(&mut j);
+        armor_json(&j)
+    };
+    let untouched = |spendable: u64, locked: u64| {
+        let b = balance(alice, false);
+        assert_eq!(u(&b["amount_currently_spendable"]), spendable, "{b}");
+        assert_eq!(u(&b["amount_locked"]), locked, "{b}");
+    };
+
+    // The id of a send Alice has in flight.
+    let s1 = init_send(alice, json!({"amount": amount, "min_confirms": 1})).unwrap();
+    let send_id = s(&s1["slate_id"]).to_owned();
+    let b = balance(alice, true);
+    let (spendable, locked) = (u(&b["amount_currently_spendable"]), u(&b["amount_locked"]));
+    let e = process_invoice(alice, &invoice_like(&|j| j["id"] = json!(send_id))).unwrap_err();
+    assert_eq!(e.0, TRANSACTION, "{}", e.1);
+    assert!(
+        s(&e.1["message"]).contains("already has a transaction"),
+        "{}",
+        e.1
+    );
+    untouched(spendable, locked);
+    assert_eq!(entry(&txs(alice, false), &send_id)["slate_state"], "S1");
+    let s2 = receive(bob, &armored(&s1)).unwrap();
+    assert_eq!(
+        finalize(alice, &armored(&s2), false).unwrap()["state"],
+        "S3"
+    );
+
+    // The id of a late-locked send, which is a context and no entry.
+    let s1 = init_send(
+        alice,
+        json!({"amount": amount, "min_confirms": 1, "late_lock": true}),
+    )
+    .unwrap();
+    let late_id = s(&s1["slate_id"]).to_owned();
+    let e = process_invoice(alice, &invoice_like(&|j| j["id"] = json!(late_id))).unwrap_err();
+    assert_eq!(e.0, TRANSACTION, "{}", e.1);
+    untouched(spendable, locked);
+    assert!(entries(alice, &late_id).is_empty());
+    cancel(alice, &late_id).unwrap();
+
+    // A height-locked kernel, a TTL and an amount beyond the reported range.
+    let e = process_invoice(
+        alice,
+        &invoice_like(&|j| {
+            j["feat"] = json!(2);
+            j["feat_args"] = json!({"lock_hgt": 1_000_000});
+        }),
+    )
+    .unwrap_err();
+    assert_eq!(e.0, SLATE, "{}", e.1);
+    assert!(s(&e.1["message"]).contains("kernel features"), "{}", e.1);
+    let e = process_invoice(
+        alice,
+        &invoice_like(&|j| j["ttl"] = json!("9223372036854775808")),
+    )
+    .unwrap_err();
+    assert_eq!(e.0, SLATE, "{}", e.1);
+    assert!(s(&e.1["message"]).contains("TTL"), "{}", e.1);
+    untouched(spendable, locked);
+    let txs_before = txs(alice, false)["txs"].as_array().unwrap().len();
+
+    // The receive path applies the same bounds to an S1.
+    let s1 = init_send(
+        bob,
+        json!({"amount": 1, "min_confirms": 1, "late_lock": true}),
+    );
+    assert_eq!(code_of(s1), INSUFFICIENT_FUNDS);
+    let s1 = init_send(alice, json!({"amount": amount, "min_confirms": 1})).unwrap();
+    let foreign_id = s(&s1["slate_id"]).to_owned();
+    for (key, what) in [("amt", "amount"), ("ttl", "TTL")] {
+        let mut j = slate_json(alice, &armored(&s1));
+        j[key] = json!("9223372036854775808");
+        let e = receive(bob, &armor_json(&j)).unwrap_err();
+        assert_eq!(e.0, SLATE, "{key}: {}", e.1);
+        assert!(s(&e.1["message"]).contains(what), "{key}: {}", e.1);
+        assert!(entries(bob, &foreign_id).is_empty());
+    }
+    cancel(alice, &foreign_id).unwrap();
+    assert_eq!(
+        txs(alice, false)["txs"].as_array().unwrap().len(),
+        txs_before + 1
+    );
+
+    // Paying the wallet's own invoice is still allowed.
+    let i1 = issue_invoice(alice, amount);
+    let own_id = s(&i1["slate_id"]).to_owned();
+    let i2 = process_invoice(alice, &armored(&i1)).unwrap();
+    assert_eq!(i2["state"], "I2");
+    // Once paid, the same invoice is not paid again.
+    assert_eq!(code_of(process_invoice(alice, &armored(&i1))), TRANSACTION);
+    let i3 = finalize_invoice(alice, &armored(&i2), true).unwrap();
+    assert_eq!(i3["posted"], true);
+    let kinds: Vec<String> = entries(alice, &own_id)
+        .iter()
+        .map(|t| s(&t["type"]).to_owned())
+        .collect();
+    assert_eq!(kinds.len(), 2, "{kinds:?}");
+    assert!(kinds.contains(&"TxReceived".to_owned()), "{kinds:?}");
+    assert!(kinds.contains(&"TxSent".to_owned()), "{kinds:?}");
+    close(alice);
+    close(bob);
+}
+
+/// A late-locked send is cancelled by slate id although the log has no
+/// entry for it. Its answer can then no longer be finalized.
+#[test]
+fn cancel_a_late_locked_send() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (alice, bob) = alice_and_bob(tmp.path(), 5);
+    let spendable = u(&balance(alice, true)["amount_currently_spendable"]);
+    let s1 = init_send(
+        alice,
+        json!({"amount": 10 * GRIN, "min_confirms": 1, "late_lock": true}),
+    )
+    .unwrap();
+    let slate_id = s(&s1["slate_id"]).to_owned();
+    let s2 = receive(bob, &armored(&s1)).unwrap();
+    assert!(entries(alice, &slate_id).is_empty());
+
+    assert_eq!(
+        cancel(alice, &slate_id).unwrap(),
+        json!({"cancelled": true})
+    );
+    let e = finalize(alice, &armored(&s2), true).unwrap_err();
+    assert_eq!(e.0, NOT_FOUND, "{}", e.1);
+    assert_eq!(e.1["details"]["slate_id"], slate_id.as_str());
+    assert!(entries(alice, &slate_id).is_empty());
+    let b = balance(alice, false);
+    assert_eq!(u(&b["amount_locked"]), 0, "{b}");
+    assert_eq!(u(&b["amount_currently_spendable"]), spendable, "{b}");
+    // Gone, so a second cancel finds nothing.
+    assert_eq!(code_of(cancel(alice, &slate_id)), NOT_FOUND);
     close(alice);
     close(bob);
 }

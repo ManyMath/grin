@@ -14,7 +14,7 @@ use grin_wallet_impls::HTTPNodeClient;
 use grin_wallet_libwallet::{Error as LibwalletError, NodeClient, NodeVersionInfo};
 use serde::Deserialize;
 
-use crate::error::{GrinError, GrinErrorCode};
+use crate::error::{GrinError, GrinErrorCode, MAX_HEIGHT};
 
 /// Request timeout used when the caller does not give one.
 pub const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
@@ -362,6 +362,18 @@ pub enum FfiNodeClient {
     Local(crate::test_support::TestNodeClient),
 }
 
+/// Refuses a chain height no real chain can have. libwallet adds to the tip
+/// height unchecked (TTL cutoffs, scan ranges), and the height is reported
+/// as a JSON integer.
+pub(crate) fn check_tip_height(height: u64) -> Result<(), LibwalletError> {
+    if height > MAX_HEIGHT {
+        return Err(LibwalletError::ClientCallback(format!(
+            "the node reported an impossible chain height ({height})"
+        )));
+    }
+    Ok(())
+}
+
 macro_rules! delegate {
     ($self:ident, $c:ident => $e:expr) => {
         match $self {
@@ -399,7 +411,9 @@ impl NodeClient for FfiNodeClient {
     }
 
     fn get_chain_tip(&self) -> Result<(u64, String), LibwalletError> {
-        delegate!(self, c => c.get_chain_tip())
+        let (height, hash) = delegate!(self, c => c.get_chain_tip())?;
+        check_tip_height(height)?;
+        Ok((height, hash))
     }
 
     fn get_kernel(
@@ -447,6 +461,21 @@ impl NodeClient for FfiNodeClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tip_height_has_to_fit_a_signed_word() {
+        assert!(check_tip_height(0).is_ok());
+        assert!(check_tip_height(MAX_HEIGHT).is_ok());
+        for height in [MAX_HEIGHT + 1, u64::MAX] {
+            let e = GrinError::from(check_tip_height(height).unwrap_err());
+            assert_eq!(e.code, GrinErrorCode::Node);
+            assert!(
+                e.message.contains("impossible chain height"),
+                "{}",
+                e.message
+            );
+        }
+    }
 
     #[test]
     fn network_mapping() {

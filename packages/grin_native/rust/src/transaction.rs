@@ -23,8 +23,8 @@ use grin_util::ToHex;
 use grin_wallet_impls::{HttpSlateSender, SlateSender};
 use grin_wallet_libwallet::api_impl::{foreign, owner};
 use grin_wallet_libwallet::{
-    Error as LibwalletError, InitTxArgs, IssueInvoiceTxArgs, OutputStatus, Slate, SlateState,
-    SlatepackAddress, StoredProofInfo, TxLogEntry, TxLogEntryType, WalletBackend,
+    Context, Error as LibwalletError, InitTxArgs, IssueInvoiceTxArgs, OutputStatus, Slate,
+    SlateState, SlatepackAddress, StoredProofInfo, TxLogEntry, TxLogEntryType, WalletBackend,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -33,7 +33,8 @@ use uuid::Uuid;
 use crate::address::parse_address;
 use crate::config::FfiNodeClient;
 use crate::error::{
-    read_opt_nonempty, read_opt_str, read_str, to_json, GrinError, GrinErrorCode, GrinFfiResult,
+    json_u64, read_opt_nonempty, read_opt_str, read_str, to_json, GrinError, GrinErrorCode,
+    GrinFfiResult, MAX_HEIGHT,
 };
 use crate::handle::{get_session, WalletSession};
 use crate::sidecar::{Sidecar, TxSidecarEntry};
@@ -109,13 +110,227 @@ fn parse_args<T: DeserializeOwned>(ptr: *const c_char, name: &str) -> Result<T, 
     Ok(serde_json::from_str(read_str(&ptr, name)?)?)
 }
 
-/// Adds `{"slate_id"}` to an error raised after the wallet recorded the
-/// transaction, so the caller can still cancel or repost it.
-fn with_slate_id(mut e: GrinError, slate_id: &Uuid) -> GrinError {
-    if e.details.is_none() {
-        e.details = Some(serde_json::json!({ "slate_id": slate_id.to_string() }));
+/// Adds the keys of `extra` to an error's details, keeping any key that is
+/// already there.
+fn add_details(mut e: GrinError, extra: serde_json::Value) -> GrinError {
+    use serde_json::Value;
+    match e.details.as_mut() {
+        Some(Value::Object(have)) => {
+            if let Value::Object(more) = extra {
+                for (k, v) in more {
+                    have.entry(k).or_insert(v);
+                }
+            }
+        }
+        Some(_) => {}
+        None => e.details = Some(extra),
     }
     e
+}
+
+/// Adds `{"slate_id"}` to an error raised after the wallet recorded the
+/// transaction, so the caller can still cancel or repost it.
+fn with_slate_id(e: GrinError, slate_id: &Uuid) -> GrinError {
+    add_details(e, serde_json::json!({ "slate_id": slate_id.to_string() }))
+}
+
+/// This wallet's log entries for a slate id.
+fn entries_for_slate(w: &mut Backend, slate_id: &Uuid) -> Result<Vec<TxLogEntry>, GrinError> {
+    Ok(w.tx_log_iter()?
+        .filter_map(Result::ok)
+        .filter(|t| t.tx_slate_id.as_ref() == Some(slate_id))
+        .collect())
+}
+
+/// The transaction context stored for a slate id, if there is one.
+fn stored_context(w: &mut Backend, mask: Option<&SecretKey>, slate_id: &Uuid) -> Option<Context> {
+    w.get_private_context(mask, slate_id.as_bytes()).ok()
+}
+
+/// Deletes the context of a transaction that recorded nothing else. Best
+/// effort: a context left behind holds no funds.
+fn forget_context(w: &mut Backend, mask: Option<&SecretKey>, slate_id: &Uuid) {
+    let done = w.batch(mask).and_then(|mut batch| {
+        batch.delete_private_context(slate_id.as_bytes())?;
+        batch.commit()
+    });
+    if let Err(e) = done {
+        log::warn!("could not delete an unused transaction context: {e}");
+    }
+}
+
+fn is_invoice_state(state: &Option<SlateState>) -> bool {
+    matches!(
+        state,
+        Some(SlateState::Invoice1 | SlateState::Invoice2 | SlateState::Invoice3)
+    )
+}
+
+/// Refuses an S2 whose slate id this wallet uses for something other than a
+/// send it started. libwallet finds the context by slate id alone, so
+/// without this an S2 could be finalized against the context of an invoice.
+/// A send has a TxSent entry, or (late-locked) no entry and a context that
+/// still holds the send arguments. An id the wallet knows nothing about
+/// passes; libwallet reports that one as not found.
+fn check_send_role(
+    w: &mut Backend,
+    mask: Option<&SecretKey>,
+    slate_id: &Uuid,
+) -> Result<(), GrinError> {
+    let wrong = || {
+        slate_error("this wallet has no send waiting for this slate; its id belongs to another kind of transaction")
+    };
+    let entries = entries_for_slate(w, slate_id)?;
+    if let Some(sent) = entries.iter().find(|t| t.tx_type == TxLogEntryType::TxSent) {
+        return if is_invoice_state(&sent.tx_slate_state) {
+            Err(wrong())
+        } else {
+            Ok(())
+        };
+    }
+    match stored_context(w, mask, slate_id) {
+        Some(context) if context.late_lock_args.is_none() => Err(wrong()),
+        _ => Ok(()),
+    }
+}
+
+/// Refuses an I2 whose slate id is not an invoice this wallet issued (a
+/// TxReceived entry in an invoice state). The invoice path finalizes
+/// without a payment proof check, so a send's context must never reach it.
+/// An id the wallet knows nothing about passes; libwallet reports that one
+/// as not found.
+fn check_invoice_role(
+    w: &mut Backend,
+    mask: Option<&SecretKey>,
+    slate_id: &Uuid,
+) -> Result<(), GrinError> {
+    let entries = entries_for_slate(w, slate_id)?;
+    if entries
+        .iter()
+        .any(|t| t.tx_type == TxLogEntryType::TxReceived && is_invoice_state(&t.tx_slate_state))
+    {
+        return Ok(());
+    }
+    if stored_context(w, mask, slate_id).is_some() {
+        return Err(slate_error(
+            "this slate is not an invoice this wallet issued; its id belongs to another kind of transaction",
+        ));
+    }
+    Ok(())
+}
+
+/// Checks that this wallet can pay an invoice with this slate id: it must
+/// not know the id at all, or know it only as its own unpaid invoice (paying
+/// itself). libwallet would otherwise merge the payment into whatever
+/// context the id already has. Returns whether the invoice is its own.
+fn check_payable(
+    w: &mut Backend,
+    mask: Option<&SecretKey>,
+    slate_id: &Uuid,
+) -> Result<bool, GrinError> {
+    let taken = || {
+        GrinError::new(
+            GrinErrorCode::Transaction,
+            "this wallet already has a transaction with this slate id",
+        )
+    };
+    let entries = entries_for_slate(w, slate_id)?;
+    if entries.is_empty() {
+        return if stored_context(w, mask, slate_id).is_some() {
+            Err(taken())
+        } else {
+            Ok(false)
+        };
+    }
+    let own_unpaid = entries.iter().all(|t| {
+        t.tx_type == TxLogEntryType::TxReceived
+            && t.tx_slate_state == Some(SlateState::Invoice1)
+            && !t.confirmed
+    });
+    if own_unpaid {
+        Ok(true)
+    } else {
+        Err(taken())
+    }
+}
+
+/// Refuses to lock a send whose selected inputs are no longer free. The
+/// synchronous send selects its inputs, releases the wallet for the round
+/// trip and locks afterwards, and libwallet locks whatever the context
+/// names without looking at the outputs again.
+fn check_inputs_free(
+    w: &mut Backend,
+    mask: Option<&SecretKey>,
+    slate_id: &Uuid,
+) -> Result<(), GrinError> {
+    let context = w.get_private_context(mask, slate_id.as_bytes())?;
+    let free = context.input_ids.iter().all(|(id, mmr_index, _)| {
+        w.get(id, mmr_index)
+            .is_ok_and(|o| matches!(o.status, OutputStatus::Unspent | OutputStatus::Unconfirmed))
+    });
+    if free {
+        Ok(())
+    } else {
+        Err(GrinError::new(
+            GrinErrorCode::Transaction,
+            "the wallet's outputs changed while the recipient was answering; nothing was locked",
+        ))
+    }
+}
+
+/// Gives up a synchronous send whose finalization failed. The recipient's
+/// answer cannot be asked for again, so keeping the inputs locked would
+/// only leave the caller a transaction to cancel. Nothing was broadcast and
+/// the wallet lock is held, so the send is cancelled from stored state:
+/// the error then carries `{"slate_id", "released": true}`. If the cancel
+/// fails the inputs stay locked and the error carries the slate id alone.
+/// A late-locked send that failed before locking has no entry; its context
+/// is deleted and the error carries no slate id.
+fn release_send(
+    w: &mut Backend,
+    mask: Option<&SecretKey>,
+    slate_id: &Uuid,
+    e: GrinError,
+) -> GrinError {
+    let sent = match entries_for_slate(w, slate_id) {
+        Ok(entries) => entries
+            .into_iter()
+            .find(|t| t.tx_type == TxLogEntryType::TxSent),
+        Err(_) => return with_slate_id(e, slate_id),
+    };
+    let Some(sent) = sent else {
+        forget_context(w, mask, slate_id);
+        return e;
+    };
+    match owner::cancel_tx_stored(w, mask, Some(sent.id), None) {
+        Ok(()) => add_details(
+            e,
+            serde_json::json!({ "slate_id": slate_id.to_string(), "released": true }),
+        ),
+        Err(cancel) => {
+            log::warn!("could not release a failed send: {cancel}");
+            with_slate_id(e, slate_id)
+        }
+    }
+}
+
+/// Refuses a slate from a counterparty whose amount or TTL is beyond what
+/// this API reports (2^63 - 1): the history would otherwise hold a value
+/// its JSON readers cannot represent.
+fn check_foreign_bounds(slate: &Slate) -> Result<(), GrinError> {
+    if slate.amount > MAX_AMOUNT {
+        return Err(slate_error(format!(
+            "the slate's amount {} is out of range",
+            slate.amount
+        )));
+    }
+    if slate.ttl_cutoff_height > MAX_HEIGHT {
+        return Err(slate_error(format!(
+            "the slate's TTL cutoff height {} is out of range",
+            slate.ttl_cutoff_height
+        )));
+    }
+    Ok(())
 }
 
 /// Best-effort sidecar update.
@@ -226,18 +441,20 @@ fn amount_for_slate(w: &mut Backend, slate_id: &Uuid) -> Result<u64, GrinError> 
 }
 
 /// Broadcasts a finalized slate through the wallet's node client, with the
-/// wallet mutex released.
+/// wallet mutex released. A failure carries `{"slate_id", "finalized":
+/// true}`: the transaction is complete and stored, and can be reposted.
 fn post_slate(session: &WalletSession, slate: &Slate, fluff: bool) -> Result<(), GrinError> {
     let tx = slate.tx_or_err()?;
     let client = session.node_client()?;
     owner::post_tx(&client, tx, fluff).map_err(|e| {
-        with_slate_id(
-            GrinError::new(
-                GrinErrorCode::Node,
-                format!("the transaction is finalized but could not be broadcast: {e}"),
-            ),
-            &slate.id,
+        GrinError::new(
+            GrinErrorCode::Node,
+            format!("the transaction is finalized but could not be broadcast: {e}"),
         )
+        .with_details(serde_json::json!({
+            "slate_id": slate.id.to_string(),
+            "finalized": true,
+        }))
     })
 }
 
@@ -636,18 +853,18 @@ fn tx_out(
         confirmation_ts: t.confirmation_ts.map(|ts| ts.to_rfc3339()),
         confirmed: t.confirmed,
         confirmed_height: if t.confirmed {
-            heights.get(&t.id).copied()
+            heights.get(&t.id).copied().map(json_u64)
         } else {
             None
         },
         num_inputs: t.num_inputs,
         num_outputs: t.num_outputs,
-        amount_credited: t.amount_credited,
-        amount_debited: t.amount_debited,
-        fee: t.fee.map(|f| f.fee()),
-        ttl_cutoff_height: t.ttl_cutoff_height,
+        amount_credited: json_u64(t.amount_credited),
+        amount_debited: json_u64(t.amount_debited),
+        fee: t.fee.map(|f| json_u64(f.fee())),
+        ttl_cutoff_height: t.ttl_cutoff_height.map(json_u64),
         kernel_excess: t.kernel_excess.map(|c| c.0.to_hex()),
-        kernel_lookup_min_height: t.kernel_lookup_min_height,
+        kernel_lookup_min_height: t.kernel_lookup_min_height.map(json_u64),
         has_stored_tx,
         payment_proof,
         counterparty_address,
@@ -871,35 +1088,57 @@ pub unsafe extern "C" fn grin_tx_send_http(handle: u64, args_json: *const c_char
         let s1 = with_backend(&session, |w, mask| {
             Ok(owner::init_send_tx(w, mask, tx_args, false)?)
         })?;
-        // No wallet lock during the round trip. Nothing is locked yet, so a
-        // failed send leaves only an unused transaction context behind.
-        let s2 = sender.send_tx(&s1, false).map_err(|e| {
-            GrinError::new(
-                GrinErrorCode::Http,
-                format!("the recipient wallet did not take the transaction: {e}"),
-            )
-        })?;
-        if s2.id != s1.id || s2.state != SlateState::Standard2 {
-            return Err(GrinError::new(
-                GrinErrorCode::Http,
-                format!(
-                    "the recipient wallet answered with an unexpected slate ({} {})",
-                    s2.id,
-                    state_name(&s2.state)
-                ),
-            ));
-        }
-        // Still nothing locked: an S2 that changed the kernel, the TTL or the
-        // payment proof is refused here and leaves no transaction behind.
-        check_returned_slate(&s2, Some(s1.ttl_cutoff_height))?;
-        check_returned_proof(&s1, &s2)?;
+        // No wallet lock during the round trip, and nothing is locked yet.
+        // An S2 that changed the kernel, the TTL or the payment proof is
+        // refused here.
+        let exchanged = (|| {
+            let s2 = sender.send_tx(&s1, false).map_err(|e| {
+                GrinError::new(
+                    GrinErrorCode::Http,
+                    format!("the recipient wallet did not take the transaction: {e}"),
+                )
+            })?;
+            if s2.id != s1.id || s2.state != SlateState::Standard2 {
+                return Err(GrinError::new(
+                    GrinErrorCode::Http,
+                    format!(
+                        "the recipient wallet answered with an unexpected slate ({} {})",
+                        s2.id,
+                        state_name(&s2.state)
+                    ),
+                ));
+            }
+            check_returned_slate(&s2, Some(s1.ttl_cutoff_height))?;
+            check_returned_proof(&s1, &s2)?;
+            Ok(s2)
+        })();
+        let s2 = match exchanged {
+            Ok(s2) => s2,
+            Err(e) => {
+                // The send recorded only its context so far.
+                let _ = with_backend(&session, |w, mask| {
+                    forget_context(w, mask, &s1.id);
+                    Ok(())
+                });
+                return Err(e);
+            }
+        };
         let s3 = with_backend(&session, |w, mask| {
             if !late_lock {
-                owner::tx_lock_outputs(w, mask, &s2)?;
+                // The wallet was free during the round trip, so another
+                // call may have taken the inputs this send selected.
+                let locked = match check_inputs_free(w, mask, &s1.id) {
+                    Ok(()) => owner::tx_lock_outputs(w, mask, &s2).map_err(GrinError::from),
+                    Err(e) => Err(e),
+                };
+                if let Err(e) = locked {
+                    // Locking is one database batch: nothing was recorded.
+                    forget_context(w, mask, &s1.id);
+                    return Err(e);
+                }
             }
-            Ok(owner::finalize_tx(w, mask, &s2)?)
-        })
-        .map_err(|e| with_slate_id(e, &s1.id))?;
+            owner::finalize_tx(w, mask, &s2).map_err(|e| release_send(w, mask, &s1.id, e.into()))
+        })?;
         remember(&session, s3.id, None, Some(counterparty));
         let post = args.post.unwrap_or(true);
         if post {
@@ -935,6 +1174,7 @@ pub unsafe extern "C" fn grin_tx_receive_slatepack(
         let decoded = decode_with_wallet(&session, armored, ADDRESS_INDEX)?;
         let s1 = &decoded.slate;
         require_state(s1, SlateState::Standard1)?;
+        check_foreign_bounds(s1)?;
         let s2 = with_backend(&session, |w, mask| {
             Ok(foreign::receive_tx(w, mask, s1, None, false)?)
         })?;
@@ -976,6 +1216,8 @@ pub unsafe extern "C" fn grin_tx_finalize_slatepack(
         // every failure from here on carries the slate id.
         let slate_id = decoded.slate.id;
         let (s3, amount) = with_backend(&session, |w, mask| {
+            check_send_role(w, mask, &slate_id)?;
+            check_foreign_bounds(&decoded.slate)?;
             let issued_ttl = issued_ttl_for_slate(w, &slate_id)?;
             check_returned_slate(&decoded.slate, issued_ttl)?;
             let s3 = owner::finalize_tx(w, mask, &decoded.slate)?;
@@ -1119,12 +1361,29 @@ pub unsafe extern "C" fn grin_tx_process_invoice(
             ttl_blocks: args.ttl_blocks,
             ..Default::default()
         };
+        check_foreign_bounds(i1)?;
+        // A HeightLocked or NRD kernel would hold the payment back until a
+        // height the invoicer picked.
+        if i1.kernel_features != 0 || i1.kernel_features_args.is_some() {
+            return Err(slate_error(format!(
+                "the invoice asks for kernel features {}; only a plain kernel is paid",
+                i1.kernel_features
+            )));
+        }
         let i2 = with_backend(&session, |w, mask| {
+            let own_invoice = check_payable(w, mask, &i1.id)?;
             let i2 = owner::process_invoice_tx(w, mask, i1, tx_args, false)?;
-            // process_invoice_tx selects inputs but does not lock them. It
-            // has saved the transaction by now, so a failure from here on
-            // carries the slate id.
-            owner::tx_lock_outputs(w, mask, &i2).map_err(|e| with_slate_id(e.into(), &i2.id))?;
+            // process_invoice_tx selects inputs and saves the context but
+            // does not lock. Locking is one database batch, so a failure
+            // recorded nothing: the context goes too, unless it is also
+            // the context of this wallet's own invoice.
+            if let Err(e) = owner::tx_lock_outputs(w, mask, &i2) {
+                if own_invoice {
+                    return Err(with_slate_id(e.into(), &i2.id));
+                }
+                forget_context(w, mask, &i2.id);
+                return Err(e.into());
+            }
             Ok(i2)
         })?;
         let counterparty = decoded
@@ -1172,6 +1431,8 @@ pub unsafe extern "C" fn grin_tx_finalize_invoice(
             // The payer may set a TTL on an invoice, so only the kernel is
             // checked. Broadcasting happens below, with the wallet mutex
             // released.
+            check_invoice_role(w, mask, &slate_id)?;
+            check_foreign_bounds(&decoded.slate)?;
             check_returned_slate(&decoded.slate, None)?;
             let i3 = foreign::finalize_tx(w, mask, &decoded.slate, false)?;
             let amount = amount_for_slate(w, &i3.id)?;
@@ -1289,6 +1550,31 @@ pub unsafe extern "C" fn grin_tx_cancel(
         let session = get_session(handle)?;
         session.require_network()?;
         let (tx_id, slate_id) = tx_selector(tx_id, slate_id)?;
+        // A late-locked send has no log entry until it is finalized, only a
+        // context that holds its arguments. Cancelling it deletes that
+        // context, after which its S2 can no longer be finalized.
+        if let (None, Some(id)) = (tx_id, slate_id.as_ref()) {
+            let dropped = with_backend(&session, |w, mask| {
+                if !entries_for_slate(w, id)?.is_empty() {
+                    return Ok(false);
+                }
+                match stored_context(w, mask, id) {
+                    Some(context) if context.late_lock_args.is_some() => {
+                        let mut batch = w.batch(mask)?;
+                        batch.delete_private_context(id.as_bytes())?;
+                        batch.commit()?;
+                        Ok(true)
+                    }
+                    _ => Ok(false),
+                }
+            })?;
+            if dropped {
+                if let Err(e) = Sidecar::remove(&session.data_dir, id) {
+                    log::warn!("Sidecar write failed: {e}");
+                }
+                return to_json(&serde_json::json!({ "cancelled": true }));
+            }
+        }
         let mask = session.mask();
         owner::cancel_tx(session.wallet.clone(), mask.as_ref(), &None, tx_id, slate_id)?;
         to_json(&serde_json::json!({ "cancelled": true }))

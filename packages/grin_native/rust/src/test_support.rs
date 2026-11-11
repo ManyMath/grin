@@ -122,6 +122,7 @@ enum ProxyCommand {
 pub struct TestNodeClient {
     inner: LocalWalletClient,
     last_failure: LastProxyFailure,
+    refuse_next_post: Arc<AtomicBool>,
 }
 
 impl TestNodeClient {
@@ -179,6 +180,11 @@ impl NodeClient for TestNodeClient {
     }
 
     fn post_tx(&self, tx: &Transaction, fluff: bool) -> Result<(), LibwalletError> {
+        if self.refuse_next_post.swap(false, Ordering::SeqCst) {
+            return Err(LibwalletError::ClientCallback(
+                "the test node refused the transaction".to_owned(),
+            ));
+        }
         let tx = tx.clone();
         self.bounded("post_tx", move |c| c.post_tx(&tx, fluff))
     }
@@ -265,6 +271,8 @@ pub struct TestChain {
     commands: mpsc::Sender<ProxyCommand>,
     running: Arc<AtomicBool>,
     last_failure: LastProxyFailure,
+    /// Makes the next broadcast on this chain fail without reaching it.
+    refuse_next_post: Arc<AtomicBool>,
     /// Serializes block production so two callers never build on the same tip.
     mine_lock: Mutex<()>,
 }
@@ -274,6 +282,7 @@ impl TestChain {
         TestNodeClient {
             inner: (self.make_client)(client_id),
             last_failure: self.last_failure.clone(),
+            refuse_next_post: self.refuse_next_post.clone(),
         }
     }
 
@@ -423,6 +432,7 @@ fn chain_for(chain_dir: &str) -> Result<Arc<TestChain>, GrinError> {
         commands,
         running,
         last_failure,
+        refuse_next_post: Arc::new(AtomicBool::new(false)),
         mine_lock: Mutex::new(()),
     });
     chains.insert(key, test_chain.clone());
@@ -571,6 +581,18 @@ pub extern "C" fn grin_test_panic() -> GrinFfiResult {
     ffi_guard! {
         panic!("grin_test_panic")
     }
+}
+
+/// Makes the next broadcast on `handle`'s test chain fail with a node
+/// error, as an unreachable or unwilling node would. The transaction never
+/// reaches the chain. Returns false when `handle` is not a test wallet.
+/// Plain Rust, not exported.
+pub fn refuse_next_post(handle: u64) -> bool {
+    let Some(chain) = lookup_session(handle).and_then(|s| s.test_chain.clone()) else {
+        return false;
+    };
+    chain.refuse_next_post.store(true, Ordering::SeqCst);
+    true
 }
 
 /// Clones a registered session's `Arc`, standing in for an in-flight call

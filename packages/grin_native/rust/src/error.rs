@@ -132,7 +132,10 @@ impl From<LibwalletError> for GrinError {
                 available, needed, ..
             } => {
                 return GrinError::new(C::InsufficientFunds, message).with_details(
-                    serde_json::json!({ "required": needed, "available": available }),
+                    serde_json::json!({
+                        "required": json_u64(*needed),
+                        "available": json_u64(*available),
+                    }),
                 );
             }
             LibwalletError::InvalidAmount
@@ -340,6 +343,21 @@ impl GrinFfiResult {
             error,
         }
     }
+}
+
+/// Largest integer this API puts in JSON: 2^63 - 1. JSON readers that keep
+/// integers in a signed 64-bit word (Dart among them) read anything larger
+/// as a float and lose its low bits.
+pub(crate) const JSON_INT_MAX: u64 = i64::MAX as u64;
+
+/// Largest block height accepted from a counterparty or a node.
+pub(crate) const MAX_HEIGHT: u64 = JSON_INT_MAX;
+
+/// A u64 for JSON output, held at `JSON_INT_MAX`. Amounts and heights this
+/// wallet creates or accepts are checked against that limit on the way in;
+/// this covers what is computed or already stored.
+pub(crate) fn json_u64(v: u64) -> u64 {
+    v.min(JSON_INT_MAX)
 }
 
 /// Serializes a value into the JSON payload of a successful result.
@@ -569,6 +587,20 @@ mod tests {
         let d = e.details.unwrap();
         assert_eq!(d["required"], 9);
         assert_eq!(d["available"], 5);
+    }
+
+    #[test]
+    fn not_enough_funds_details_stay_within_a_signed_word() {
+        let e: GrinError = LibwalletError::NotEnoughFunds {
+            available: u64::MAX,
+            available_disp: String::new(),
+            needed: JSON_INT_MAX + 1,
+            needed_disp: String::new(),
+        }
+        .into();
+        let d = e.details.unwrap();
+        assert_eq!(d["required"], i64::MAX);
+        assert_eq!(d["available"], i64::MAX);
     }
 
     #[test]

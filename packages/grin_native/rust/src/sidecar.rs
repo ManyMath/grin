@@ -92,6 +92,17 @@ impl Sidecar {
         entries.entry(slate_id).or_default().merge(update);
         write_file(data_dir, entries)
     }
+
+    /// Drops the entry for `slate_id`, if there is one, with the same
+    /// rules as `upsert`. A missing file or entry writes nothing.
+    pub fn remove(data_dir: &Path, slate_id: &Uuid) -> io::Result<()> {
+        let _guard = WRITE_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut entries = read_file(data_dir)?;
+        if entries.remove(slate_id).is_none() {
+            return Ok(());
+        }
+        write_file(data_dir, entries)
+    }
 }
 
 fn path_of(data_dir: &Path) -> PathBuf {
@@ -178,6 +189,37 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn remove_drops_one_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        // Nothing to remove, so no file is written.
+        Sidecar::remove(dir.path(), &id).unwrap();
+        assert!(!path_of(dir.path()).exists());
+
+        for slate_id in [id, other] {
+            Sidecar::upsert(
+                dir.path(),
+                slate_id,
+                TxSidecarEntry {
+                    armored_slatepack: Some("BEGINSLATEPACK. one. ENDSLATEPACK.".into()),
+                    counterparty_address: None,
+                },
+            )
+            .unwrap();
+        }
+        Sidecar::remove(dir.path(), &id).unwrap();
+        let s = Sidecar::load(dir.path());
+        assert_eq!(s.len(), 1);
+        assert!(s.get(&id).is_none());
+        assert!(s.get(&other).is_some());
+        assert!(!dir.path().join(SIDECAR_TMP).exists());
+        // Removing it again changes nothing.
+        Sidecar::remove(dir.path(), &id).unwrap();
+        assert_eq!(Sidecar::load(dir.path()).len(), 1);
     }
 
     #[test]
